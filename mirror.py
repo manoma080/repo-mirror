@@ -387,8 +387,16 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                       else src.pages(asset_url))
             if not isinstance(assets, list):
                 raise ValueError('release assets response is not an array')
-            manifest = sorted([[a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
-                               for a in assets], key=lambda a: str(a[0]))
+            manifest = []
+            for a in assets:
+                entry = [a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
+                published = a.get('digest')
+                if published is not None:
+                    if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                        published = published.lower()
+                    entry.append(published)
+                manifest.append(entry)
+            manifest.sort(key=lambda a: str(a[0]))
             digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
             return assets, digest
         source_assets, digest = fetch_source_assets()
@@ -403,7 +411,47 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             except (ValueError, UnicodeError, TypeError):
                 raise ReleaseRecoveryError('marker') from None
             if digest != expected_digest:
-                raise ReleaseRecoveryError('changed')
+                legacy_manifest = [[a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
+                                   for a in source_assets]
+                legacy_manifest.sort(key=lambda a: str(a[0]))
+                legacy_digest = hashlib.sha256(json.dumps(legacy_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+                if legacy_digest != expected_digest:
+                    raise ReleaseRecoveryError('changed')
+                # Old markers cannot attest to the original content digest. Only
+                # migrate when every current asset already matches the destination;
+                # otherwise an interrupted replacement cannot be distinguished
+                # safely from an unobserved source-content change.
+                old_assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
+                old_by_name = {a['name']: a for a in old_assets}
+                if len(old_by_name) != len(old_assets) or len({a['name'] for a in source_assets}) != len(source_assets):
+                    raise ReleaseRecoveryError('mismatch')
+                for asset in source_assets:
+                    previous = old_by_name.get(asset['name'])
+                    if (previous is None or previous.get('state') != 'uploaded' or
+                            type(asset.get('size')) is not int or asset['size'] < 0 or
+                            type(previous.get('size')) is not int or previous['size'] != asset['size']):
+                        raise ReleaseRecoveryError('changed')
+                    with tempfile.TemporaryFile() as source_data, tempfile.TemporaryFile() as dest_data:
+                        src.download(asset['browser_download_url'], source_data)
+                        dst.download(previous['url'], dest_data)
+                        if source_data.tell() != asset['size'] or not same_file(source_data, dest_data):
+                            raise ReleaseRecoveryError('changed')
+                        published = asset.get('digest')
+                        if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                            source_data.seek(0)
+                            content_hash = hashlib.sha256()
+                            for chunk in iter(lambda: source_data.read(CHUNK_SIZE), b''):
+                                content_hash.update(chunk)
+                            if content_hash.hexdigest() != published[7:].lower():
+                                raise ReleaseRecoveryError('changed')
+                _, checked_digest = fetch_source_assets()
+                if checked_digest != digest:
+                    raise ReleaseRecoveryError('changed')
+                encoded = base64.urlsafe_b64encode(json.dumps([original_name, digest], ensure_ascii=True).encode()).decode()
+                pending_name = prefix + encoded
+                if len(pending_name) > 255:
+                    raise ValueError('release name too long for pending marker')
+                dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': pending_name})
         else:
             original_name = release.get('name')
             if isinstance(original_name, str) and original_name.startswith((prefix_v1, prefix_v2)):
@@ -433,14 +481,41 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             key = journal.key(source, name, owner, tag, asset['name']) if journal else None
             was_journaled = journal is not None and key in journal.failures
             previous = by_name.get(asset['name'])
+            source_hash = asset.get('digest')
+            target_hash = previous.get('digest') if previous else None
+            if (type(asset.get('size')) is int and asset['size'] >= 0
+                    and previous is not None and type(previous.get('size')) is int
+                    and previous['size'] >= 0 and asset['size'] == previous['size']
+                    and isinstance(source_hash, str) and isinstance(target_hash, str)
+                    and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', source_hash)
+                    and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', target_hash)
+                    and source_hash.lower() == target_hash.lower()):
+                print(f'asset {asset_index}/{len(ordered_assets)} unchanged (published SHA-256)', file=sys.stderr, flush=True)
+                skipped += 1
+                continue
+            print(f'asset {asset_index}/{len(ordered_assets)} comparing downloaded bytes', file=sys.stderr, flush=True)
             with tempfile.TemporaryFile() as data:
                 src.download(asset['browser_download_url'], data)
                 if not isinstance(asset.get('size'), int) or data.tell() != asset['size']:
                     raise RuntimeError('source asset size mismatch')
+                if isinstance(source_hash, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', source_hash):
+                    data.seek(0)
+                    actual_hash = hashlib.sha256()
+                    for chunk in iter(lambda: data.read(CHUNK_SIZE), b''):
+                        actual_hash.update(chunk)
+                    if actual_hash.hexdigest() != source_hash[7:].lower():
+                        raise RuntimeError('source asset digest mismatch')
                 changed = False
                 if previous:
                     with tempfile.TemporaryFile() as existing_data:
                         dst.download(previous['url'], existing_data)
+                        if isinstance(target_hash, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', target_hash):
+                            existing_data.seek(0)
+                            actual_target_hash = hashlib.sha256()
+                            for chunk in iter(lambda: existing_data.read(CHUNK_SIZE), b''):
+                                actual_target_hash.update(chunk)
+                            if actual_target_hash.hexdigest() != target_hash[7:].lower():
+                                raise RuntimeError('destination asset digest mismatch')
                         changed = not same_file(data, existing_data)
                         if changed and prefix != prefix_v2:
                             raise ReleaseRecoveryError('mismatch')
@@ -521,7 +596,8 @@ SAFE_ERROR_MESSAGES = frozenset({
     'created repository owner does not match configured destination', 'source clone URL does not match source host',
     'source default branch missing; refusing to prune', 'multiple destination releases for tag',
     'release assets response is not an array', 'source release name uses reserved marker',
-    'release name too long for pending marker', 'source asset size mismatch', 'release asset uploads failed',
+    'release name too long for pending marker', 'source asset size mismatch', 'source asset digest mismatch',
+    'destination asset digest mismatch', 'release asset uploads failed',
     'GH_TOKEN and valid DESTINATION_OWNER are required', 'config must be an object',
     'destination_account_type must be personal or organization', 'sources must be a list',
     'duplicate destination repository',
