@@ -65,7 +65,7 @@ def source_marker(source, name):
 
 
 def check_existing(repo, marker):
-    if repo is not None and repo.get('description') != marker:
+    if repo is not None and repo.get('description') not in (marker, marker + ' [repo-mirror:initializing:v1]'):
         raise RuntimeError('destination collision: repository has no matching source marker')
 
 
@@ -326,9 +326,10 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
     target = f'{GITHUB}/repos/{qowner}/{qname}'
     repo = get_existing(dst, target)
     check_existing(repo, marker)
+    initializing = repo is None or repo.get('description') == marker + ' [repo-mirror:initializing:v1]'
     if repo is None:
         endpoint = '/user/repos' if account_type == 'personal' else f'/orgs/{qowner}/repos'
-        repo = dst.request('POST', GITHUB + endpoint, {'name': dest_name, 'private': True, 'auto_init': False, 'description': marker})
+        repo = dst.request('POST', GITHUB + endpoint, {'name': dest_name, 'private': True, 'auto_init': False, 'description': marker + ' [repo-mirror:initializing:v1]'})
         if repo.get('full_name', '').lower() != (owner + '/' + dest_name).lower():
             raise RuntimeError('created repository owner does not match configured destination')
     dst.request('PUT', target + '/actions/permissions', {'enabled': False})
@@ -348,7 +349,18 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         if repo.get('default_branch') != default_branch:
             dst.request('PATCH', target, {'default_branch': default_branch})
     mirror_git(clone_url, f'https://github.com/{qowner}/{qname}.git', token, update_default)
-    for release in src.pages(upstream + '/releases'):
+    releases = src.pages(upstream + '/releases')
+    if initializing or len(releases) <= 10:
+        selected = releases
+    else:
+        pending_tags = {r.get('tag_name') for r in dst.pages(target + '/releases')
+                        if isinstance(r.get('name'), str) and r['name'].startswith(
+                            ('[repo-mirror:pending:v1]', '[repo-mirror:pending:v2]'))}
+        failed_releases = {key.split(':', 1)[0] for key in journal.failures} if journal else set()
+        selected = releases[:10] + [r for r in releases[10:]
+            if r['tag_name'] in pending_tags or (journal and journal.key(
+                source, name, owner, r['tag_name'], '')[:64] in failed_releases)]
+    for release in selected:
         tag = release['tag_name']
         try:
             existing = dst.request('GET', target + '/releases/tags/' + quote(tag, safe=''))
@@ -361,9 +373,11 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             if len(matches) > 1:
                 raise RuntimeError('multiple destination releases for tag')
             existing = matches[0] if matches else None
-        prefix = '[repo-mirror:pending:v1]'
-        if existing and (not isinstance(existing.get('name'), str) or not existing['name'].startswith(prefix)):
-            continue
+        prefix_v1 = '[repo-mirror:pending:v1]'
+        prefix_v2 = '[repo-mirror:pending:v2]'
+        current_name = existing.get('name') if existing else None
+        pending = isinstance(current_name, str) and current_name.startswith((prefix_v1, prefix_v2))
+        prefix = prefix_v2 if pending and current_name.startswith(prefix_v2) else prefix_v1
         asset_url = upstream + '/releases/' + str(release['id']) + '/assets'
         def fetch_source_assets():
             assets = (src.request('GET', asset_url) if source['type'] == 'forgejo'
@@ -375,7 +389,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
             return assets, digest
         source_assets, digest = fetch_source_assets()
-        if existing:
+        if existing and pending:
             pending_name = existing['name']
             try:
                 original_name, expected_digest = json.loads(base64.urlsafe_b64decode(pending_name[len(prefix):].encode()).decode())
@@ -387,36 +401,52 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                 raise ReleaseRecoveryError('changed')
         else:
             original_name = release.get('name')
-            if isinstance(original_name, str) and original_name.startswith(prefix):
+            if isinstance(original_name, str) and original_name.startswith((prefix_v1, prefix_v2)):
                 raise ValueError('source release name uses reserved marker')
+            prefix = prefix_v2 if existing else prefix_v1
             encoded = base64.urlsafe_b64encode(json.dumps([original_name, digest], ensure_ascii=True).encode()).decode()
             pending_name = prefix + encoded
             if len(pending_name) > 255:
                 raise ValueError('release name too long for pending marker')
             fields = {k: release.get(k) for k in ('body', 'draft', 'prerelease')}
             fields.update(tag_name=tag, name=pending_name)
-            existing = dst.request('POST', target + '/releases', fields)
+            if existing:
+                dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': pending_name})
+            else:
+                existing = dst.request('POST', target + '/releases', fields)
         assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
         if any(asset.get('state') == 'starter' for asset in assets):
             raise StarterAssetError()
         by_name = {asset['name']: asset for asset in assets}
+        if len(by_name) != len(assets) or len({a['name'] for a in source_assets}) != len(source_assets):
+            raise ReleaseRecoveryError('mismatch')
         upload_failures = 0
         ordered_assets = journal.retry_order(source, name, owner, tag, source_assets) if journal else source_assets
         for asset in ordered_assets:
             key = journal.key(source, name, owner, tag, asset['name']) if journal else None
             previous = by_name.get(asset['name'])
-            if previous and previous.get('size') != asset.get('size'):
-                raise ReleaseRecoveryError('mismatch')
             with tempfile.TemporaryFile() as data:
                 src.download(asset['browser_download_url'], data)
                 if not isinstance(asset.get('size'), int) or data.tell() != asset['size']:
                     raise RuntimeError('source asset size mismatch')
+                changed = False
                 if previous:
                     with tempfile.TemporaryFile() as existing_data:
                         dst.download(previous['url'], existing_data)
-                        if not same_file(data, existing_data):
+                        changed = not same_file(data, existing_data)
+                        if changed and prefix != prefix_v2:
                             raise ReleaseRecoveryError('mismatch')
-                else:
+                if changed:
+                    _, current_digest = fetch_source_assets()
+                    if current_digest != digest:
+                        raise ReleaseRecoveryError('changed')
+                    asset_id = previous.get('id')
+                    if not isinstance(asset_id, int) or isinstance(asset_id, bool) or asset_id <= 0:
+                        raise ReleaseRecoveryError('mismatch')
+                    if journal:
+                        journal.set(key, True)
+                    dst.request('DELETE', target + '/releases/assets/' + str(asset_id))
+                if not previous or changed:
                     data.seek(0)
                     upload_url = existing['upload_url'].split('{', 1)[0] + '?' + urlencode({'name': asset['name']})
                     if journal:
@@ -428,8 +458,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                             raise
                         upload_failures += 1
                         continue
-                if journal and key in journal.failures:
-                    journal.set(key, False)
+
         if upload_failures:
             raise RuntimeError('release asset uploads failed')
         _, final_digest = fetch_source_assets()
@@ -441,11 +470,19 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         expected = {asset['name']: asset['size'] for asset in source_assets}
         actual = {asset['name']: asset for asset in final_assets}
         if (len(expected) != len(source_assets) or len(actual) != len(final_assets) or
-                actual.keys() != expected.keys() or
-                any(asset.get('state') != 'uploaded' or asset.get('size') != expected[name]
-                    for name, asset in actual.items())):
+                not expected.keys() <= actual.keys() or
+                any(actual[name].get('state') != 'uploaded' or actual[name].get('size') != size
+                    for name, size in expected.items())):
             raise ReleaseRecoveryError('mismatch')
-        dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': original_name})
+        dst.request('PATCH', target + '/releases/' + str(existing['id']),
+                    {'name': release.get('name'), **{k: release[k] for k in ('body', 'draft', 'prerelease') if k in release}})
+        if journal:
+            for asset in source_assets:
+                key = journal.key(source, name, owner, tag, asset['name'])
+                if key in journal.failures:
+                    journal.set(key, False)
+    if initializing:
+        dst.request('PATCH', target, {'description': marker})
 
 
 

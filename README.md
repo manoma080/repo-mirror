@@ -8,8 +8,8 @@ Copy public GitHub and Forgejo repositories to GitHub. A **source** is the origi
 | --- | --- |
 | Schedule | Runs every hour at minute 17. You can also run it from **Actions → Mirror repositories → Run workflow**. |
 | Branches and tags | Copies all branches and tags, including rewritten history. Deletes branches and tags from the mirror when they are deleted from the source. |
-| New releases | Copies release names, descriptions, tags and uploaded files. GitHub creates its own source-code archives. |
-| Existing releases | Leaves completed releases unchanged, even if their source files or descriptions change. |
+| Releases | For a new mirror, copies the full release history. Later runs reconcile the first 10 releases returned by the source API, in its order, plus older releases with pending copies or recorded upload failures. GitHub creates its own source-code archives. |
+| Release files | Adds missing files and replaces same-name files whose bytes differ. A file removed from the source is left in the mirror. |
 | New mirrors | Creates them as private repositories and disables their GitHub Actions. You can make them public later. |
 | Stars | Does not manage stars or Stars lists. |
 
@@ -66,7 +66,7 @@ Do not add keys or tokens to the repository's files. After changing app permissi
 
 A release with no uploaded files is valid. Each uploaded file must be smaller than 2 GiB.
 
-When a new release is being copied, its name temporarily includes a `[repo-mirror:pending:v1]` marker. If the run stops, the next run uses that marker to continue. Don't edit the marker or use it in your own release names. The original name is restored after the files are copied. Very long names may not fit and will be rejected.
+While a release is being copied or updated, its name temporarily includes a `[repo-mirror:pending:v1]` or `[repo-mirror:pending:v2]` marker. If the run stops, a later run can use that marker to continue, even if the release is older than the latest 10, as long as it still exists at the source. Don't edit the marker or use it in your own release names. After the files are copied, the mirror uses the current source name. Very long names may not fit and will be rejected. A new mirror stays in initialization mode until the full history completes.
 
 The workflow saves failed uploads in `failures.json` and checks it on the next run. Entries use hashes (short identifiers made from the source details), not passwords or file names. Someone may be able to guess the original details from a hash, so don't treat them as secret.
 
@@ -78,9 +78,9 @@ The workflow saves failed uploads in `failures.json` and checks it on the next r
 | Branch protection blocks the workflow | Allow its GitHub token to push the failure file. |
 | A source or pending marker is changed or removed | Old entries may need manual review. |
 
-Only attempted uploads appear in the file. A repository error can prevent the workflow from reaching later releases in that repository.
+Only attempted uploads and replacements appear in the file. A repository error can prevent the workflow from reaching later releases in that repository.
 
-A retry checks already uploaded files and copies missing ones. If the source's file list changed during an interrupted copy, the run stops for that repository and needs manual review. The mirror does not delete or replace release files. If GitHub leaves an incomplete file after a failed upload, remove that file manually before retrying. Older releases without a marker are assumed complete; check them manually if an earlier copy was interrupted.
+A retry checks already uploaded files and copies missing ones. To replace a changed file, the mirror deletes the matching destination file before uploading its replacement; an interrupted upload can temporarily leave it missing. The mirror never deliberately deletes files absent from the source list. The source list is checked again before deletion, but changes between that check and deletion cannot be ruled out. If the list changes during an interrupted copy, the run stops for that repository and needs manual review. If GitHub leaves an incomplete starter file, remove it manually before retrying. A pending release or journal entry whose source release or file has been removed may need manual review. Existing v1 pending releases with conflicting file contents also require manual review.
 
 ## Failures and limits
 
