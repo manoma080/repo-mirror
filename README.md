@@ -6,7 +6,7 @@ Copy public GitHub and Forgejo repositories to GitHub. A **source** is the origi
 
 | Item | What happens |
 | --- | --- |
-| Schedule | Runs every hour at minute 17. You can also run it from **Actions → Mirror repositories → Run workflow**. |
+| Schedule | Runs every three hours on the hour (UTC). You can also run it from **Actions → Mirror repositories → Run workflow**. |
 | Branches and tags | Copies all branches and tags, including rewritten history. Deletes branches and tags from the mirror when they are deleted from the source. |
 | Releases | For a new mirror, copies the full release history, oldest first by publication time, falling back to creation time. Later runs reconcile the first 3 releases returned by the source API, plus the source's latest full release and older releases with pending copies or recorded upload failures. GitHub creates its own source-code archives. |
 | Release files | Adds missing files and replaces same-name files whose bytes differ. A file removed from the source is left in the mirror. |
