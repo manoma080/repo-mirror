@@ -38,7 +38,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(dst.release['body'], 'notes')
         self.assertEqual([a['name'] for a in dst.assets], ['a'])
 
-    def test_existing_mirror_only_considers_three_latest_releases(self):
+    def test_existing_mirror_only_considers_first_release(self):
         class Source:
             def request(self, *args):
                 if args[1].endswith('/releases/latest'):
@@ -58,7 +58,7 @@ class ReleasePolicyTests(unittest.TestCase):
         dst = Destination()
         with patch.object(mirror, 'mirror_git'):
             mirror.mirror_repository(SOURCE, 'demo', 'dest', Source(), dst, 'token')
-        self.assertEqual(dst.tags, [str(n) for n in range(3)])
+        self.assertEqual(dst.tags, ['0'])
 
     def test_new_repository_persists_initialization_until_history_is_complete(self):
         class Source:
