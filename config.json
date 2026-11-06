@@ -5,7 +5,7 @@
       "type": "forgejo",
       "base_url": "https://theghostonline.dev",
       "owner": "theghostonline",
-      "repos": ["Ghost-VR"]
+      "repos": ["Ghost-VR", "Ghost-Play"]
     },
     {
       "type": "github",
