@@ -49,6 +49,7 @@ jobs:
         env:
           DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
         run: python mirror.py --config config.json --failures failures.json
       - name: Save failure journal
         if: ${{ always() && steps.app-token.outcome == 'success' }}

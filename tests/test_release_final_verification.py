@@ -12,7 +12,10 @@ class FinalVerificationTests(unittest.TestCase):
 
         class Src:
             def __init__(self): self.changed = False
-            def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'v1', 'name': 'release'}]
                 assets = [{'name': 'a', 'size': 1, 'id': 1, 'browser_download_url': 'https://github.com/a'}]

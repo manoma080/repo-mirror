@@ -7,7 +7,10 @@ class ReleaseTests(unittest.TestCase):
     def test_existing_release_metadata_is_updated(self):
         source = {'type':'github', 'base_url':'https://github.com', 'owner':'alice'}
         class Src:
-            def request(self, *args): return {'clone_url':'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url':'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id':1,'tag_name':'v1','name':'new','body':'edited'}]
                 return []
@@ -30,7 +33,10 @@ class ReleaseTests(unittest.TestCase):
         source = {'type':'github', 'base_url':'https://github.com', 'owner':'alice'}
         class Src:
             def __init__(self): self.assets = ['a', 'b']; self.name = 'original'
-            def request(self, *args): return {'clone_url':'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url':'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id':1,'tag_name':'v1','name':self.name,'body':'notes'}]
                 return [{'name':n,'size':1,'browser_download_url':'https://github.com/'+n} for n in self.assets]
@@ -89,7 +95,10 @@ class ReleaseTests(unittest.TestCase):
     def test_truncated_source_asset_does_not_finish_release(self):
         source={'type':'github','base_url':'https://github.com','owner':'alice'}
         class Src:
-            def request(self,*args): return {'clone_url':'https://github.com/alice/demo.git'}
+            def request(self,*args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url':'https://github.com/alice/demo.git'}
             def pages(self,url):
                 if url.endswith('/releases'): return [{'id':1,'tag_name':'v1'}]
                 return [{'name':'a','size':10,'browser_download_url':'https://github.com/a'}]
@@ -115,7 +124,10 @@ class ReleaseTests(unittest.TestCase):
         source={'type':'github','base_url':'https://github.com','owner':'alice'}
         class Src:
             def __init__(self): self.assets=['a','b']
-            def request(self,*args): return {'clone_url':'https://github.com/alice/demo.git'}
+            def request(self,*args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url':'https://github.com/alice/demo.git'}
             def pages(self,url):
                 if url.endswith('/releases'): return [{'id':1,'tag_name':'v1','name':'release'}]
                 return [{'name':x,'size':1,'browser_download_url':'https://github.com/'+x} for x in self.assets]

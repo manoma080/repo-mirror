@@ -14,7 +14,10 @@ class StarterAssetTests(unittest.TestCase):
     def test_zero_byte_starter_requires_manual_removal_even_for_empty_source(self):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo']}
         class Src:
-            def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'v1'}]
                 return [{'name': 'empty', 'size': 0, 'browser_download_url': 'https://github.com/empty'}]
@@ -38,7 +41,10 @@ class StarterAssetTests(unittest.TestCase):
     def test_main_reports_changed_manifest_recovery_without_source_data(self):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo']}
         class Src:
-            def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'https://example.test/?token=secret'}]
                 return [{'name': 'secret-file', 'size': 1, 'browser_download_url': 'https://github.com/secret'}]
@@ -50,7 +56,7 @@ class StarterAssetTests(unittest.TestCase):
         stderr = io.StringIO()
         with tempfile.NamedTemporaryFile(mode='w') as f:
             json.dump({'destination_account_type': 'personal', 'sources': [source]}, f); f.flush()
-            with patch.dict(os.environ, {'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}), patch.object(mirror, 'API', side_effect=[Src(), Dst()]), patch.object(mirror, 'mirror_git'), redirect_stderr(stderr):
+            with patch.dict(os.environ, {'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}), patch.object(mirror, 'SourceAPI', return_value=Src()), patch.object(mirror, 'API', side_effect=[object(), Dst()]), patch.object(mirror, 'mirror_git'), redirect_stderr(stderr):
                 with self.assertRaises(RuntimeError): mirror.main(['--config', f.name])
         self.assertIn('assets changed', stderr.getvalue())
         self.assertIn('manual', stderr.getvalue())

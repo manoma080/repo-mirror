@@ -2,9 +2,11 @@
 """Mirror public GitHub/Forgejo repositories to private GitHub repositories."""
 import argparse
 import base64
+from datetime import datetime, timezone
 import json
 import http.client
 import hashlib
+import hmac
 import ipaddress
 import socket
 import ssl
@@ -93,6 +95,7 @@ class SafeRedirect(HTTPRedirectHandler):
 class API:
     def __init__(self, token=None):
         self.token = token
+        self.role = 'destination' if token else 'source'
         self.opener = build_opener(SafeRedirect())
 
     def _request(self, method, url, body=None, headers=None):
@@ -110,6 +113,8 @@ class API:
                 with self.opener.open(Request(url, data=body, headers=headers, method=method), timeout=60) as response:
                     return response.read()
             except HTTPError as e:
+                if e.code == 403:
+                    e.mirror_operation = (self.role, 'API', method if method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') else 'request')
                 if method not in ('GET', 'PUT', 'PATCH', 'DELETE') or e.code not in (429, 500, 502, 503, 504) or attempt == 3:
                     raise
             except URLError:
@@ -145,8 +150,13 @@ class API:
                 raise ValueError('refusing unsafe destination asset URL')
             request = Request(url, headers={'Accept': 'application/octet-stream',
                               'User-Agent': 'repo-mirror', 'Authorization': 'Bearer ' + self.token})
-            with self.opener.open(request, timeout=60) as response:
-                copy_asset(response, output)
+            try:
+                with self.opener.open(request, timeout=60) as response:
+                    copy_asset(response, output)
+            except HTTPError as exc:
+                if exc.code == 403:
+                    exc.mirror_operation = ('destination', 'asset', 'GET')
+                raise
             return
         # Connect to a validated address directly; do not use a proxy or resolve twice.
         for _ in range(10):
@@ -179,6 +189,10 @@ class API:
                         url = urljoin(url, location)
                         continue
                     if response.status != 200:
+                        if response.status == 403:
+                            exc = HTTPError(url, 403, '', response.headers, None)
+                            exc.mirror_operation = ('source', 'asset', 'GET')
+                            raise exc
                         raise RuntimeError('asset download failed')
                     copy_asset(response, output)
                     return
@@ -196,6 +210,20 @@ class API:
         if size > MAX_ASSET_SIZE:
             raise ValueError('asset exceeds GitHub size limit')
         self._request('POST', url, data, {'Content-Type': content_type, 'Content-Length': str(size)})
+
+
+class SourceAPI(API):
+    def __init__(self, token):
+        super().__init__()
+        self.source_token = token
+
+    def _request(self, method, url, body=None, headers=None):
+        parsed = urlparse(url)
+        headers = dict(headers or {})
+        if (method == 'GET' and parsed.scheme == 'https' and not parsed.username and
+                not parsed.password and parsed.hostname == 'api.github.com' and parsed.port in (None, 443)):
+            headers['Authorization'] = 'Bearer ' + self.source_token
+        return super()._request(method, url, body, headers)
 
 
 def copy_asset(response, output):
@@ -351,8 +379,19 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             dst.request('PATCH', target, {'default_branch': default_branch})
     mirror_git(clone_url, f'https://github.com/{qowner}/{qname}.git', token, update_default)
     releases = src.pages(upstream + '/releases')
+    try:
+        latest = src.request('GET', upstream + '/releases/latest')
+        if (not isinstance(latest, dict) or not latest.get('tag_name') or
+                latest.get('draft') or latest.get('prerelease')):
+            raise ValueError('invalid source latest release')
+    except HTTPError as exc:
+        if not not_found(exc):
+            raise
+        exc.close()
+        latest = None
+
     if initializing or len(releases) <= 10:
-        selected = releases
+        selected = list(releases)
     else:
         pending_tags = {r.get('tag_name') for r in dst.pages(target + '/releases')
                         if isinstance(r.get('name'), str) and r['name'].startswith(
@@ -361,7 +400,27 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         selected = releases[:10] + [r for r in releases[10:]
             if r['tag_name'] in pending_tags or (journal and journal.key(
                 source, name, owner, r['tag_name'], '')[:64] in failed_releases)]
-    print(f'releases discovered={len(releases)} selected={len(selected)} skipped={len(releases) - len(selected)}', file=sys.stderr, flush=True)
+    if latest:
+        selected = [latest if r['tag_name'] == latest['tag_name'] else r for r in selected]
+        if not any(r['tag_name'] == latest['tag_name'] for r in selected):
+            selected.append(latest)
+    if initializing:
+        # Both APIs return release lists newest first. Use timestamps when all
+        # are present, otherwise preserve the reverse of their list order.
+        selected.reverse()
+        try:
+            def created_at(release):
+                value = datetime.fromisoformat((release.get('published_at') or release['created_at']).replace('Z', '+00:00'))
+                if value.tzinfo is None:
+                    raise ValueError('missing timezone')
+                return value.astimezone(timezone.utc)
+            selected.sort(key=created_at)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            pass
+    latest_id = None
+    selected_tags = {r['tag_name'] for r in selected}
+    skipped = sum(1 for release in releases if release['tag_name'] not in selected_tags)
+    print(f'releases discovered={len(releases)} selected={len(selected)} skipped={skipped}', file=sys.stderr, flush=True)
     for release_index, release in enumerate(selected, 1):
         tag = release['tag_name']
         print(f'release {release_index}/{len(selected)} started', file=sys.stderr, flush=True)
@@ -395,11 +454,53 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
                         published = published.lower()
                     entry.append(published)
+                if a.get('created_at') is not None:
+                    entry.append(a['created_at'])
                 manifest.append(entry)
             manifest.sort(key=lambda a: str(a[0]))
+            previous_manifest = []
+            for a in assets:
+                entry = [a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
+                published = a.get('digest')
+                if published is not None:
+                    if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                        published = published.lower()
+                    entry.append(published)
+                previous_manifest.append(entry)
+            previous_manifest.sort(key=lambda a: str(a[0]))
+            pre_checksum_digest = hashlib.sha256(json.dumps(previous_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+            checksums = {}
+            checksum_files = [a for a in assets if isinstance(a.get('name'), str) and
+                              re.fullmatch(r'SHA256SUMS(?:\.txt)?', a['name'], re.I)]
+            if len(checksum_files) == 1:
+                checksum_file = checksum_files[0]
+                if type(checksum_file.get('size')) is int and 0 <= checksum_file['size'] <= 1024 * 1024:
+                    with tempfile.TemporaryFile() as data:
+                        src.download(checksum_file['browser_download_url'], data)
+                        if data.tell() != checksum_file['size']:
+                            raise RuntimeError('source asset size mismatch')
+                        data.seek(0)
+                        content = data.read()
+                    published = checksum_file.get('digest')
+                    if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                        if hashlib.sha256(content).hexdigest() != published[7:].lower():
+                            raise RuntimeError('source asset digest mismatch')
+                    manifest.append(['repo-mirror-checksum-content', hashlib.sha256(content).hexdigest()])
+                    previous_manifest.append(['repo-mirror-checksum-content', hashlib.sha256(content).hexdigest()])
+                    try:
+                        lines = content.decode('utf-8').splitlines()
+                        for line in lines:
+                            match = re.fullmatch(r'([0-9a-fA-F]{64}) [ *]([A-Za-z0-9_.-]+)', line)
+                            if not match or match[2] in ('.', '..') or match[2] in checksums:
+                                checksums = {}
+                                break
+                            checksums[match[2]] = 'sha256:' + match[1].lower()
+                    except UnicodeError:
+                        checksums = {}
             digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
-            return assets, digest
-        source_assets, digest = fetch_source_assets()
+            previous_digest = hashlib.sha256(json.dumps(previous_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+            return assets, digest, checksums, (previous_digest, pre_checksum_digest)
+        source_assets, digest, checksums, previous_digest = fetch_source_assets()
         print(f'release {release_index}/{len(selected)} assets={len(source_assets)}', file=sys.stderr, flush=True)
         if existing and pending:
             print('release resuming pending update', file=sys.stderr, flush=True)
@@ -415,7 +516,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                                    for a in source_assets]
                 legacy_manifest.sort(key=lambda a: str(a[0]))
                 legacy_digest = hashlib.sha256(json.dumps(legacy_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
-                if legacy_digest != expected_digest:
+                if expected_digest not in (legacy_digest, *previous_digest):
                     raise ReleaseRecoveryError('changed')
                 # Old markers cannot attest to the original content digest. Only
                 # migrate when every current asset already matches the destination;
@@ -444,7 +545,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                                 content_hash.update(chunk)
                             if content_hash.hexdigest() != published[7:].lower():
                                 raise ReleaseRecoveryError('changed')
-                _, checked_digest = fetch_source_assets()
+                _, checked_digest, _, _ = fetch_source_assets()
                 if checked_digest != digest:
                     raise ReleaseRecoveryError('changed')
                 encoded = base64.urlsafe_b64encode(json.dumps([original_name, digest], ensure_ascii=True).encode()).decode()
@@ -462,7 +563,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             if len(pending_name) > 255:
                 raise ValueError('release name too long for pending marker')
             fields = {k: release.get(k) for k in ('body', 'draft', 'prerelease')}
-            fields.update(tag_name=tag, name=pending_name)
+            fields.update(tag_name=tag, name=pending_name, make_latest='false')
             if existing:
                 dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': pending_name})
             else:
@@ -473,6 +574,43 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         by_name = {asset['name']: asset for asset in assets}
         if len(by_name) != len(assets) or len({a['name'] for a in source_assets}) != len(source_assets):
             raise ReleaseRecoveryError('mismatch')
+        # A source asset with either reserved name always wins; never treat it as
+        # our metadata or attempt to manage the auxiliary names in that release.
+        cache_name = 'TIMESTAMPS.txt'
+        stage_name = 'TIMESTAMPS.txt.repo-mirror-staging'
+        secret = os.environ.get('MIRROR_TIMESTAMP_SECRET', '')
+        cache_enabled = bool(secret) and not any(a.get('name') in (cache_name, stage_name) for a in source_assets)
+        cache_owner = {'owner': 'repo-mirror:timestamps:v1', 'source': marker, 'tag': tag}
+        cached = {}
+        old_cache = by_name.get(cache_name) if cache_enabled else None
+        old_content = None
+        if old_cache:
+            with tempfile.TemporaryFile() as f:
+                dst.download(old_cache['url'], f)
+                if f.tell() <= 1024 * 1024:
+                    f.seek(0)
+                    old_content = f.read()
+            try:
+                parsed = json.loads(old_content) if old_content is not None else None
+                if not isinstance(parsed, dict) or any(parsed.get(k) != v for k, v in cache_owner.items()) or not isinstance(parsed.get('assets'), dict):
+                    raise ValueError()
+                signature = parsed.pop('signature', None)
+                payload = json.dumps(parsed, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
+                expected_signature = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+                if not isinstance(signature, str) or not hmac.compare_digest(signature, expected_signature):
+                    raise ValueError()
+                cached = parsed['assets']
+            except (ValueError, TypeError, UnicodeError):
+                # Unowned or malformed assets are never overwritten.
+                cache_enabled = False
+        records = {}
+        def identity(asset):
+            stamp = asset.get('updated_at') or asset.get('created_at')
+            aid, size = asset.get('id'), asset.get('size')
+            if (type(aid) is not int or aid <= 0 or not isinstance(stamp, str) or not stamp
+                    or type(size) is not int or size < 0 or not isinstance(asset.get('name'), str)):
+                return None
+            return {'id': aid, 'name': asset['name'], 'timestamp': stamp, 'size': size}
         upload_failures = 0
         uploaded = updated = skipped = retried = 0
         ordered_assets = journal.retry_order(source, name, owner, tag, source_assets) if journal else source_assets
@@ -482,7 +620,21 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             was_journaled = journal is not None and key in journal.failures
             previous = by_name.get(asset['name'])
             source_hash = asset.get('digest')
+            if not (isinstance(source_hash, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', source_hash)):
+                source_hash = checksums.get(asset['name'])
             target_hash = previous.get('digest') if previous else None
+            ident = identity(asset) if cache_enabled else None
+            entry = cached.get(asset['name']) if ident else None
+            if (isinstance(entry, dict) and all(entry.get(k) == v for k, v in ident.items())
+                    and isinstance(entry.get('sha256'), str)
+                    and re.fullmatch(r'[0-9a-f]{64}', entry['sha256'])
+                    and previous and previous.get('state') == 'uploaded'
+                    and type(previous.get('size')) is int and previous['size'] == ident['size']
+                    and isinstance(target_hash, str) and target_hash.lower() == 'sha256:' + entry['sha256']
+                    and (not source_hash or source_hash.lower() == target_hash.lower())):
+                records[asset['name']] = dict(ident, sha256=entry['sha256'])
+                skipped += 1
+                continue
             if (type(asset.get('size')) is int and asset['size'] >= 0
                     and previous is not None and type(previous.get('size')) is int
                     and previous['size'] >= 0 and asset['size'] == previous['size']
@@ -491,6 +643,8 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', target_hash)
                     and source_hash.lower() == target_hash.lower()):
                 print(f'asset {asset_index}/{len(ordered_assets)} unchanged (published SHA-256)', file=sys.stderr, flush=True)
+                if ident:
+                    records[asset['name']] = dict(ident, sha256=source_hash[7:].lower())
                 skipped += 1
                 continue
             print(f'asset {asset_index}/{len(ordered_assets)} comparing downloaded bytes', file=sys.stderr, flush=True)
@@ -505,6 +659,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                         actual_hash.update(chunk)
                     if actual_hash.hexdigest() != source_hash[7:].lower():
                         raise RuntimeError('source asset digest mismatch')
+                data.seek(0)
+                calculated = hashlib.sha256()
+                for chunk in iter(lambda: data.read(CHUNK_SIZE), b''):
+                    calculated.update(chunk)
+                if ident:
+                    records[asset['name']] = dict(ident, sha256=calculated.hexdigest())
                 changed = False
                 if previous:
                     with tempfile.TemporaryFile() as existing_data:
@@ -520,7 +680,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                         if changed and prefix != prefix_v2:
                             raise ReleaseRecoveryError('mismatch')
                 if changed:
-                    _, current_digest = fetch_source_assets()
+                    _, current_digest, _, _ = fetch_source_assets()
                     if current_digest != digest:
                         raise ReleaseRecoveryError('changed')
                     asset_id = previous.get('id')
@@ -557,7 +717,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         print(f'assets uploaded={uploaded} updated={updated} skipped={skipped} retried={retried} upload_failed={upload_failures}', file=sys.stderr, flush=True)
         if upload_failures:
             raise RuntimeError('release asset uploads failed')
-        _, final_digest = fetch_source_assets()
+        _, final_digest, _, _ = fetch_source_assets()
         if final_digest != digest:
             raise ReleaseRecoveryError('changed')
         final_assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
@@ -570,14 +730,90 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                 any(actual[name].get('state') != 'uploaded' or actual[name].get('size') != size
                     for name, size in expected.items())):
             raise ReleaseRecoveryError('mismatch')
+        if cache_enabled and (records or old_cache):
+            # Verify every recorded destination byte string, including uploads.
+            for asset_name, record in records.items():
+                dest_asset = actual[asset_name]
+                dh = dest_asset.get('digest')
+                if not (isinstance(dh, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', dh)):
+                    with tempfile.TemporaryFile() as f:
+                        dst.download(dest_asset['url'], f)
+                        if f.tell() != record['size']:
+                            raise RuntimeError('destination asset digest mismatch')
+                        f.seek(0)
+                        h = hashlib.sha256()
+                        for chunk in iter(lambda: f.read(CHUNK_SIZE), b''):
+                            h.update(chunk)
+                        dh = 'sha256:' + h.hexdigest()
+                if dh.lower() != 'sha256:' + record['sha256']:
+                    raise RuntimeError('destination asset digest mismatch')
+            document = dict(cache_owner, assets=records)
+            payload = json.dumps(document, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
+            document['signature'] = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+            content = (json.dumps(document, sort_keys=True, ensure_ascii=True, separators=(',', ':')) + '\n').encode()
+            if content != old_content:
+                stage = actual.get(stage_name)
+                if stage:
+                    # Never remove or reuse a foreign or stale staging asset.
+                    with tempfile.TemporaryFile() as f:
+                        dst.download(stage['url'], f)
+                        f.seek(0)
+                        if f.read() != content or stage.get('state') != 'uploaded':
+                            raise ReleaseRecoveryError('mismatch')
+                elif old_cache:
+                    with tempfile.TemporaryFile() as f:
+                        f.write(content)
+                        f.seek(0)
+                        u = existing['upload_url'].split('{', 1)[0] + '?' + urlencode({'name': stage_name})
+                        dst.upload(u, f, 'application/json')
+                    staged_assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
+                    stages = [a for a in staged_assets if a.get('name') == stage_name]
+                    if len(stages) != 1 or stages[0].get('state') != 'uploaded':
+                        raise ReleaseRecoveryError('mismatch')
+                    stage = stages[0]
+                    with tempfile.TemporaryFile() as f:
+                        dst.download(stage['url'], f)
+                        f.seek(0)
+                        if f.read() != content:
+                            raise ReleaseRecoveryError('mismatch')
+                if stage:
+                    stage_id = stage.get('id')
+                    if type(stage_id) is not int or stage_id <= 0:
+                        raise ReleaseRecoveryError('mismatch')
+                if old_cache:
+                    asset_id = old_cache.get('id')
+                    if type(asset_id) is not int or asset_id <= 0:
+                        raise ReleaseRecoveryError('mismatch')
+                    dst.request('DELETE', target + '/releases/assets/' + str(asset_id))
+                if stage:
+                    dst.request('PATCH', target + '/releases/assets/' + str(stage_id), {'name': cache_name})
+                else:
+                    with tempfile.TemporaryFile() as f:
+                        f.write(content)
+                        f.seek(0)
+                        u = existing['upload_url'].split('{', 1)[0] + '?' + urlencode({'name': cache_name})
+                        dst.upload(u, f, 'application/json')
+                verified = [a for a in dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
+                            if a.get('name') == cache_name]
+                if len(verified) != 1 or verified[0].get('state') != 'uploaded':
+                    raise ReleaseRecoveryError('mismatch')
+                with tempfile.TemporaryFile() as f:
+                    dst.download(verified[0]['url'], f)
+                    f.seek(0)
+                    if f.read() != content:
+                        raise ReleaseRecoveryError('mismatch')
         dst.request('PATCH', target + '/releases/' + str(existing['id']),
-                    {'name': release.get('name'), **{k: release[k] for k in ('body', 'draft', 'prerelease') if k in release}})
+                    {'name': release.get('name'), 'make_latest': 'false', **{k: release[k] for k in ('body', 'draft', 'prerelease') if k in release}})
+        if latest and tag == latest['tag_name']:
+            latest_id = existing['id']
         if journal:
             for asset in source_assets:
                 key = journal.key(source, name, owner, tag, asset['name'])
                 if key in journal.failures:
                     journal.set(key, False)
         print(f'release {release_index}/{len(selected)} completed', file=sys.stderr, flush=True)
+    if latest_id is not None:
+        dst.request('PATCH', target + '/releases/' + str(latest_id), {'make_latest': 'true'})
     if initializing:
         dst.request('PATCH', target, {'description': marker})
 
@@ -595,6 +831,7 @@ SAFE_ERROR_MESSAGES = frozenset({
     'asset exceeds GitHub size limit', 'failure journal must not be a symlink', 'invalid failure journal',
     'created repository owner does not match configured destination', 'source clone URL does not match source host',
     'source default branch missing; refusing to prune', 'multiple destination releases for tag',
+    'invalid source latest release',
     'release assets response is not an array', 'source release name uses reserved marker',
     'release name too long for pending marker', 'source asset size mismatch', 'source asset digest mismatch',
     'destination asset digest mismatch', 'release asset uploads failed',
@@ -610,7 +847,13 @@ def error_detail(exc):
     # Never emit arbitrary exception text, URLs, response bodies or class names.
     if isinstance(exc, HTTPError):
         if type(exc.code) is int and 100 <= exc.code <= 599:
-            return f'HTTP {exc.code}'
+            detail = f'HTTP {exc.code}'
+            operation = getattr(exc, 'mirror_operation', None)
+            if exc.code == 403 and isinstance(operation, tuple) and len(operation) == 3 and operation[0] in ('source', 'destination') and operation[1] in ('API', 'asset') and operation[2] in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'request'):
+                rate = exc.headers.get('X-RateLimit-Remaining') if exc.headers else None
+                suffix = '; rate limit remaining=0' if rate == '0' else ''
+                detail += f' ({operation[0]} {operation[1]} {operation[2]}{suffix})'
+            return detail
         return 'HTTPError'
     if len(exc.args) == 1 and type(exc.args[0]) is str and exc.args[0] in SAFE_ERROR_MESSAGES:
         return exc.args[0]
@@ -641,13 +884,14 @@ def main(argv=None):
         raise ValueError('sources must be a list')
     for source in sources:
         validate_source(source)
-    src, dst = API(), API(token)
+    github_src, other_src, dst = SourceAPI(token), API(), API(token)
     seen = set()
     plan = []
     discovery_failures = 0
     uncertain_prefixes = []
     uncertain_names = set()
     for index, source in enumerate(sources, 1):
+        src = github_src if source['type'] == 'github' else other_src
         print(f'source {index}/{len(sources)} discovery started', file=sys.stderr, flush=True)
         try:
             names = discover(source, src)
@@ -681,6 +925,7 @@ def main(argv=None):
             failures.append((repo_index, error_detail(exc)))
     succeeded = 0
     for repo_index, source_index, source, name in ready:
+        src = github_src if source['type'] == 'github' else other_src
         print(f'repository {repo_index}/{len(plan)} started (source {source_index}/{len(sources)})', file=sys.stderr, flush=True)
         try:
             if journal is None:

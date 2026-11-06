@@ -8,6 +8,8 @@ class NewBehaviorTests(unittest.TestCase):
         source = {'type':'forgejo','base_url':'https://src.example','owner':'alice'}
         class Src:
             def request(self, method, url, *args):
+                if url.endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(url, 404, '', {}, None)
                 if url.endswith('/assets'): return []
                 return {'clone_url':'https://src.example/alice/demo.git'}
             def pages(self, url):

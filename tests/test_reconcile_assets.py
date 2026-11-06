@@ -7,7 +7,10 @@ import mirror
 SOURCE = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice'}
 
 class Source:
-    def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+    def request(self, *args):
+        if args[1].endswith('/releases/latest'):
+            raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+        return {'clone_url': 'https://github.com/alice/demo.git'}
     def pages(self, url):
         if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'v1', 'name': 'new', 'body': 'notes'}]
         return [{'name': 'changed', 'size': 3, 'browser_download_url': 'https://github.com/changed'}, {'name': 'new', 'size': 1, 'browser_download_url': 'https://github.com/new'}]
