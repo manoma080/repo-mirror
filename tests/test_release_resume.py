@@ -4,13 +4,13 @@ import mirror
 
 
 class ReleaseTests(unittest.TestCase):
-    def test_existing_release_is_ignored(self):
+    def test_existing_release_metadata_is_updated(self):
         source = {'type':'github', 'base_url':'https://github.com', 'owner':'alice'}
         class Src:
             def request(self, *args): return {'clone_url':'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id':1,'tag_name':'v1','name':'new','body':'edited'}]
-                raise AssertionError('existing source assets must not be fetched')
+                return []
         class Dst:
             def __init__(self): self.calls=[]
             def request(self, method, url, data=None):
@@ -18,13 +18,13 @@ class ReleaseTests(unittest.TestCase):
                 if url.endswith('/repos/dest/mirror-alice-demo'): return {'description':mirror.source_marker(source,'demo')}
                 if '/releases/tags/' in url: return {'id':2,'name':'old','body':'original'}
                 return {}
-            def pages(self, url): raise AssertionError('existing destination assets must not be fetched')
+            def pages(self, url): return []
         dst=Dst()
         with patch.object(mirror, 'mirror_git'):
             mirror.mirror_repository(source,'demo','dest',Src(),dst,'token')
-        self.assertFalse(any(method == 'PATCH' and '/releases/' in url for method,url,_ in dst.calls))
+        self.assertTrue(any(method == 'PATCH' and '/releases/' in url and data.get('body') == 'edited' for method,url,data in dst.calls))
 
-    def test_interrupted_release_resumes_then_ignores_later_changes(self):
+    def test_interrupted_release_resumes_then_reconciles_later_changes(self):
         from urllib.error import HTTPError
         import io
         source = {'type':'github', 'base_url':'https://github.com', 'owner':'alice'}
@@ -67,8 +67,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(dst.release['body'], 'notes')
             src.name='edited'; src.assets.append('c')
             mirror.mirror_repository(source,'demo','dest',src,dst,'token')
-            self.assertEqual(dst.assets, {'a':b'a','b':b'b'})
-            self.assertEqual(dst.release['name'], 'original')
+            self.assertEqual(dst.assets, {'a':b'a','b':b'b','c':b'c'})
+            self.assertEqual(dst.release['name'], 'edited')
 
     def test_repository_failure_does_not_prevent_next_repository(self):
         import json, os, tempfile
