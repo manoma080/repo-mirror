@@ -486,6 +486,15 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
 
 
 
+def error_detail(exc):
+    # HTTPError URLs, reasons and bodies can contain credentials or attacker data.
+    if isinstance(exc, HTTPError):
+        if type(exc.code) is int and 100 <= exc.code <= 599:
+            return f'HTTP {exc.code}'
+        return 'HTTPError'
+    return str(exc) if isinstance(exc, ReleaseRecoveryError) else type(exc).__name__
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
@@ -522,7 +531,7 @@ def main(argv=None):
                 uncertain_prefixes.append(source.get('prefix', 'mirror-' + source['owner'] + '-').lower())
             else:
                 uncertain_names.update(destination_name(source, name).lower() for name in source['repos'])
-            print(f"source discovery failed for source {index} ({source['owner']}): {type(exc).__name__}", file=sys.stderr)
+            print(f"source discovery failed for source {index} ({source['owner']}): {error_detail(exc)}", file=sys.stderr)
             continue
         for name in names:
             target = destination_name(source, name).lower()
@@ -542,7 +551,7 @@ def main(argv=None):
             check_existing(get_existing(dst, target), source_marker(source, name))
             ready.append((source, name))
         except Exception as exc:
-            failures.append((destination_name(source, name), type(exc).__name__))
+            failures.append((destination_name(source, name), error_detail(exc)))
     for source, name in ready:
         try:
             if journal is None:
@@ -550,7 +559,7 @@ def main(argv=None):
             else:
                 mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
         except Exception as exc:
-            detail = str(exc) if isinstance(exc, ReleaseRecoveryError) else type(exc).__name__
+            detail = error_detail(exc)
             failures.append((destination_name(source, name), detail))
     if failures or discovery_failures:
         for name, kind in failures:
