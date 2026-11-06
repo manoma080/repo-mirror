@@ -557,14 +557,14 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         exc.close()
         latest = None
 
-    if initializing or len(releases) <= 3:
+    if initializing or len(releases) <= 1:
         selected = list(releases)
     else:
         pending_tags = {r.get('tag_name') for r in dst.pages(target + '/releases')
                         if isinstance(r.get('name'), str) and r['name'].startswith(
                             ('[repo-mirror:pending:v1]', '[repo-mirror:pending:v2]'))}
         failed_releases = {key.split(':', 1)[0] for key in journal.failures} if journal else set()
-        selected = releases[:3] + [r for r in releases[3:]
+        selected = releases[:1] + [r for r in releases[1:]
             if r['tag_name'] in pending_tags or (journal and journal.key(
                 source, name, owner, r['tag_name'], '')[:64] in failed_releases)]
     if latest:

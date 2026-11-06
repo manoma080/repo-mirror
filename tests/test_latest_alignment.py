@@ -87,7 +87,7 @@ class LatestAlignmentTests(unittest.TestCase):
         releases = [release(n) for n in range(12, 0, -1)]
         dst = Destination(False)
         run(Source(releases, releases[-1]), dst)
-        self.assertEqual(set(dst.releases), {'12', '11', '10', '1'})
+        self.assertEqual(set(dst.releases), {'12', '1'})
         self.assertEqual(dst.patches[-1][1]['make_latest'], 'true')
         self.assertTrue(dst.patches[-1][0].endswith('/' + str(dst.releases['1']['id'])))
 
