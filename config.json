@@ -18,6 +18,12 @@
       "base_url": "https://github.com",
       "owner": "Oliv3rmoon",
       "repos": ["Physalis"]
+    },
+    {
+      "type": "forgejo",
+      "base_url": "https://git.etawen.dev",
+      "owner": "earthonion",
+      "repos": ["garlic-savemgr"]
     }
   ]
 }
