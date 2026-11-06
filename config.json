@@ -5,25 +5,350 @@
       "type": "forgejo",
       "base_url": "https://theghostonline.dev",
       "owner": "theghostonline",
-      "repos": ["Ghost-VR", "Ghost-Play"]
+      "repos": [
+        "Ghost-VR",
+        "Ghost-Play",
+        "PS5-Game-Updater",
+        "PS5-LZ4-Compression"
+      ]
     },
     {
       "type": "github",
       "base_url": "https://github.com",
       "owner": "StonedModder",
-      "repos": ["Ghostcontrol-PS5-USB-Controller-Patcher"]
+      "repos": [
+        "Ghostcontrol-PS5-USB-Controller-Patcher",
+        "PShare",
+        "Prospero-Menu",
+        "ps5_devloop"
+      ]
     },
     {
       "type": "github",
       "base_url": "https://github.com",
       "owner": "Oliv3rmoon",
-      "repos": ["Physalis"]
+      "repos": [
+        "Physalis",
+        "Belladonna",
+        "Nightshade"
+      ]
     },
     {
       "type": "forgejo",
       "base_url": "https://git.etawen.dev",
       "owner": "earthonion",
-      "repos": ["garlic-savemgr"]
+      "repos": [
+        "garlic-savemgr",
+        "ddd_pair_dump",
+        "yt_adskip_ps4",
+        "np-fake-signin",
+        "np-account-restore",
+        "GarlicTransfer"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "earthonion",
+      "repos": [
+        "ddd_status",
+        "remoteplay_unlock",
+        "kdump_ps5",
+        "module_dumper"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "kvaps",
+      "repos": [
+        "ProsperoWeb"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "heydemoura",
+      "repos": [
+        "EglantinePS5"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "ZiZc3",
+      "repos": [
+        "Hydroid",
+        "XPSemu",
+        "Ruffle-Flash-PS5",
+        "VLC"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "seregonwar",
+      "repos": [
+        "MirrorPSX",
+        "sprxdump"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "Darkatek7",
+      "repos": [
+        "ProsperoSunshine"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "Swordpdf",
+      "repos": [
+        "ProsperoEden",
+        "PS5SX2"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "quer3q",
+      "repos": [
+        "ps5-dump-forge",
+        "ampr-emu-ng"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "drakmor",
+      "repos": [
+        "ampr_emu",
+        "nanoDNS",
+        "dlc_emu",
+        "pgo_stub",
+        "ShadowMountPlus",
+        "kstuff-lite",
+        "make_fself",
+        "ppr-patch"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "EchoStretch",
+      "repos": [
+        "kstuff-lite",
+        "ps5-app-dumper"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "cragson",
+      "repos": [
+        "a53-code-exec"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "JMUtechnologies",
+      "repos": [
+        "ecam-workbench"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "almhtar",
+      "repos": [
+        "ps5-hv-defeat"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "philippraschke75-spec",
+      "repos": [
+        "Experimental-build-for-dlss-5-neural-network-on-rdna-2"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "danielblnc",
+      "repos": [
+        "DLSS-NR-on-AMD"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "kerrdec97",
+      "repos": [
+        "PS5-Backport-GUI"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "gasb07",
+      "repos": [
+        "NeoEnabler"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "illusionyy",
+      "repos": [
+        "ps-patch-system",
+        "PS-Game-Patch"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "zerodaysofficial",
+      "repos": [
+        "zer0game"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "TeeKay87",
+      "repos": [
+        "HEN-Cheats-Collection"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "notmaj0r",
+      "repos": [
+        "CheatRunner",
+        "CheatRunner_Patches"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "morluto",
+      "repos": [
+        "rea"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "mpereiraesaa",
+      "repos": [
+        "prospero-win",
+        "prospero-win-profiles",
+        "ps5-agc-gears",
+        "ps5-vulkan"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "darkxex",
+      "repos": [
+        "SwanStationPS5"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "Press5elect",
+      "repos": [
+        "PSSwanStation"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "elripalda",
+      "repos": [
+        "Porpoise-Dolphin-Emulator-for-PS5"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "premohq",
+      "repos": [
+        "PlayTendoh"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "BrinooTk",
+      "repos": [
+        "PS5X360"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "mihawk-99",
+      "repos": [
+        "PS5_MihawkOS",
+        "MihawkOS-Compatibility",
+        "PS5_Vulkan",
+        "PS5_VulkanTemplate",
+        "PS5_MihawkGen",
+        "PS5_VKHomebrewUI",
+        "PS5_RetroArch"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "SvenGDK",
+      "repos": [
+        "SharpProspero",
+        "LibProsperoPKG",
+        "Prospero-Multi-Tools",
+        "Prospero-Explorer",
+        "unjail-ps5app-payload"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "aydencharles",
+      "repos": [
+        "onionHEN"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "SamoZ256",
+      "repos": [
+        "hydra"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "icepuente",
+      "repos": [
+        "rct2-ps5"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "DaniekDbs",
+      "repos": [
+        "ProsperoPZ"
+      ]
     }
   ]
 }
