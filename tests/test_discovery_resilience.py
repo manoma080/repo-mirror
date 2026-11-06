@@ -26,7 +26,8 @@ class DiscoveryResilienceTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     mirror.main(['--config', f.name])
         self.assertEqual([call.args[1] for call in run.call_args_list], ['one'])
-        self.assertIn('bad', stderr.getvalue())
+        self.assertIn('source discovery failed for source 1', stderr.getvalue())
+        self.assertIn('source 1/2', stderr.getvalue())
         self.assertIn('OSError', stderr.getvalue())
         self.assertNotIn('secret details', stderr.getvalue())
 

@@ -40,7 +40,7 @@ class StarterAssetTests(unittest.TestCase):
         class Src:
             def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url):
-                if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'secret-tag'}]
+                if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'https://example.test/?token=secret'}]
                 return [{'name': 'secret-file', 'size': 1, 'browser_download_url': 'https://github.com/secret'}]
         class Dst:
             def request(self, method, url, data=None):
@@ -54,7 +54,8 @@ class StarterAssetTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError): mirror.main(['--config', f.name])
         self.assertIn('assets changed', stderr.getvalue())
         self.assertIn('manual', stderr.getvalue())
-        self.assertIn('mirror-alice-demo', stderr.getvalue())
+        self.assertIn('repository 1', stderr.getvalue())
+        self.assertNotIn('mirror-alice-demo', stderr.getvalue())
         self.assertNotIn('secret', stderr.getvalue())
 
     def test_main_reports_manual_action_for_starter_asset(self):
@@ -65,4 +66,5 @@ class StarterAssetTests(unittest.TestCase):
             with patch.dict(os.environ, {'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}), patch.object(mirror, 'get_existing', return_value=None), patch.object(mirror, 'mirror_repository', side_effect=mirror.StarterAssetError()), redirect_stderr(stderr):
                 with self.assertRaises(RuntimeError): mirror.main(['--config', f.name])
         self.assertRegex(stderr.getvalue().lower(), 'starter.*manual')
-        self.assertIn('mirror-alice-demo', stderr.getvalue())
+        self.assertIn('repository 1', stderr.getvalue())
+        self.assertNotIn('mirror-alice-demo', stderr.getvalue())

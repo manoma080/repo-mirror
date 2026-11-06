@@ -115,6 +115,7 @@ class API:
             except URLError:
                 if method not in ('GET', 'PUT', 'PATCH', 'DELETE') or attempt == 3:
                     raise
+            print(f'request retry {attempt + 1}/3', file=sys.stderr, flush=True)
             time.sleep(2 ** attempt)
         raise RuntimeError('request retries exhausted')
 
@@ -360,8 +361,10 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         selected = releases[:10] + [r for r in releases[10:]
             if r['tag_name'] in pending_tags or (journal and journal.key(
                 source, name, owner, r['tag_name'], '')[:64] in failed_releases)]
-    for release in selected:
+    print(f'releases discovered={len(releases)} selected={len(selected)} skipped={len(releases) - len(selected)}', file=sys.stderr, flush=True)
+    for release_index, release in enumerate(selected, 1):
         tag = release['tag_name']
+        print(f'release {release_index}/{len(selected)} started', file=sys.stderr, flush=True)
         try:
             existing = dst.request('GET', target + '/releases/tags/' + quote(tag, safe=''))
         except HTTPError as e:
@@ -389,7 +392,9 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
             digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
             return assets, digest
         source_assets, digest = fetch_source_assets()
+        print(f'release {release_index}/{len(selected)} assets={len(source_assets)}', file=sys.stderr, flush=True)
         if existing and pending:
+            print('release resuming pending update', file=sys.stderr, flush=True)
             pending_name = existing['name']
             try:
                 original_name, expected_digest = json.loads(base64.urlsafe_b64decode(pending_name[len(prefix):].encode()).decode())
@@ -421,9 +426,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         if len(by_name) != len(assets) or len({a['name'] for a in source_assets}) != len(source_assets):
             raise ReleaseRecoveryError('mismatch')
         upload_failures = 0
+        uploaded = updated = skipped = retried = 0
         ordered_assets = journal.retry_order(source, name, owner, tag, source_assets) if journal else source_assets
-        for asset in ordered_assets:
+        for asset_index, asset in enumerate(ordered_assets, 1):
+            print(f'asset {asset_index}/{len(ordered_assets)} started', file=sys.stderr, flush=True)
             key = journal.key(source, name, owner, tag, asset['name']) if journal else None
+            was_journaled = journal is not None and key in journal.failures
             previous = by_name.get(asset['name'])
             with tempfile.TemporaryFile() as data:
                 src.download(asset['browser_download_url'], data)
@@ -452,13 +460,26 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     if journal:
                         journal.set(key, True)
                     try:
+                        if was_journaled:
+                            retried += 1
                         dst.upload(upload_url, data, asset.get('content_type') or 'application/octet-stream')
-                    except Exception:
+                    except Exception as exc:
+                        detail = error_detail(exc)
+                        if isinstance(exc, HTTPError):
+                            exc.close()
+                        print(f'asset upload failed for asset {asset_index}/{len(ordered_assets)}: {detail}', file=sys.stderr, flush=True)
                         if journal is None:
                             raise
                         upload_failures += 1
                         continue
+                    if changed:
+                        updated += 1
+                    else:
+                        uploaded += 1
+                else:
+                    skipped += 1
 
+        print(f'assets uploaded={uploaded} updated={updated} skipped={skipped} retried={retried} upload_failed={upload_failures}', file=sys.stderr, flush=True)
         if upload_failures:
             raise RuntimeError('release asset uploads failed')
         _, final_digest = fetch_source_assets()
@@ -481,18 +502,46 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                 key = journal.key(source, name, owner, tag, asset['name'])
                 if key in journal.failures:
                     journal.set(key, False)
+        print(f'release {release_index}/{len(selected)} completed', file=sys.stderr, flush=True)
     if initializing:
         dst.request('PATCH', target, {'description': marker})
 
 
 
+SAFE_ERROR_MESSAGES = frozenset({
+    'source type must be github or forgejo', 'source base_url must be credential-free HTTPS',
+    'invalid owner or prefix', 'repos must be all or a list of repository names',
+    'invalid discovered repository name', 'invalid destination repository name',
+    'destination collision: repository has no matching source marker', 'unsafe redirect',
+    'API URL must be credential-free HTTPS', 'refusing to send destination credentials to non-GitHub host',
+    'request retries exhausted', 'pagination response is not an array', 'pagination exceeded safety limit',
+    'refusing unsafe destination asset URL', 'unsafe asset URL', 'asset address is not public',
+    'asset redirect missing location', 'asset download failed', 'too many asset redirects',
+    'asset exceeds GitHub size limit', 'failure journal must not be a symlink', 'invalid failure journal',
+    'created repository owner does not match configured destination', 'source clone URL does not match source host',
+    'source default branch missing; refusing to prune', 'multiple destination releases for tag',
+    'release assets response is not an array', 'source release name uses reserved marker',
+    'release name too long for pending marker', 'source asset size mismatch', 'release asset uploads failed',
+    'GH_TOKEN and valid DESTINATION_OWNER are required', 'config must be an object',
+    'destination_account_type must be personal or organization', 'sources must be a list',
+    'duplicate destination repository',
+    *ReleaseRecoveryError.MESSAGES.values(),
+    'starter release asset detected; manually remove the starter asset from the pending GitHub release, then rerun',
+})
+
+
 def error_detail(exc):
-    # HTTPError URLs, reasons and bodies can contain credentials or attacker data.
+    # Never emit arbitrary exception text, URLs, response bodies or class names.
     if isinstance(exc, HTTPError):
         if type(exc.code) is int and 100 <= exc.code <= 599:
             return f'HTTP {exc.code}'
         return 'HTTPError'
-    return str(exc) if isinstance(exc, ReleaseRecoveryError) else type(exc).__name__
+    if len(exc.args) == 1 and type(exc.args[0]) is str and exc.args[0] in SAFE_ERROR_MESSAGES:
+        return exc.args[0]
+    for kind in (ValueError, RuntimeError, URLError, OSError, KeyError, TypeError):
+        if isinstance(exc, kind):
+            return kind.__name__
+    return 'Error'
 
 
 def main(argv=None):
@@ -523,6 +572,7 @@ def main(argv=None):
     uncertain_prefixes = []
     uncertain_names = set()
     for index, source in enumerate(sources, 1):
+        print(f'source {index}/{len(sources)} discovery started', file=sys.stderr, flush=True)
         try:
             names = discover(source, src)
         except Exception as exc:
@@ -531,39 +581,47 @@ def main(argv=None):
                 uncertain_prefixes.append(source.get('prefix', 'mirror-' + source['owner'] + '-').lower())
             else:
                 uncertain_names.update(destination_name(source, name).lower() for name in source['repos'])
-            print(f"source discovery failed for source {index} ({source['owner']}): {error_detail(exc)}", file=sys.stderr)
+            print(f'source discovery failed for source {index}: {error_detail(exc)}', file=sys.stderr, flush=True)
             continue
+        print(f'source {index}/{len(sources)} discovery completed discovered={len(names)}', file=sys.stderr, flush=True)
         for name in names:
             target = destination_name(source, name).lower()
             if target in seen:
-                raise ValueError('duplicate destination repository: ' + target)
+                raise ValueError('duplicate destination repository')
             seen.add(target)
-            plan.append((source, name))
+            plan.append((index, source, name))
     failures = []
     ready = []
-    for source, name in plan:
+    for repo_index, (source_index, source, name) in enumerate(plan, 1):
         dest = destination_name(source, name)
         if dest.lower() in uncertain_names or any(dest.lower().startswith(prefix) for prefix in uncertain_prefixes):
-            failures.append((dest, 'possible collision with undiscovered source; retry discovery or use distinct prefixes'))
+            failures.append((repo_index, 'possible collision with undiscovered source; retry discovery or use distinct prefixes'))
             continue
         target = f"{GITHUB}/repos/{quote(owner, safe='')}/{quote(dest, safe='')}"
         try:
             check_existing(get_existing(dst, target), source_marker(source, name))
-            ready.append((source, name))
+            ready.append((repo_index, source_index, source, name))
         except Exception as exc:
-            failures.append((destination_name(source, name), error_detail(exc)))
-    for source, name in ready:
+            failures.append((repo_index, error_detail(exc)))
+    succeeded = 0
+    for repo_index, source_index, source, name in ready:
+        print(f'repository {repo_index}/{len(plan)} started (source {source_index}/{len(sources)})', file=sys.stderr, flush=True)
         try:
             if journal is None:
                 mirror_repository(source, name, owner, src, dst, token, account_type)
             else:
                 mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
+            succeeded += 1
+            print(f'repository {repo_index}/{len(plan)} completed', file=sys.stderr, flush=True)
         except Exception as exc:
             detail = error_detail(exc)
-            failures.append((destination_name(source, name), detail))
+            failures.append((repo_index, detail))
+            print(f'repository {repo_index}/{len(plan)} failed: {detail}', file=sys.stderr, flush=True)
+    print(f'summary sources={len(sources)} discovery_failed={discovery_failures} repositories={len(plan)} succeeded={succeeded} failed={len(failures)}', file=sys.stderr, flush=True)
     if failures or discovery_failures:
-        for name, kind in failures:
-            print(f'mirror failed for {name}: {kind}', file=sys.stderr)
+        for repo_index, kind in failures:
+            source_index, _, _ = plan[repo_index - 1]
+            print(f'mirror failed for repository {repo_index} (source {source_index}/{len(sources)}): {kind}', file=sys.stderr, flush=True)
         raise RuntimeError(f'{discovery_failures} sources and {len(failures)} repositories failed')
 
 
@@ -572,6 +630,6 @@ if __name__ == '__main__':
         main()
     except Exception as exc:
         # Avoid printing subprocess stderr, URLs, response bodies or credentials.
-        detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__
-        print('mirror failed: ' + detail, file=sys.stderr)
+        detail = error_detail(exc)
+        print('mirror failed: ' + detail, file=sys.stderr, flush=True)
         sys.exit(1)
