@@ -364,14 +364,6 @@
     {
       "type": "github",
       "base_url": "https://github.com",
-      "owner": "phantomptr",
-      "repos": [
-        "ps5upload"
-      ]
-    },
-    {
-      "type": "github",
-      "base_url": "https://github.com",
       "owner": "PS5Dev",
       "repos": [
         "Byepervisor",
@@ -449,6 +441,22 @@
         "ps5-bdjb-autoloader",
         "ps5-pkg-manager",
         "PS5-Lapy-JB-Daemon"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "seedds",
+      "repos": [
+        "nxnative"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "Gezine",
+      "repos": [
+        "CivSwitch"
       ]
     }
   ]
