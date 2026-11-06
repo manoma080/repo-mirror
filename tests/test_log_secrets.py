@@ -1,4 +1,4 @@
-import gc
+
 import io
 import json
 import os
@@ -47,7 +47,7 @@ class LogSecretsTests(unittest.TestCase):
         class FailedDestination(Destination):
             def upload(self, url, data, content_type):
                 raise HTTPError('https://example.test/?token=secret', 403, 'secret', {}, io.BytesIO())
-        gc.collect()  # Dispose of unrelated HTTPError fixtures before capturing stderr.
+
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as directory, patch.object(mirror, 'mirror_git'), redirect_stderr(output):
             journal = mirror.FailureJournal(os.path.join(directory, 'journal'))

@@ -11,7 +11,10 @@ SOURCE = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice'}
 class ReleasePolicyTests(unittest.TestCase):
     def test_existing_release_gets_new_assets_and_updated_metadata(self):
         class Source:
-            def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'v1', 'name': 'new', 'body': 'notes'}]
                 return [{'name': 'a', 'size': 1, 'browser_download_url': 'https://github.com/a'}]
@@ -37,7 +40,10 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_existing_mirror_only_considers_ten_latest_releases(self):
         class Source:
-            def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url): return [{'id': n, 'tag_name': str(n)} for n in range(12)] if url.endswith('/releases') else []
         class Destination:
             def __init__(self): self.tags = []
@@ -56,7 +62,10 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_new_repository_persists_initialization_until_history_is_complete(self):
         class Source:
-            def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url): raise RuntimeError('interrupted')
         class Destination:
             def __init__(self): self.description = None

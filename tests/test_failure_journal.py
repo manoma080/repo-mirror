@@ -32,7 +32,10 @@ class FailureJournalTest(unittest.TestCase):
     def test_failed_upload_is_recorded_then_cleared_after_retry(self):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo']}
         class Source:
-            def request(self, method, url, data=None): return {'clone_url': 'https://github.com/alice/demo.git'}
+            def request(self, method, url, data=None):
+                if url.endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(url, 404, '', {}, None)
+                return {'clone_url': 'https://github.com/alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'v1', 'name': 'one'}]
                 return [{'name': 'file', 'size': 3, 'browser_download_url': 'https://github.com/a'}]

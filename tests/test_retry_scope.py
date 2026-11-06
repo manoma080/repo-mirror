@@ -13,7 +13,10 @@ SOURCE = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice'}
 class Source:
     def __init__(self):
         self.releases = [{'id': n, 'tag_name': str(n), 'name': 'current'} for n in range(12)]
-    def request(self, *args): return {'clone_url': 'https://github.com/alice/demo.git'}
+    def request(self, *args):
+        if args[1].endswith('/releases/latest'):
+            raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+        return {'clone_url': 'https://github.com/alice/demo.git'}
     def pages(self, url): return self.releases if url.endswith('/releases') else []
 
 

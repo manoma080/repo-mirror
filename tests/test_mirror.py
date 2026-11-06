@@ -28,6 +28,8 @@ class EngineTests(unittest.TestCase):
         class API:
             def __init__(self): self.calls = []; self.uploaded = False
             def request(self, method, url, data=None, **kwargs):
+                if url.endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(url, 404, '', {}, None)
                 self.calls.append((method, url, data))
                 if url.endswith('/repos/dest/pre-demo') and method == 'GET': return {'private': True, 'description': '[repo-mirror: forgejo:https://src.example/alice/demo]'}
                 if url.endswith('/repos/alice/demo') and method == 'GET': return {'clone_url': 'https://src.example/alice/demo.git'}
@@ -59,6 +61,8 @@ class EngineTests(unittest.TestCase):
         class API:
             def __init__(self): self.visited = []; self.uploaded = False
             def request(self, method, url, data=None, **kw):
+                if url.endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(url, 404, '', {}, None)
                 if url.endswith('/repos/dest/mirror-alice-demo'): return {'private': False, 'description': '[repo-mirror: forgejo:https://src.example/alice/demo]'}
                 if url.endswith('/repos/alice/demo'): return {'clone_url': 'https://src.example/alice/demo.git'}
                 if url.endswith('/releases/tags/v1'): return {'id': 9, 'name': pending('file', 1, 'https://src.example/file'), 'tag_name': 'v1', 'upload_url': 'https://uploads.github.com/x{?name}'}
@@ -105,7 +109,10 @@ class SafetyTests(unittest.TestCase):
     def test_rejects_unrelated_existing_repository(self):
         from unittest.mock import patch
         class API:
-            def request(self, method, url, data=None): return {'private': True, 'description': 'unrelated'}
+            def request(self, method, url, data=None):
+                if url.endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(url, 404, '', {}, None)
+                return {'private': True, 'description': 'unrelated'}
         source = {'type':'github', 'base_url':'https://github.com', 'owner':'Alice', 'repos':['demo']}
         with patch.object(mirror, 'mirror_git') as git:
             with self.assertRaisesRegex(RuntimeError, 'collision'):
@@ -125,7 +132,10 @@ class SafetyTests(unittest.TestCase):
                 return {}
             def pages(self, url): return []
         class Source:
-            def request(self, *a): return {'clone_url':'https://github.com/Alice/demo.git'}
+            def request(self, *a):
+                if a[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(a[1], 404, '', {}, None)
+                return {'clone_url':'https://github.com/Alice/demo.git'}
             def pages(self, url): return []
         dst = Destination()
         source = {'type':'github','base_url':'https://github.com','owner':'Alice','repos':['demo']}
@@ -138,7 +148,10 @@ class SafetyTests(unittest.TestCase):
         from unittest.mock import patch
         source = {'type':'github','base_url':'https://github.com','owner':'Alice','repos':['demo']}
         class Src:
-            def request(self, *a): return {'clone_url':'https://github.com/Alice/demo.git'}
+            def request(self, *a):
+                if a[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(a[1], 404, '', {}, None)
+                return {'clone_url':'https://github.com/Alice/demo.git'}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id':1,'tag_name':'v1'}]
                 return [{'name':'bin','size':1,'browser_download_url':'https://github.com/bin'}]
@@ -162,7 +175,10 @@ class SafetyTests(unittest.TestCase):
         from unittest.mock import patch
         source = {'type':'github','base_url':'https://github.com','owner':'Alice','repos':['demo']}
         class Src:
-            def request(self, *args): return {'clone_url':'https://github.com/Alice/demo.git'}
+            def request(self, *args):
+                if args[1].endswith('/releases/latest'):
+                    raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(args[1], 404, '', {}, None)
+                return {'clone_url':'https://github.com/Alice/demo.git'}
             def pages(self, url): return []
         class Dst:
             def __init__(self): self.calls=[]
