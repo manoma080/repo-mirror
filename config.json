@@ -12,6 +12,12 @@
       "base_url": "https://github.com",
       "owner": "StonedModder",
       "repos": ["Ghostcontrol-PS5-USB-Controller-Patcher"]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "Oliv3rmoon",
+      "repos": ["Physalis"]
     }
   ]
 }
