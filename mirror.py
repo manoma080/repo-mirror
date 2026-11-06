@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Mirror public GitHub/Forgejo repositories to private GitHub repositories."""
+import argparse
+import base64
+import json
+import http.client
+import ipaddress
+import socket
+import ssl
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode, urlparse, urljoin
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+
+GITHUB = 'https://api.github.com'
+MAX_ASSET_SIZE = 2 * 1024 * 1024 * 1024 - 1
+CHUNK_SIZE = 1024 * 1024
+NAME = re.compile(r'^[A-Za-z0-9_.-]+$')
+
+
+def validate_source(source):
+    if not isinstance(source, dict) or source.get('type') not in ('github', 'forgejo'):
+        raise ValueError('source type must be github or forgejo')
+    u = urlparse(source.get('base_url', ''))
+    if u.scheme != 'https' or not u.hostname or u.username or u.password or u.query or u.fragment:
+        raise ValueError('source base_url must be credential-free HTTPS')
+    for value in [source.get('owner'), source.get('prefix', '') if source.get('prefix', '') != '' else 'x']:
+        if not isinstance(value, str) or not NAME.fullmatch(value) or value in ('.', '..'):
+            raise ValueError('invalid owner or prefix')
+    repos = source.get('repos')
+    if repos != 'all' and (not isinstance(repos, list) or any(not isinstance(x, str) or not NAME.fullmatch(x) or x in ('.', '..') for x in repos)):
+        raise ValueError('repos must be all or a list of repository names')
+
+
+def source_api_base(source):
+    base = source['base_url'].rstrip('/')
+    if source['type'] == 'forgejo':
+        return base + '/api/v1'
+    return GITHUB if base == 'https://github.com' else base
+
+
+def discover(source, api):
+    if source['repos'] != 'all':
+        return source['repos']
+    return [repo['name'] for repo in api.pages(f"{source_api_base(source)}/users/{quote(source['owner'], safe='')}/repos")]
+
+
+def destination_name(source, name):
+    if not isinstance(name, str) or not NAME.fullmatch(name) or name in ('.', '..'):
+        raise ValueError('invalid discovered repository name')
+    result = source.get('prefix', 'mirror-' + source['owner'] + '-') + name
+    if len(result) > 100 or not NAME.fullmatch(result) or result in ('.', '..'):
+        raise ValueError('invalid destination repository name')
+    return result
+
+
+def source_marker(source, name):
+    return '[repo-mirror: ' + source['type'] + ':' + source['base_url'].rstrip('/').lower() + '/' + source['owner'] + '/' + name + ']'
+
+
+def check_existing(repo, marker):
+    if repo is not None and repo.get('description') != marker:
+        raise RuntimeError('destination collision: repository has no matching source marker')
+
+
+def get_existing(dst, target):
+    try:
+        return dst.request('GET', target)
+    except HTTPError as exc:
+        if not not_found(exc):
+            raise
+        exc.close()
+        return None
+
+
+class SafeRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urlparse(newurl)
+        if target.scheme != 'https' or target.username or target.password:
+            raise ValueError('unsafe redirect')
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected and urlparse(req.full_url).netloc.lower() != target.netloc.lower():
+            redirected.remove_header('Authorization')
+        return redirected
+
+
+class API:
+    def __init__(self, token=None):
+        self.token = token
+        self.opener = build_opener(SafeRedirect())
+
+    def _request(self, method, url, body=None, headers=None):
+        parsed = urlparse(url)
+        if parsed.scheme != 'https' or parsed.username or parsed.password:
+            raise ValueError('API URL must be credential-free HTTPS')
+        headers = dict(headers or {})
+        headers['User-Agent'] = 'repo-mirror'
+        if self.token:
+            if parsed.hostname not in ('api.github.com', 'uploads.github.com') or parsed.port not in (None, 443):
+                raise ValueError('refusing to send destination credentials to non-GitHub host')
+            headers['Authorization'] = 'Bearer ' + self.token
+        for attempt in range(4):
+            try:
+                with self.opener.open(Request(url, data=body, headers=headers, method=method), timeout=60) as response:
+                    return response.read()
+            except HTTPError as e:
+                if method not in ('GET', 'PUT', 'PATCH', 'DELETE') or e.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                    raise
+            except URLError:
+                if method not in ('GET', 'PUT', 'PATCH', 'DELETE') or attempt == 3:
+                    raise
+            time.sleep(2 ** attempt)
+        raise RuntimeError('request retries exhausted')
+
+    def request(self, method, url, data=None, **kwargs):
+        body = None if data is None else json.dumps(data).encode()
+        raw = self._request(method, url, body, {'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+        return json.loads(raw) if raw else None
+
+    def pages(self, url):
+        result = []
+        for page in range(1, 10001):
+            separator = '&' if '?' in url else '?'
+            items = self.request('GET', f'{url}{separator}per_page=100&limit=100&page={page}')
+            if not isinstance(items, list):
+                raise ValueError('pagination response is not an array')
+            result.extend(items)
+            if not items:
+                return result
+        raise RuntimeError('pagination exceeded safety limit')
+
+    def download(self, url, output):
+        if self.token:
+            parsed = urlparse(url)
+            if (parsed.scheme != 'https' or parsed.username or parsed.password or
+                    parsed.hostname not in ('api.github.com', 'uploads.github.com') or
+                    parsed.port not in (None, 443)):
+                raise ValueError('refusing unsafe destination asset URL')
+            request = Request(url, headers={'Accept': 'application/octet-stream',
+                              'User-Agent': 'repo-mirror', 'Authorization': 'Bearer ' + self.token})
+            with self.opener.open(request, timeout=60) as response:
+                copy_asset(response, output)
+            return
+        # Connect to a validated address directly; do not use a proxy or resolve twice.
+        for _ in range(10):
+            parsed = urlparse(url)
+            if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+                raise ValueError('unsafe asset URL')
+            port = parsed.port or 443
+            addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+            ips = [ipaddress.ip_address(a[4][0]) for a in addresses]
+            if not ips or any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in ips):
+                raise ValueError('asset address is not public')
+            family, socktype, proto, _, address = addresses[0]
+            raw = socket.socket(family, socktype, proto)
+            raw.settimeout(60)
+            try:
+                raw.connect(address)
+                tls = ssl.create_default_context().wrap_socket(raw, server_hostname=parsed.hostname)
+                conn = http.client.HTTPSConnection(parsed.hostname, port, timeout=60)
+                conn.sock = tls
+                try:
+                    path = parsed.path or '/'
+                    if parsed.query:
+                        path += '?' + parsed.query
+                    conn.request('GET', path, headers={'Accept': 'application/octet-stream', 'User-Agent': 'repo-mirror'})
+                    response = conn.getresponse()
+                    if response.status in (301, 302, 303, 307, 308):
+                        location = response.getheader('Location')
+                        if not location:
+                            raise ValueError('asset redirect missing location')
+                        url = urljoin(url, location)
+                        continue
+                    if response.status != 200:
+                        raise RuntimeError('asset download failed')
+                    copy_asset(response, output)
+                    return
+                finally:
+                    conn.close()
+            finally:
+                raw.close()
+        raise ValueError('too many asset redirects')
+
+    def upload(self, url, data, content_type):
+        position = data.tell()
+        data.seek(0, os.SEEK_END)
+        size = data.tell() - position
+        data.seek(position)
+        if size > MAX_ASSET_SIZE:
+            raise ValueError('asset exceeds GitHub size limit')
+        self._request('POST', url, data, {'Content-Type': content_type, 'Content-Length': str(size)})
+
+
+def copy_asset(response, output):
+    size = 0
+    while True:
+        chunk = response.read(CHUNK_SIZE)
+        if not chunk:
+            return size
+        size += len(chunk)
+        if size > MAX_ASSET_SIZE:
+            raise ValueError('asset exceeds GitHub size limit')
+        output.write(chunk)
+
+
+def same_file(left, right):
+    left.seek(0)
+    right.seek(0)
+    while True:
+        a, b = left.read(CHUNK_SIZE), right.read(CHUNK_SIZE)
+        if a != b:
+            return False
+        if not a:
+            return True
+
+
+def not_found(exc):
+    return isinstance(exc, HTTPError) and exc.code == 404
+
+
+def mirror_git(source_url, destination_url, token, after_push=None):
+    # Git is isolated from user/system configuration and never receives the token
+    # while contacting the source. Hooks are disabled and no checkout occurs.
+    with tempfile.TemporaryDirectory(prefix='repo-mirror-') as tmp:
+        env = os.environ.copy()
+        env.pop('GH_TOKEN', None)
+        env.update({'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+                    'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': '', 'GIT_LFS_SKIP_SMUDGE': '1'})
+        for key in list(env):
+            if key.startswith('GIT_') and key not in ('GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GIT_LFS_SKIP_SMUDGE'):
+                del env[key]
+        def run(args, config_env=None):
+            e = env.copy()
+            if config_env:
+                e.update(config_env)
+            result = subprocess.run(['git', '-c', 'core.hooksPath=' + os.devnull, '-c', 'protocol.file.allow=never', *args],
+                                    env=e, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return result.stdout
+        run(['init', '--bare', tmp])
+        run(['-C', tmp, 'fetch', '--no-tags', '--force', source_url, '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*'])
+        if not run(['-C', tmp, 'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/tags']):
+            return False
+        auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
+        credentials = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                       'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: Basic ' + auth}
+        refspecs = ['+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*']
+        run(['-C', tmp, 'push', '--force', destination_url, *refspecs], credentials)
+        if after_push:
+            after_push()
+        run(['-C', tmp, 'push', '--force', '--prune', destination_url, *refspecs], credentials)
+        return True
+
+
+
+def mirror_repository(source, name, owner, src, dst, token, account_type='organization'):
+    dest_name = destination_name(source, name)
+    marker = source_marker(source, name)
+    qowner, qname = quote(owner, safe=''), quote(dest_name, safe='')
+    target = f'{GITHUB}/repos/{qowner}/{qname}'
+    repo = get_existing(dst, target)
+    check_existing(repo, marker)
+    if repo is None:
+        endpoint = '/user/repos' if account_type == 'personal' else f'/orgs/{qowner}/repos'
+        repo = dst.request('POST', GITHUB + endpoint, {'name': dest_name, 'private': True, 'auto_init': False, 'description': marker})
+        if repo.get('full_name', '').lower() != (owner + '/' + dest_name).lower():
+            raise RuntimeError('created repository owner does not match configured destination')
+    dst.request('PUT', target + '/actions/permissions', {'enabled': False})
+    srcbase = source_api_base(source)
+    upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(name, safe='')}"
+    metadata = src.request('GET', upstream)
+    clone_url = metadata['clone_url']
+    parsed = urlparse(clone_url)
+    base = urlparse(source['base_url'])
+    allowed_host = 'github.com' if source['type'] == 'github' and base.hostname == 'api.github.com' else base.hostname
+    if parsed.scheme != 'https' or parsed.hostname != allowed_host or parsed.username or parsed.password:
+        raise ValueError('source clone URL does not match source host')
+    default_branch = metadata.get('default_branch')
+    def update_default():
+        if not default_branch:
+            raise RuntimeError('source default branch missing; refusing to prune')
+        if repo.get('default_branch') != default_branch:
+            dst.request('PATCH', target, {'default_branch': default_branch})
+    mirror_git(clone_url, f'https://github.com/{qowner}/{qname}.git', token, update_default)
+    for release in src.pages(upstream + '/releases'):
+        tag = release['tag_name']
+        try:
+            existing = dst.request('GET', target + '/releases/tags/' + quote(tag, safe=''))
+        except HTTPError as e:
+            if not not_found(e):
+                raise
+            existing = None
+        fields = {k: release.get(k) for k in ('name', 'body', 'draft', 'prerelease')}
+        fields['tag_name'] = tag
+        if existing:
+            if any(existing.get(k) != v for k, v in fields.items()):
+                dst.request('PATCH', target + '/releases/' + str(existing['id']), fields)
+        else:
+            existing = dst.request('POST', target + '/releases', fields)
+        assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
+        by_name = {asset['name']: asset for asset in assets}
+        asset_url = upstream + '/releases/' + str(release['id']) + '/assets'
+        source_assets = (src.request('GET', asset_url) if source['type'] == 'forgejo'
+                         else src.pages(asset_url))
+        if not isinstance(source_assets, list):
+            raise ValueError('release assets response is not an array')
+        for asset in source_assets:
+            previous = by_name.get(asset['name'])
+            if previous and previous.get('size') != asset.get('size'):
+                raise RuntimeError('release asset mismatch; refusing to delete or replace')
+            with tempfile.TemporaryFile() as data:
+                src.download(asset['browser_download_url'], data)
+                if previous:
+                    with tempfile.TemporaryFile() as existing_data:
+                        dst.download(previous['url'], existing_data)
+                        if not same_file(data, existing_data):
+                            raise RuntimeError('release asset mismatch; refusing to delete or replace')
+                else:
+                    data.seek(0)
+                    upload_url = existing['upload_url'].split('{', 1)[0] + '?' + urlencode({'name': asset['name']})
+                    dst.upload(upload_url, data, asset.get('content_type') or 'application/octet-stream')
+
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True)
+    args = parser.parse_args(argv)
+    token, owner = os.environ.get('GH_TOKEN'), os.environ.get('DESTINATION_OWNER')
+    if not token or not owner or not NAME.fullmatch(owner) or owner in ('.', '..'):
+        raise ValueError('GH_TOKEN and valid DESTINATION_OWNER are required')
+    with open(args.config, encoding='utf-8') as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError('config must be an object')
+    account_type = os.environ.get('DESTINATION_ACCOUNT_TYPE', config.get('destination_account_type'))
+    if account_type not in ('personal', 'organization'):
+        raise ValueError('destination_account_type must be personal or organization')
+    sources = config.get('sources')
+    if not isinstance(sources, list):
+        raise ValueError('sources must be a list')
+    for source in sources:
+        validate_source(source)
+    src, dst = API(), API(token)
+    seen = set()
+    plan = []
+    for source in sources:
+        for name in discover(source, src):
+            target = destination_name(source, name).lower()
+            if target in seen:
+                raise ValueError('duplicate destination repository: ' + target)
+            seen.add(target)
+            plan.append((source, name))
+    for source, name in plan:
+        target = f"{GITHUB}/repos/{quote(owner, safe='')}/{quote(destination_name(source, name), safe='')}"
+        check_existing(get_existing(dst, target), source_marker(source, name))
+    for source, name in plan:
+        mirror_repository(source, name, owner, src, dst, token, account_type)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        # Avoid printing subprocess stderr, URLs, response bodies or credentials.
+        detail = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__
+        print('mirror failed: ' + detail, file=sys.stderr)
+        sys.exit(1)

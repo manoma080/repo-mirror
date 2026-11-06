@@ -1,0 +1,17 @@
+{
+  "destination_account_type": "personal",
+  "sources": [
+    {
+      "type": "forgejo",
+      "base_url": "https://theghostonline.dev",
+      "owner": "theghostonline",
+      "repos": ["Ghost-VR"]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "StonedModder",
+      "repos": ["Ghostcontrol-PS5-USB-Controller-Patcher"]
+    }
+  ]
+}
