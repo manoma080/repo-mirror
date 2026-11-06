@@ -1,5 +1,14 @@
 import unittest
+import base64
+import json
 import mirror
+
+
+def pending(asset_name, size, url, name=None):
+    import hashlib
+    manifest = [[asset_name, size, None, None, url]]
+    digest = hashlib.sha256(json.dumps(manifest, separators=(',', ':')).encode()).hexdigest()
+    return '[repo-mirror:pending:v1]' + base64.urlsafe_b64encode(json.dumps([name, digest]).encode()).decode()
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -17,21 +26,22 @@ class DiscoveryTests(unittest.TestCase):
 class EngineTests(unittest.TestCase):
     def test_existing_repo_is_secured_and_release_assets_reconciled(self):
         class API:
-            def __init__(self): self.calls = []
+            def __init__(self): self.calls = []; self.uploaded = False
             def request(self, method, url, data=None, **kwargs):
                 self.calls.append((method, url, data))
                 if url.endswith('/repos/dest/pre-demo') and method == 'GET': return {'private': True, 'description': '[repo-mirror: forgejo:https://src.example/alice/demo]'}
                 if url.endswith('/repos/alice/demo') and method == 'GET': return {'clone_url': 'https://src.example/alice/demo.git'}
-                if url.endswith('/releases/tags/v1'): return {'id': 11, 'upload_url': 'https://uploads.github.com/repos/dest/pre-demo/releases/11/assets{?name,label}'}
+                if url.endswith('/releases/tags/v1'): return {'id': 11, 'name': pending('bin.zip', 4, 'https://src.example/bin.zip'), 'upload_url': 'https://uploads.github.com/repos/dest/pre-demo/releases/11/assets{?name,label}'}
                 if url.endswith('/releases/4/assets'): return [{'name': 'bin.zip', 'browser_download_url': 'https://src.example/bin.zip', 'size': 4}]
                 if url.endswith('/assets?per_page=100&page=1'): return []
                 return {}
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id': 4, 'tag_name': 'v1', 'name': 'one', 'body': 'notes', 'draft': False, 'prerelease': False, 'assets': [], 'tarball_url': 'https://src.example/tar'}]
                 if url.endswith('/releases/4/assets'): return [{'name': 'bin.zip', 'browser_download_url': 'https://src.example/bin.zip', 'size': 4}]
+                if url.endswith('/releases/11/assets') and self.uploaded: return [{'name': 'bin.zip', 'size': 4, 'state': 'uploaded'}]
                 return []
             def download(self, url, output): output.write(b'data')
-            def upload(self, url, data, content_type): self.calls.append(('UPLOAD', url, data))
+            def upload(self, url, data, content_type): self.calls.append(('UPLOAD', url, data)); self.uploaded = True
         src, dst = API(), API()
         source = {'type': 'forgejo', 'base_url': 'https://src.example', 'owner': 'alice', 'repos': ['demo'], 'prefix': 'pre-'}
         import unittest.mock
@@ -47,11 +57,11 @@ class EngineTests(unittest.TestCase):
 
     def test_forgejo_source_assets_are_loaded_directly(self):
         class API:
-            def __init__(self): self.visited = []
+            def __init__(self): self.visited = []; self.uploaded = False
             def request(self, method, url, data=None, **kw):
                 if url.endswith('/repos/dest/mirror-alice-demo'): return {'private': False, 'description': '[repo-mirror: forgejo:https://src.example/alice/demo]'}
                 if url.endswith('/repos/alice/demo'): return {'clone_url': 'https://src.example/alice/demo.git'}
-                if url.endswith('/releases/tags/v1'): return {'id': 9, 'tag_name': 'v1', 'upload_url': 'https://uploads.github.com/x{?name}'}
+                if url.endswith('/releases/tags/v1'): return {'id': 9, 'name': pending('file', 1, 'https://src.example/file'), 'tag_name': 'v1', 'upload_url': 'https://uploads.github.com/x{?name}'}
                 if url.endswith('/releases/4/assets'):
                     self.visited.append(url)
                     return [{'name':'file', 'size':1, 'browser_download_url':'https://src.example/file'}]
@@ -60,9 +70,10 @@ class EngineTests(unittest.TestCase):
                 self.visited.append(url)
                 if url.endswith('/releases'): return [{'id': 4, 'tag_name': 'v1', 'assets': []}]
                 if url.endswith('/releases/4/assets'): return [{'name':'file', 'size':1, 'browser_download_url':'https://src.example/file'}]
+                if url.endswith('/releases/9/assets') and self.uploaded: return [{'name':'file', 'size':1, 'state':'uploaded'}]
                 return []
             def download(self, url, output): output.write(b'x')
-            def upload(self, url, data, content_type): self.visited.append(url)
+            def upload(self, url, data, content_type): self.visited.append(url); self.uploaded = True
         src, dst = API(), API()
         import unittest.mock
         with unittest.mock.patch.object(mirror, 'mirror_git'):
@@ -137,7 +148,7 @@ class SafetyTests(unittest.TestCase):
             def request(self, method, url, data=None):
                 self.calls.append((method,url))
                 if url.endswith('/repos/dest/mirror-Alice-demo'): return {'description':mirror.source_marker(source,'demo')}
-                if '/releases/tags/' in url: return {'id':2,'tag_name':'v1'}
+                if '/releases/tags/' in url: return {'id':2,'name':pending('bin', 1, 'https://github.com/bin'),'tag_name':'v1'}
                 return {}
             def pages(self, url): return [{'name':'bin','size':1,'url':'https://api.github.com/asset'}]
             def download(self, url, output): output.write(b'b')

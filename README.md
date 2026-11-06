@@ -1,37 +1,118 @@
 # Repository mirror
 
-Mirrors configured Git repositories to a GitHub account or organization. The Actions workflow tests the project before running hourly (at minute 17), and can also be started using **Actions → Mirror repositories → Run workflow**. It checks out only the management repository's default branch; mirrored repositories are data, not programs to run.
+Copy public GitHub and Forgejo repositories to GitHub. A **source** is the original repository; a **mirror** is its copy.
 
-## Configuration
+## How it works
 
-A source has `type` (`forgejo` or `github`), an HTTPS `base_url`, an `owner`, and `repos`, either a list of repository names or the string `"all"`. The default destination prefix is `mirror-OWNER-`, using the source owner; an explicit `prefix` overrides it. Set `destination_account_type` to `personal` or `organization` in configuration, or set `DESTINATION_ACCOUNT_TYPE` to override it. Replace these illustrative values before use:
+| Item | What happens |
+| --- | --- |
+| Schedule | Runs every hour at minute 17. You can also run it from **Actions → Mirror repositories → Run workflow**. |
+| Branches and tags | Copies all branches and tags, including rewritten history. Deletes branches and tags from the mirror when they are deleted from the source. |
+| New releases | Copies release names, descriptions, tags and uploaded files. GitHub creates its own source-code archives. |
+| Existing releases | Leaves completed releases unchanged, even if their source files or descriptions change. |
+| New mirrors | Creates them as private repositories and disables their GitHub Actions. You can make them public later. |
+| Stars | Does not manage stars or Stars lists. |
+
+**Use a dedicated mirror repository.** The workflow can overwrite its branches and tags and delete ones that don't exist in the source.
+
+## Add sources
+
+Edit [`config.json`](config.json). Each entry can copy selected repositories or all public repositories owned by a user.
+
+| Setting | Meaning |
+| --- | --- |
+| `destination_account_type` | `personal` for a personal GitHub account, or `organization` for an organization. |
+| `type` | `github` or `forgejo`. |
+| `base_url` | The source site's HTTPS address. |
+| `owner` | The source user or organization name. |
+| `repos` | A list of repository names, or `"all"`. |
+| `prefix` | Optional text placed before each mirror's name. The default is `mirror-OWNER-`. |
+
+Example:
 
 ```json
 {
   "destination_account_type": "personal",
   "sources": [
-    {"type": "forgejo", "base_url": "https://code.example.org", "owner": "alice", "repos": ["project-one"], "prefix": "forgejo-"},
-    {"type": "github", "base_url": "https://api.github.com", "owner": "bob", "repos": ["project-two"], "prefix": "github-"}
+    {"type": "forgejo", "base_url": "https://code.example.org", "owner": "alice", "repos": ["project-one"]},
+    {"type": "github", "base_url": "https://github.com", "owner": "bob", "repos": "all", "prefix": "bob-"}
   ]
 }
 ```
 
-For `all`, discovery enumerates repositories exposed for the specified owner; it is not a starred-repository list. Use distinct prefixes where names might collide and review the resulting destination names before enabling the workflow. Only configure sources and destinations you are authorized to mirror.
+The first entry creates `mirror-alice-project-one`. Use different prefixes if two sources would create the same name. `"all"` means repositories owned by that user, not repositories they starred.
 
-## GitHub App setup
+## Set up the GitHub App
 
-1. Create a GitHub App and install it on the **destination** owner. Grant repository **Contents: read and write** and **Workflows: read and write** to push history containing workflow files, and **Administration: read and write** to create/manage repositories and disable Actions. The installation must have access to all destination repositories, including newly created ones; review organization policies and approval requirements.
-2. In the management repository's Actions secrets, add `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` (the complete PEM private key). Set the Actions variable `MIRROR_OWNER` to the destination account or organization login. Do not commit the key or tokens.
-3. Update and review `config.json`, enable Actions, and trigger the workflow manually. Inspect the run and destination repositories. The workflow generates a short-lived installation token and passes it as `GH_TOKEN`; `DESTINATION_OWNER` comes from `MIRROR_OWNER`.
+Install the app on the GitHub account or organization that will own the mirrors. Give it access to all mirrors, including new ones.
 
-Run tests locally with `python -m unittest discover -s tests -v`. With the environment variables above set, run `python mirror.py --config config.json` to mirror. A local run can modify destination repositories; use a disposable destination for initial testing.
+| Repository permission | Access | Why |
+| --- | --- | --- |
+| Contents | Read and write | Copy branches, tags and releases. |
+| Workflows | Read and write | Copy repositories that contain GitHub Actions workflows. |
+| Administration | Read and write | Create repositories and disable their Actions. |
 
-## Operations and safety
+In the management repository, add these under **Settings → Secrets and variables → Actions**:
 
-Mirroring can overwrite destination refs; do not use an actively developed repository as a destination. A mirror is not a complete backup of issues, pull requests, settings, secrets, or other host metadata; verify release and asset coverage separately before relying on it. Protect the management repository's default branch and workflow changes: trusted maintainers can change code that runs with the App token. Review source ownership, prefixes, visibility, and access before each configuration change. Do not execute code from source mirrors or grant the App broader permissions than needed.
+| Name | Type | Value |
+| --- | --- | --- |
+| `MIRROR_APP_ID` | Secret | GitHub App ID. |
+| `MIRROR_APP_PRIVATE_KEY` | Secret | The app's complete private key. |
+| `MIRROR_OWNER` | Variable | GitHub account or organization that owns the mirrors. |
 
-**Ref and asset limits:** runs force-push branches and tags, update the GitHub default branch, then prune destination branches and tags absent upstream. This deletes destination-only refs. If the source is empty, no refs are pushed or pruned; if its default branch is unavailable, pruning is refused. GitHub branch protection or rulesets can block updates or deletion, leaving a partially updated mirror. Release assets must be smaller than 2 GiB; downloads stream to temporary files and uploads stream from disk with a fixed content length. Comparing an existing asset can require temporary disk space for two copies; insufficient disk space fails the run. Forgejo release attachments are fetched as a single array because that endpoint may ignore pagination. Source asset URLs and redirects must use HTTPS and resolve exclusively to public addresses; downloads connect directly and do not use proxies. Release assets are never deleted or replaced: a same-name content mismatch stops the run for manual review. Existing mirrors must retain the exact source marker in their repository description; unmarked or differently marked repositories are rejected, including legacy mirrors. New mirrors start private; a marked mirror can later be made public. Names are preflighted for collisions before any destination modifications, but concurrent external changes can still race with a run.
+Do not add keys or tokens to the repository's files. After changing app permissions, approve the change on its installation if GitHub asks.
 
-Git LFS objects are separate from Git commits: mirroring Git refs alone does not guarantee LFS objects are transferred or remain accessible. Arrange and verify LFS object migration separately; LFS quotas and authentication may apply. Submodule repositories are also separate and need their own mirroring and URL handling.
+## Releases and retries
 
-GitHub may delay or drop scheduled runs under load. In a public management repository, GitHub automatically disables scheduled workflows after 60 days without repository activity; monitor Actions and [re-enable the workflow](https://docs.github.com/actions/using-workflows/disabling-and-enabling-a-workflow) when necessary. A manual run or a successful past run is not a substitute for monitoring the schedule and mirror freshness.
+A release with no uploaded files is valid. Each uploaded file must be smaller than 2 GiB.
+
+When a new release is being copied, its name temporarily includes a `[repo-mirror:pending:v1]` marker. If the run stops, the next run uses that marker to continue. Don't edit the marker or use it in your own release names. The original name is restored after the files are copied. Very long names may not fit and will be rejected.
+
+The workflow saves failed uploads in `failures.json` and checks it on the next run. Entries use hashes (short identifiers made from the source details), not passwords or file names. Someone may be able to guess the original details from a hash, so don't treat them as secret.
+
+| Situation | What happens |
+| --- | --- |
+| An upload succeeds on retry | Its entry is removed from `failures.json`. |
+| A run is cancelled or cannot save the file | The release's pending marker still helps the next run resume. |
+| Someone changes the management branch during a run | Saving the file may fail rather than overwrite their changes. Run the workflow again. |
+| Branch protection blocks the workflow | Allow its GitHub token to push the failure file. |
+| A source or pending marker is changed or removed | Old entries may need manual review. |
+
+Only attempted uploads appear in the file. A repository error can prevent the workflow from reaching later releases in that repository.
+
+A retry checks already uploaded files and copies missing ones. If the source's file list changed during an interrupted copy, the run stops for that repository and needs manual review. The mirror does not delete or replace release files. If GitHub leaves an incomplete file after a failed upload, remove that file manually before retrying. Older releases without a marker are assumed complete; check them manually if an earlier copy was interrupted.
+
+## Failures and limits
+
+| Situation | What happens |
+| --- | --- |
+| One repository fails | The workflow tries the other planned repositories, then reports failure. |
+| Source discovery fails | Known repositories whose names could match the failed source's prefix are skipped; other names are attempted, and the run fails. An empty prefix blocks all names. This conservative check can skip names that would not actually collide. Fix discovery or choose distinct prefixes and retry. |
+| Invalid configuration or duplicate mirror names | The workflow stops before copying repositories. |
+| Empty source repository | No branches or tags are pushed or deleted. |
+| Branch protection blocks changes | The mirror may be only partly updated. Check the failed run. |
+| Source marker removed | The workflow refuses to modify the mirror. Keep the `[repo-mirror: ...]` text in its repository description. |
+| Files need more disk space than available | The run fails. Copies use temporary disk space, sometimes for two copies of a file. |
+| Git LFS | Large files stored outside Git are not copied by this workflow. |
+| Submodules | Repositories linked inside another repository are not copied automatically. |
+| Other data | Issues, pull requests, settings and secrets are not mirrored. |
+
+Only copy content you have permission to mirror. Protect the management repository's default branch: anyone who can change its workflow can change what runs with the app's permissions.
+
+GitHub can delay or skip scheduled runs. It also disables scheduled workflows in a public repository after 60 days without repository activity. Check the Actions page and [re-enable the workflow](https://docs.github.com/actions/using-workflows/disabling-and-enabling-a-workflow) if needed.
+
+## Run locally
+
+Run tests:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+To run the mirror locally, set `GH_TOKEN` to an installation token for the GitHub App and `DESTINATION_OWNER` to the account that owns the mirrors. Then run:
+
+```sh
+python mirror.py --config config.json
+```
+
+A local run changes GitHub repositories. Test with a separate destination first.

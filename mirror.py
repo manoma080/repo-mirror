@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import http.client
+import hashlib
 import ipaddress
 import socket
 import ssl
@@ -257,7 +258,68 @@ def mirror_git(source_url, destination_url, token, after_push=None):
 
 
 
-def mirror_repository(source, name, owner, src, dst, token, account_type='organization'):
+class ReleaseRecoveryError(RuntimeError):
+    MESSAGES = {
+        'marker': 'invalid pending release marker; manually inspect the pending GitHub release and reconcile it before retrying',
+        'changed': 'source release assets changed during pending sync; manually review the pending GitHub release and source, reconcile or recreate the release, then retry',
+        'mismatch': 'release asset mismatch; refusing to delete or replace; manually compare and reconcile the pending GitHub release assets before retrying',
+    }
+
+    def __init__(self, reason):
+        super().__init__(self.MESSAGES[reason])
+
+
+class StarterAssetError(ReleaseRecoveryError):
+    def __init__(self):
+        RuntimeError.__init__(self, 'starter release asset detected; manually remove the starter asset from the pending GitHub release, then rerun')
+
+
+class FailureJournal:
+    """Persist only hashed identifiers, never URLs, error messages or credentials."""
+    def __init__(self, path):
+        self.path = os.fspath(path)
+        if os.path.islink(self.path):
+            raise ValueError('failure journal must not be a symlink')
+        try:
+            with open(self.path, encoding='utf-8') as stream:
+                data = json.load(stream)
+        except FileNotFoundError:
+            data = {'version': 1, 'failures': []}
+        if (not isinstance(data, dict) or set(data) != {'version', 'failures'} or
+                data['version'] != 1 or not isinstance(data['failures'], list) or
+                any(not isinstance(x, str) or not re.fullmatch(r'[0-9a-f]{64}:[0-9a-f]{64}', x) for x in data['failures'])):
+            raise ValueError('invalid failure journal')
+        self.failures = set(data['failures'])
+
+    @staticmethod
+    def key(source, name, owner, tag, asset):
+        identity = [source['type'], source['base_url'].rstrip('/').lower(), source['owner'], name, owner, tag]
+        digest = lambda value: hashlib.sha256(json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+        return digest(identity) + ':' + digest(asset)
+
+    def retry_order(self, source, name, owner, tag, assets):
+        return sorted(assets, key=lambda asset: self.key(source, name, owner, tag, asset['name']) not in self.failures)
+
+    def set(self, key, failed):
+        if failed:
+            self.failures.add(key)
+        else:
+            self.failures.discard(key)
+        directory = os.path.dirname(os.path.abspath(self.path))
+        fd, tmp = tempfile.mkstemp(prefix='.failures-', dir=directory)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                json.dump({'version': 1, 'failures': sorted(self.failures)}, stream, indent=2)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self.path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+
+def mirror_repository(source, name, owner, src, dst, token, account_type='organization', journal=None):
     dest_name = destination_name(source, name)
     marker = source_marker(source, name)
     qowner, qname = quote(owner, safe=''), quote(dest_name, safe='')
@@ -293,43 +355,106 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
         except HTTPError as e:
             if not not_found(e):
                 raise
-            existing = None
-        fields = {k: release.get(k) for k in ('name', 'body', 'draft', 'prerelease')}
-        fields['tag_name'] = tag
+            e.close()
+            # The tag endpoint can omit drafts, which still need to be found.
+            matches = [r for r in dst.pages(target + '/releases') if r.get('tag_name') == tag]
+            if len(matches) > 1:
+                raise RuntimeError('multiple destination releases for tag')
+            existing = matches[0] if matches else None
+        prefix = '[repo-mirror:pending:v1]'
+        if existing and (not isinstance(existing.get('name'), str) or not existing['name'].startswith(prefix)):
+            continue
+        asset_url = upstream + '/releases/' + str(release['id']) + '/assets'
+        def fetch_source_assets():
+            assets = (src.request('GET', asset_url) if source['type'] == 'forgejo'
+                      else src.pages(asset_url))
+            if not isinstance(assets, list):
+                raise ValueError('release assets response is not an array')
+            manifest = sorted([[a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
+                               for a in assets], key=lambda a: str(a[0]))
+            digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+            return assets, digest
+        source_assets, digest = fetch_source_assets()
         if existing:
-            if any(existing.get(k) != v for k, v in fields.items()):
-                dst.request('PATCH', target + '/releases/' + str(existing['id']), fields)
+            pending_name = existing['name']
+            try:
+                original_name, expected_digest = json.loads(base64.urlsafe_b64decode(pending_name[len(prefix):].encode()).decode())
+                if (original_name is not None and not isinstance(original_name, str)) or not isinstance(expected_digest, str):
+                    raise ValueError()
+            except (ValueError, UnicodeError, TypeError):
+                raise ReleaseRecoveryError('marker') from None
+            if digest != expected_digest:
+                raise ReleaseRecoveryError('changed')
         else:
+            original_name = release.get('name')
+            if isinstance(original_name, str) and original_name.startswith(prefix):
+                raise ValueError('source release name uses reserved marker')
+            encoded = base64.urlsafe_b64encode(json.dumps([original_name, digest], ensure_ascii=True).encode()).decode()
+            pending_name = prefix + encoded
+            if len(pending_name) > 255:
+                raise ValueError('release name too long for pending marker')
+            fields = {k: release.get(k) for k in ('body', 'draft', 'prerelease')}
+            fields.update(tag_name=tag, name=pending_name)
             existing = dst.request('POST', target + '/releases', fields)
         assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
+        if any(asset.get('state') == 'starter' for asset in assets):
+            raise StarterAssetError()
         by_name = {asset['name']: asset for asset in assets}
-        asset_url = upstream + '/releases/' + str(release['id']) + '/assets'
-        source_assets = (src.request('GET', asset_url) if source['type'] == 'forgejo'
-                         else src.pages(asset_url))
-        if not isinstance(source_assets, list):
-            raise ValueError('release assets response is not an array')
-        for asset in source_assets:
+        upload_failures = 0
+        ordered_assets = journal.retry_order(source, name, owner, tag, source_assets) if journal else source_assets
+        for asset in ordered_assets:
+            key = journal.key(source, name, owner, tag, asset['name']) if journal else None
             previous = by_name.get(asset['name'])
             if previous and previous.get('size') != asset.get('size'):
-                raise RuntimeError('release asset mismatch; refusing to delete or replace')
+                raise ReleaseRecoveryError('mismatch')
             with tempfile.TemporaryFile() as data:
                 src.download(asset['browser_download_url'], data)
+                if not isinstance(asset.get('size'), int) or data.tell() != asset['size']:
+                    raise RuntimeError('source asset size mismatch')
                 if previous:
                     with tempfile.TemporaryFile() as existing_data:
                         dst.download(previous['url'], existing_data)
                         if not same_file(data, existing_data):
-                            raise RuntimeError('release asset mismatch; refusing to delete or replace')
+                            raise ReleaseRecoveryError('mismatch')
                 else:
                     data.seek(0)
                     upload_url = existing['upload_url'].split('{', 1)[0] + '?' + urlencode({'name': asset['name']})
-                    dst.upload(upload_url, data, asset.get('content_type') or 'application/octet-stream')
+                    if journal:
+                        journal.set(key, True)
+                    try:
+                        dst.upload(upload_url, data, asset.get('content_type') or 'application/octet-stream')
+                    except Exception:
+                        if journal is None:
+                            raise
+                        upload_failures += 1
+                        continue
+                if journal and key in journal.failures:
+                    journal.set(key, False)
+        if upload_failures:
+            raise RuntimeError('release asset uploads failed')
+        _, final_digest = fetch_source_assets()
+        if final_digest != digest:
+            raise ReleaseRecoveryError('changed')
+        final_assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
+        if any(asset.get('state') == 'starter' for asset in final_assets):
+            raise StarterAssetError()
+        expected = {asset['name']: asset['size'] for asset in source_assets}
+        actual = {asset['name']: asset for asset in final_assets}
+        if (len(expected) != len(source_assets) or len(actual) != len(final_assets) or
+                actual.keys() != expected.keys() or
+                any(asset.get('state') != 'uploaded' or asset.get('size') != expected[name]
+                    for name, asset in actual.items())):
+            raise ReleaseRecoveryError('mismatch')
+        dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': original_name})
 
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--failures')
     args = parser.parse_args(argv)
+    journal = FailureJournal(args.failures) if args.failures else None
     token, owner = os.environ.get('GH_TOKEN'), os.environ.get('DESTINATION_OWNER')
     if not token or not owner or not NAME.fullmatch(owner) or owner in ('.', '..'):
         raise ValueError('GH_TOKEN and valid DESTINATION_OWNER are required')
@@ -348,18 +473,52 @@ def main(argv=None):
     src, dst = API(), API(token)
     seen = set()
     plan = []
-    for source in sources:
-        for name in discover(source, src):
+    discovery_failures = 0
+    uncertain_prefixes = []
+    uncertain_names = set()
+    for index, source in enumerate(sources, 1):
+        try:
+            names = discover(source, src)
+        except Exception as exc:
+            discovery_failures += 1
+            if source['repos'] == 'all':
+                uncertain_prefixes.append(source.get('prefix', 'mirror-' + source['owner'] + '-').lower())
+            else:
+                uncertain_names.update(destination_name(source, name).lower() for name in source['repos'])
+            print(f"source discovery failed for source {index} ({source['owner']}): {type(exc).__name__}", file=sys.stderr)
+            continue
+        for name in names:
             target = destination_name(source, name).lower()
             if target in seen:
                 raise ValueError('duplicate destination repository: ' + target)
             seen.add(target)
             plan.append((source, name))
+    failures = []
+    ready = []
     for source, name in plan:
-        target = f"{GITHUB}/repos/{quote(owner, safe='')}/{quote(destination_name(source, name), safe='')}"
-        check_existing(get_existing(dst, target), source_marker(source, name))
-    for source, name in plan:
-        mirror_repository(source, name, owner, src, dst, token, account_type)
+        dest = destination_name(source, name)
+        if dest.lower() in uncertain_names or any(dest.lower().startswith(prefix) for prefix in uncertain_prefixes):
+            failures.append((dest, 'possible collision with undiscovered source; retry discovery or use distinct prefixes'))
+            continue
+        target = f"{GITHUB}/repos/{quote(owner, safe='')}/{quote(dest, safe='')}"
+        try:
+            check_existing(get_existing(dst, target), source_marker(source, name))
+            ready.append((source, name))
+        except Exception as exc:
+            failures.append((destination_name(source, name), type(exc).__name__))
+    for source, name in ready:
+        try:
+            if journal is None:
+                mirror_repository(source, name, owner, src, dst, token, account_type)
+            else:
+                mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, ReleaseRecoveryError) else type(exc).__name__
+            failures.append((destination_name(source, name), detail))
+    if failures or discovery_failures:
+        for name, kind in failures:
+            print(f'mirror failed for {name}: {kind}', file=sys.stderr)
+        raise RuntimeError(f'{discovery_failures} sources and {len(failures)} repositories failed')
 
 
 if __name__ == '__main__':
