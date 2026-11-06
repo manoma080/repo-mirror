@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 from contextvars import ContextVar
+from collections import Counter
 from functools import wraps
 import base64
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ import http.client
 import hashlib
 import hmac
 import ipaddress
+import math
 import socket
 import ssl
 import os
@@ -39,8 +41,20 @@ def safe_label(value):
     lowered = value.lower()
     if ('secret' in lowered or 'token' in lowered or 'password' in lowered or
             'credential' in lowered or re.search(r'(?i)(?:gh[pousr]_|github_pat_|bearer|awsaccesskey|signature|akia[0-9a-z]{16}|xox[baprs]-|sk[-_])', value) or
-            re.search(r'[A-Za-z0-9_=-]{32,}', value)):
+            re.search(r'[A-Za-z0-9_=]{32,}', value) or
+            re.search(r'(?<![A-Za-z0-9])(?:(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8}-){3}(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{8}(?![A-Za-z0-9])', value) or
+            re.search(r'(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', value) or
+            re.search(r'(?i)[0-9a-f]{24,}', value)):
         return '[redacted]'
+    # Catch long, opaque hyphenated runs without treating every long project
+    # name as a credential. This bounded heuristic cannot recognize all secrets.
+    for run in re.findall(r'[A-Za-z0-9_-]{32,}', value):
+        chars = run.replace('-', '').replace('_', '')
+        if len(chars) >= 32:
+            counts = Counter(chars)
+            entropy = -sum((n / len(chars)) * math.log2(n / len(chars)) for n in counts.values())
+            if entropy >= 4.2:
+                return '[redacted]'
     for secret in (*LOG_SECRETS.get(), os.environ.get('GH_TOKEN', ''), os.environ.get('MIRROR_TIMESTAMP_SECRET', '')):
         if secret and (secret in value or value in secret and len(value) >= 8):
             return '[redacted]'
@@ -503,6 +517,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
     print(f'releases discovered={len(releases)} selected={len(selected)} skipped={skipped}', file=sys.stderr, flush=True)
     for release_index, release in enumerate(selected, 1):
         tag = release['tag_name']
+        print(f'\n===== Release {release_index}/{len(selected)}: {safe_label(tag)} =====', file=sys.stderr, flush=True)
         print(f'release {release_index}/{len(selected)} started tag={safe_label(tag)}', file=sys.stderr, flush=True)
         with timed(f'release tag={safe_label(tag)}'):
             try:
@@ -993,6 +1008,7 @@ def main(argv=None):
     uncertain_names = set()
     for index, source in enumerate(sources, 1):
         src = github_src if source['type'] == 'github' else other_src
+        print(f'\n===== Source discovery {index}/{len(sources)}: {safe_label(source.get("owner"))} =====', file=sys.stderr, flush=True)
         print(f'source {index}/{len(sources)} discovery started', file=sys.stderr, flush=True)
         try:
             with timed(f'step source-discovery source={index}'):
@@ -1029,6 +1045,7 @@ def main(argv=None):
     succeeded = 0
     for repo_index, source_index, source, name in ready:
         src = github_src if source['type'] == 'github' else other_src
+        print(f'\n===== Repository {repo_index}/{len(plan)}: {safe_label(source.get("owner"))}/{safe_label(name)} =====', file=sys.stderr, flush=True)
         print(f'repository {repo_index}/{len(plan)} started (source {source_index}/{len(sources)})', file=sys.stderr, flush=True)
         try:
             if journal is None:
@@ -1041,6 +1058,7 @@ def main(argv=None):
             detail = error_detail(exc)
             failures.append((repo_index, detail))
             print(f'repository {repo_index}/{len(plan)} failed: {detail}', file=sys.stderr, flush=True)
+    print('\n===== Summary =====', file=sys.stderr, flush=True)
     print(f'summary sources={len(sources)} discovery_failed={discovery_failures} repositories={len(plan)} succeeded={succeeded} failed={len(failures)}', file=sys.stderr, flush=True)
     if failures or discovery_failures:
         for repo_index, kind in failures:
