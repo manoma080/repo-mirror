@@ -64,6 +64,8 @@ Do not add keys or tokens to the repository's files. After changing app permissi
 
 ## Releases and retries
 
+Progress is written to stderr. Source and repository numbers follow configuration and discovery order; release numbers follow the selected API order. Names are never logged because even syntactically valid names can contain secrets; sources, repositories, releases, and assets are identified by ordinals. Repository events also identify the source ordinal. Asset ordinals follow processing order, including journal-prioritized retries. URLs, destination identifiers, credentials, and arbitrary error messages are not logged. Asset counts describe transfer attempts, not final release verification; upload failures are counted separately and include a safe HTTP status when available.
+
 A release with no uploaded files is valid. Each uploaded file must be smaller than 2 GiB.
 
 While a release is being copied or updated, its name temporarily includes a `[repo-mirror:pending:v1]` or `[repo-mirror:pending:v2]` marker. If the run stops, a later run can use that marker to continue, even if the release is older than the latest 10, as long as it still exists at the source. Don't edit the marker or use it in your own release names. After the files are copied, the mirror uses the current source name. Very long names may not fit and will be rejected. A new mirror stays in initialization mode until the full history completes.
