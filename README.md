@@ -64,6 +64,8 @@ In the management repository, add these under **Settings → Secrets and variabl
 
 Do not add keys or tokens to the repository's files. After changing app permissions, approve the change on its installation if GitHub asks.
 
+The mirror looks up the app installation for `MIRROR_OWNER`, checks the returned owner, and mints installation tokens as needed. It refreshes when fewer than five minutes remain, including during a long repository: each API request and each destination Git push checks the token again. The app private key is kept in the mirror process and passed to OpenSSL through a pipe, not in command arguments, logs or a file. OpenSSL must be installed. The job remains sequential, so the existing failure journal is not written concurrently by matrix jobs. A single transfer already in progress cannot have its credentials replaced; if it fails, that repository is reported as failed and pending releases/failed uploads can be retried on a later run. GitHub's runner time limit and other network or permission errors can still interrupt a run.
+
 The workflow's installation token is also used for GitHub source API GET requests to the exact HTTPS `api.github.com` origin on port 443, including release and asset listings, to reduce unauthenticated API rate limiting. Forgejo APIs and public source asset downloads do not receive the token. Redirects to other origins do not receive it. GitHub may still reject requests because of permissions, primary or secondary rate limits, or other reasons; a 403 is not proof of rate limiting. When available, the log identifies the source or destination operation and reports a zero remaining rate limit without printing URLs or response bodies.
 
 ## Releases and retries
@@ -123,7 +125,7 @@ Run tests:
 python -m unittest discover -s tests -v
 ```
 
-To run the mirror locally, set `GH_TOKEN` to an installation token for the GitHub App and `DESTINATION_OWNER` to the account that owns the mirrors. Then run:
+To run the mirror locally, set `GH_TOKEN` to an installation token for the GitHub App and `DESTINATION_OWNER` to the account that owns the mirrors. A supplied `GH_TOKEN` is fixed and can expire during a long run. For automatic renewal instead, set `MIRROR_APP_ID`, `MIRROR_APP_PRIVATE_KEY`, and `DESTINATION_OWNER` in the environment; the app credentials take precedence over `GH_TOKEN`. Then run:
 
 ```sh
 python mirror.py --config config.json

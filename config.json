@@ -90,7 +90,9 @@
       "owner": "seregonwar",
       "repos": [
         "MirrorPSX",
-        "sprxdump"
+        "sprxdump",
+        "zftpd",
+        "PSXTERM"
       ]
     },
     {
@@ -188,7 +190,8 @@
       "base_url": "https://github.com",
       "owner": "kerrdec97",
       "repos": [
-        "PS5-Backport-GUI"
+        "PS5-Backport-GUI",
+        "ps5-date-time-sync"
       ]
     },
     {
@@ -348,6 +351,104 @@
       "owner": "DaniekDbs",
       "repos": [
         "ProsperoPZ"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "iBotPeaches",
+      "repos": [
+        "Apktool"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "phantomptr",
+      "repos": [
+        "ps5upload"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "PS5Dev",
+      "repos": [
+        "Byepervisor",
+        "Byepervisor-Reborn"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "ps5-linux",
+      "repos": [
+        "ps5-linux-loader",
+        "ps5-linux-patches",
+        "ps5-linux-tools",
+        "ps5-linux-image",
+        "ps5-linux-mwifiex"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "aleksejsgx",
+      "repos": [
+        "RetroSync"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "heni0xyz",
+      "repos": [
+        "PS5Save"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "ps5-payload-dev",
+      "repos": [
+        "sdk",
+        "offact",
+        "websrv",
+        "elfldr",
+        "ftpsrv",
+        "shsrv",
+        "klogsrv"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "etaHEN",
+      "repos": [
+        "etaHEN"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "BestPig",
+      "repos": [
+        "BackPork"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
+      "owner": "itsPLK",
+      "repos": [
+        "ps5-payload-manager",
+        "ps5-y2jb-autoloader",
+        "ps5-lua-autoloader",
+        "ps5-webkit-autoloader",
+        "ps5-yarpe-autoloader",
+        "ps5-bdjb-autoloader",
+        "ps5-pkg-manager",
+        "PS5-Lapy-JB-Daemon"
       ]
     }
   ]

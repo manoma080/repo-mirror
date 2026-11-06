@@ -38,21 +38,15 @@ jobs:
         with:
           ref: ${{ needs.test.outputs.tested-sha }}
           persist-credentials: false
-      - name: Create GitHub App installation token
-        id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ secrets.MIRROR_APP_ID }}
-          private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
-          owner: ${{ vars.MIRROR_OWNER }}
       - name: Mirror
         env:
           DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MIRROR_APP_ID: ${{ secrets.MIRROR_APP_ID }}
+          MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
           MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
         run: python mirror.py --config config.json --failures failures.json
       - name: Save failure journal
-        if: ${{ always() && steps.app-token.outcome == 'success' }}
+        if: ${{ always() }}
         env:
           MANAGEMENT_TOKEN: ${{ github.token }}
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}

@@ -56,6 +56,8 @@ def safe_label(value):
             if entropy >= 4.2:
                 return '[redacted]'
     for secret in (*LOG_SECRETS.get(), os.environ.get('GH_TOKEN', ''), os.environ.get('MIRROR_TIMESTAMP_SECRET', '')):
+        if callable(secret):
+            secret = getattr(secret, 'token', None)
         if secret and (secret in value or value in secret and len(value) >= 8):
             return '[redacted]'
     return value
@@ -145,11 +147,79 @@ class SafeRedirect(HTTPRedirectHandler):
         return redirected
 
 
+class AppTokenProvider:
+    def __init__(self, app_id, private_key, owner, account_type='personal'):
+        if not app_id.isdigit() or not private_key or not NAME.fullmatch(owner) or owner in ('.', '..') or account_type not in ('personal', 'organization'):
+            raise ValueError('invalid GitHub App configuration')
+        self.app_id, self.private_key, self.owner, self.account_type = app_id, private_key, owner, account_type
+        self.token, self.expires = None, 0
+
+    def __call__(self):
+        if not self.token or time.time() >= self.expires - 300:
+            token, expires = self._mint()
+            if not isinstance(token, str) or not token.strip() or not isinstance(expires, (int, float)) or not math.isfinite(expires) or expires <= time.time() + 300:
+                raise ValueError('invalid GitHub App token response')
+            self.token, self.expires = token, expires
+        return self.token
+
+    def _mint(self):
+        def encode(data):
+            return base64.urlsafe_b64encode(data).rstrip(b'=')
+        now = int(time.time())
+        message = b'.'.join((encode(b'{"alg":"RS256","typ":"JWT"}'), encode(json.dumps({'iat': now - 60, 'exp': now + 540, 'iss': self.app_id}, separators=(',', ':')).encode())))
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, message)
+            os.close(write_fd)
+            write_fd = None
+            result = subprocess.run(['openssl', 'dgst', '-sha256', '-sign', '/dev/stdin', f'/dev/fd/{read_fd}'], input=self.private_key.encode(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, pass_fds=(read_fd,))
+        finally:
+            os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
+        jwt = (message + b'.' + encode(result.stdout)).decode()
+        opener = build_opener(SafeRedirect())
+        def request(path, method='GET'):
+            # Token mint POSTs create only short-lived credentials. An ambiguous
+            # failure can leave an unused token, but never retries other writes.
+            for attempt in range(4):
+                req = Request(GITHUB + path, method=method, data=b'{}' if method == 'POST' else None, headers={'Authorization': 'Bearer ' + jwt, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'User-Agent': 'repo-mirror'})
+                try:
+                    with opener.open(req, timeout=60) as response:
+                        return json.load(response)
+                except HTTPError as exc:
+                    if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                        raise
+                    exc.close()
+                except (URLError, TimeoutError, ConnectionError):
+                    if attempt == 3:
+                        raise
+                print(f'app authentication retry {attempt + 1}/3', file=sys.stderr, flush=True)
+                time.sleep(2 ** attempt)
+        kind = 'users' if self.account_type == 'personal' else 'orgs'
+        installation = request(f'/{kind}/{quote(self.owner, safe="")}/installation')
+        installation_id = installation['id']
+        if not isinstance(installation_id, int) or isinstance(installation_id, bool) or installation_id <= 0 or installation.get('account', {}).get('login', '').lower() != self.owner.lower():
+            raise ValueError('GitHub App installation owner mismatch')
+        result = request(f'/app/installations/{installation_id}/access_tokens', 'POST')
+        expiry = datetime.fromisoformat(result['expires_at'].replace('Z', '+00:00'))
+        if expiry.tzinfo is None:
+            raise ValueError('invalid GitHub App token response')
+        return result['token'], expiry.timestamp()
+
+
 class API:
     def __init__(self, token=None):
-        self.token = token
+        self._token = token
         self.role = 'destination' if token else 'source'
         self.opener = build_opener(SafeRedirect())
+
+    @property
+    def token(self):
+        return self._token() if callable(self._token) else self._token
+
+    def _request_token(self, method, parsed):
+        return self.token if self._token else None
 
     def _request(self, method, url, body=None, headers=None):
         parsed = urlparse(url)
@@ -157,14 +227,17 @@ class API:
             raise ValueError('API URL must be credential-free HTTPS')
         headers = dict(headers or {})
         headers['User-Agent'] = 'repo-mirror'
-        if self.token:
+        if self._token:
             if parsed.hostname not in ('api.github.com', 'uploads.github.com') or parsed.port not in (None, 443):
                 raise ValueError('refusing to send destination credentials to non-GitHub host')
-            headers['Authorization'] = 'Bearer ' + self.token
         for attempt in range(4):
+            attempt_headers = dict(headers)
+            current = self._request_token(method, parsed)
+            if current:
+                attempt_headers['Authorization'] = 'Bearer ' + current
             with timed(f'network target={self.role} operation=API method={method if method in ("GET", "POST", "PUT", "PATCH", "DELETE") else "request"}'):
                 try:
-                    with self.opener.open(Request(url, data=body, headers=headers, method=method), timeout=60) as response:
+                    with self.opener.open(Request(url, data=body, headers=attempt_headers, method=method), timeout=60) as response:
                         return response.read()
                 except HTTPError as e:
                     if e.code == 403:
@@ -273,13 +346,11 @@ class SourceAPI(API):
         super().__init__()
         self.source_token = token
 
-    def _request(self, method, url, body=None, headers=None):
-        parsed = urlparse(url)
-        headers = dict(headers or {})
+    def _request_token(self, method, parsed):
         if (method == 'GET' and parsed.scheme == 'https' and not parsed.username and
                 not parsed.password and parsed.hostname == 'api.github.com' and parsed.port in (None, 443)):
-            headers['Authorization'] = 'Bearer ' + self.source_token
-        return super()._request(method, url, body, headers)
+            return self.source_token() if callable(self.source_token) else self.source_token
+        return None
 
 
 def copy_asset(response, output):
@@ -331,14 +402,16 @@ def mirror_git(source_url, destination_url, token, after_push=None):
         run(['-C', tmp, 'fetch', '--no-tags', '--force', source_url, '+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*'])
         if not run(['-C', tmp, 'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/tags']):
             return False
-        auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
-        credentials = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
-                       'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: Basic ' + auth}
+        def credentials():
+            current = token() if callable(token) else token
+            auth = base64.b64encode(('x-access-token:' + current).encode()).decode()
+            return {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                    'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + auth}
         refspecs = ['+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*']
-        run(['-C', tmp, 'push', '--force', destination_url, *refspecs], credentials)
+        run(['-C', tmp, 'push', '--force', destination_url, *refspecs], credentials())
         if after_push:
             after_push()
-        run(['-C', tmp, 'push', '--force', '--prune', destination_url, *refspecs], credentials)
+        run(['-C', tmp, 'push', '--force', '--prune', destination_url, *refspecs], credentials())
         return True
 
 
@@ -986,7 +1059,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     journal = FailureJournal(args.failures) if args.failures else None
     token, owner = os.environ.get('GH_TOKEN'), os.environ.get('DESTINATION_OWNER')
-    if not token or not owner or not NAME.fullmatch(owner) or owner in ('.', '..'):
+    app_id = os.environ.get('MIRROR_APP_ID')
+    private_key = os.environ.pop('MIRROR_APP_PRIVATE_KEY', None)
+    if (not token and not (app_id and private_key)) or not owner or not NAME.fullmatch(owner) or owner in ('.', '..'):
         raise ValueError('GH_TOKEN and valid DESTINATION_OWNER are required')
     with open(args.config, encoding='utf-8') as f:
         config = json.load(f)
@@ -995,6 +1070,8 @@ def main(argv=None):
     account_type = os.environ.get('DESTINATION_ACCOUNT_TYPE', config.get('destination_account_type'))
     if account_type not in ('personal', 'organization'):
         raise ValueError('destination_account_type must be personal or organization')
+    if app_id or private_key:
+        token = AppTokenProvider(app_id or '', private_key, owner, account_type)
     sources = config.get('sources')
     if not isinstance(sources, list):
         raise ValueError('sources must be a list')
