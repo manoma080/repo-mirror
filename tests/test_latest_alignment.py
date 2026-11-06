@@ -76,11 +76,18 @@ class LatestAlignmentTests(unittest.TestCase):
         self.assertEqual(dst.patches[-1][1]['make_latest'], 'true')
         self.assertTrue(dst.patches[-1][0].endswith('/1'))
 
+    def test_initial_mirror_processes_all_releases_beyond_window(self):
+        releases = [release(n) for n in range(12, 0, -1)]
+        dst = Destination(True)
+        run(Source(releases, releases[-1]), dst)
+        self.assertEqual(len(dst.posts), 12)
+        self.assertEqual(set(dst.releases), {str(n) for n in range(1, 13)})
+
     def test_existing_latest_outside_window_is_repaired(self):
         releases = [release(n) for n in range(12, 0, -1)]
         dst = Destination(False)
         run(Source(releases, releases[-1]), dst)
-        self.assertIn('1', dst.releases)
+        self.assertEqual(set(dst.releases), {'12', '11', '10', '1'})
         self.assertEqual(dst.patches[-1][1]['make_latest'], 'true')
         self.assertTrue(dst.patches[-1][0].endswith('/' + str(dst.releases['1']['id'])))
 
