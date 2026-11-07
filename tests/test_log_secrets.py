@@ -51,7 +51,9 @@ class LogSecretsTests(unittest.TestCase):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as directory, patch.object(mirror, 'mirror_git'), redirect_stderr(output):
             journal = mirror.FailureJournal(os.path.join(directory, 'journal'))
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(RuntimeError) as raised:
                 mirror.mirror_repository(SOURCE, 'demo', 'dest', Source(), FailedDestination(), 'token', journal=journal)
+        self.assertIn('HTTP 403', mirror.error_detail(raised.exception))
+        self.assertNotIn('secret', mirror.error_detail(raised.exception))
         self.assertIn('HTTP 403', output.getvalue())
         self.assertNotIn('secret', output.getvalue())

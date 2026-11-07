@@ -188,6 +188,7 @@ class AppTokenProvider:
                     with opener.open(req, timeout=60) as response:
                         return json.load(response)
                 except HTTPError as exc:
+                    exc.mirror_operation = ('destination', 'app authentication', method)
                     if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
                         raise
                     exc.close()
@@ -240,8 +241,7 @@ class API:
                     with self.opener.open(Request(url, data=body, headers=attempt_headers, method=method), timeout=60) as response:
                         return response.read()
                 except HTTPError as e:
-                    if e.code == 403:
-                        e.mirror_operation = (self.role, 'API', method if method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') else 'request')
+                    e.mirror_operation = (self.role, 'API', method if method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') else 'request')
                     if method not in ('GET', 'PUT', 'PATCH', 'DELETE') or e.code not in (429, 500, 502, 503, 504) or attempt == 3:
                         raise
                 except URLError:
@@ -282,8 +282,7 @@ class API:
                 with self.opener.open(request, timeout=60) as response:
                     copy_asset(response, output)
             except HTTPError as exc:
-                if exc.code == 403:
-                    exc.mirror_operation = ('destination', 'asset', 'GET')
+                exc.mirror_operation = ('destination', 'asset', 'GET')
                 raise
             return
         # Connect to a validated address directly; do not use a proxy or resolve twice.
@@ -322,7 +321,9 @@ class API:
                                 exc = HTTPError(url, 403, '', response.headers, None)
                                 exc.mirror_operation = ('source', 'asset', 'GET')
                                 raise exc
-                            raise RuntimeError('asset download failed')
+                            exc = RuntimeError('asset download failed')
+                            exc.mirror_asset_status = response.status
+                            raise exc
                         copy_asset(response, output)
                         return
                     finally:
@@ -737,7 +738,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                 if existing:
                     dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': pending_name})
                 else:
-                    existing = dst.request('POST', target + '/releases', fields)
+                    try:
+                        existing = dst.request('POST', target + '/releases', fields)
+                    except HTTPError as exc:
+                        if getattr(exc, 'mirror_operation', None) == ('destination', 'API', 'POST'):
+                            exc.mirror_operation = ('destination', 'release', 'create')
+                        raise
             assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
             if any(asset.get('state') == 'starter' for asset in assets):
                 raise StarterAssetError()
@@ -782,6 +788,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     return None
                 return {'id': aid, 'name': asset['name'], 'timestamp': stamp, 'size': size}
             upload_failures = 0
+            first_upload_status = None
             uploaded = updated = skipped = retried = 0
             ordered_assets = journal.retry_order(source, name, owner, tag, source_assets) if journal else source_assets
             for asset_index, asset in enumerate(ordered_assets, 1):
@@ -873,6 +880,8 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                                 dst.upload(upload_url, data, asset.get('content_type') or 'application/octet-stream')
                             except Exception as exc:
                                 detail = error_detail(exc)
+                                if isinstance(exc, HTTPError) and first_upload_status is None and type(exc.code) is int and 100 <= exc.code <= 599:
+                                    first_upload_status = exc.code
                                 if isinstance(exc, HTTPError):
                                     exc.close()
                                 print(f'asset upload failed for asset {asset_index}/{len(ordered_assets)}: {detail}', file=sys.stderr, flush=True)
@@ -889,7 +898,9 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
 
             print(f'assets uploaded={uploaded} updated={updated} skipped={skipped} retried={retried} upload_failed={upload_failures}', file=sys.stderr, flush=True)
             if upload_failures:
-                raise RuntimeError('release asset uploads failed')
+                exc = RuntimeError('release asset uploads failed')
+                exc.mirror_upload_status = first_upload_status
+                raise exc
             _, final_digest, _, _ = fetch_source_assets()
             if final_digest != digest:
                 raise ReleaseRecoveryError('changed')
@@ -1022,12 +1033,25 @@ def error_detail(exc):
         if type(exc.code) is int and 100 <= exc.code <= 599:
             detail = f'HTTP {exc.code}'
             operation = getattr(exc, 'mirror_operation', None)
-            if exc.code == 403 and isinstance(operation, tuple) and len(operation) == 3 and operation[0] in ('source', 'destination') and operation[1] in ('API', 'asset') and operation[2] in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'request'):
-                rate = exc.headers.get('X-RateLimit-Remaining') if exc.headers else None
-                suffix = '; rate limit remaining=0' if rate == '0' else ''
+            if type(operation) is tuple and len(operation) == 3 and all(type(part) is str for part in operation) and (operation == ('destination', 'release', 'create') or (operation[0] == 'destination' and operation[1] == 'app authentication' and operation[2] in ('GET', 'POST')) or (operation[0] in ('source', 'destination') and operation[1] in ('API', 'asset') and operation[2] in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'request'))):
+                rate = None
+                if exc.code == 403:
+                    try:
+                        rate = exc.headers.get('X-RateLimit-Remaining') if exc.headers else None
+                    except Exception:
+                        pass
+                suffix = '; rate limit remaining=0' if type(rate) is str and rate == '0' else ''
                 detail += f' ({operation[0]} {operation[1]} {operation[2]}{suffix})'
             return detail
         return 'HTTPError'
+    if type(exc) is RuntimeError and exc.args == ('release asset uploads failed',):
+        status = getattr(exc, 'mirror_upload_status', None)
+        if type(status) is int and 100 <= status <= 599:
+            return f'release asset uploads failed (first HTTP {status})'
+    if type(exc) is RuntimeError and exc.args == ('asset download failed',):
+        status = getattr(exc, 'mirror_asset_status', None)
+        if type(status) is int and 100 <= status <= 599:
+            return f'HTTP {status} (source asset GET)'
     if len(exc.args) == 1 and type(exc.args[0]) is str and exc.args[0] in SAFE_ERROR_MESSAGES:
         return exc.args[0]
     for kind in (ValueError, RuntimeError, URLError, OSError, KeyError, TypeError):
@@ -1139,8 +1163,8 @@ def main(argv=None):
     print(f'summary sources={len(sources)} discovery_failed={discovery_failures} repositories={len(plan)} succeeded={succeeded} failed={len(failures)}', file=sys.stderr, flush=True)
     if failures or discovery_failures:
         for repo_index, kind in failures:
-            source_index, _, _ = plan[repo_index - 1]
-            print(f'mirror failed for repository {repo_index} (source {source_index}/{len(sources)}): {kind}', file=sys.stderr, flush=True)
+            source_index, source, name = plan[repo_index - 1]
+            print(f'mirror failed for repository {repo_index} (source {source_index}/{len(sources)}, {safe_label(source.get("owner"))}/{safe_label(name)}): {kind}', file=sys.stderr, flush=True)
         raise RuntimeError(f'{discovery_failures} sources and {len(failures)} repositories failed')
 
 
