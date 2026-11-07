@@ -12,6 +12,11 @@ from test_reconcile_assets import Source, Destination, SOURCE
 
 
 class ObservabilityTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_sections_mark_discovery_repository_release_and_summary(self):
         output = io.StringIO()
         dst = Destination(); dst.fail = False

@@ -43,7 +43,17 @@ class DigestDestination(Destination):
         super().download(url, out)
 
 
+    def upload(self, url, data, content_type):
+        super().upload(url, data, content_type)
+        self.metadata = digest(self.assets['changed'])
+
+
 class PublishedDigestTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def run_mirror(self, src, dst):
         with patch.object(mirror, 'mirror_git'):
             mirror.mirror_repository(SOURCE, 'demo', 'dest', src, dst, 'token')
@@ -142,7 +152,7 @@ class PublishedDigestTests(unittest.TestCase):
                 with self.assertRaises(mirror.ReleaseRecoveryError):
                     self.run_mirror(src, dst)
                 self.assertEqual(dst.deleted, [])
-                self.assertTrue(dst.release['name'].startswith('[repo-mirror:pending:'))
+                self.assertIn('[repo-mirror:pending:v3]', dst.release['body'])
 
 
     def test_journal_recovery_clears_after_fast_path_finalization(self):
@@ -182,7 +192,7 @@ class PublishedDigestTests(unittest.TestCase):
         dst.fail = True
         with self.assertRaises(RuntimeError):
             self.run_mirror(src, dst)
-        self.assertTrue(dst.release['name'].startswith('[repo-mirror:pending:v1]'))
+        self.assertIn('[repo-mirror:pending:v3]', dst.release['body'])
         src.metadata = digest(b'zzz')
         dst.fail = False
         with self.assertRaises(mirror.ReleaseRecoveryError):

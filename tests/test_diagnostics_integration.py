@@ -18,7 +18,7 @@ class DiagnosticsIntegrationTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8') as f:
             json.dump(config, f)
             f.flush()
-            with patch.dict(os.environ, {'GH_TOKEN': 'secret-token', 'DESTINATION_OWNER': 'dest'}, clear=True), \
+            with patch.dict(os.environ, {'GH_TOKEN': 'secret-token', 'DESTINATION_OWNER': 'dest', 'MIRROR_TIMESTAMP_SECRET': 'test-key'}, clear=True), \
                  patch.object(mirror, 'SourceAPI', return_value=source), \
                  patch.object(mirror, 'API', side_effect=[object(), destination]), \
                  patch.object(mirror, 'mirror_git'), contextlib.redirect_stderr(output):

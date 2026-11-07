@@ -63,7 +63,7 @@ class TokenRefreshTests(unittest.TestCase):
         sources = [{'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo']}]
         with tempfile.NamedTemporaryFile(mode='w') as f:
             json.dump({'destination_account_type': 'personal', 'sources': sources}, f); f.flush()
-            env = {'DESTINATION_OWNER': 'dest', 'MIRROR_APP_ID': '123', 'MIRROR_APP_PRIVATE_KEY': 'private'}
+            env = {'DESTINATION_OWNER': 'dest', 'MIRROR_APP_ID': '123', 'MIRROR_APP_PRIVATE_KEY': 'private', 'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'}
             with patch.dict(os.environ, env, clear=True), patch.object(mirror, 'discover', return_value=['demo']), patch.object(mirror, 'get_existing', return_value=None), patch.object(mirror, 'mirror_repository') as run:
                 mirror.main(['--config', f.name])
                 self.assertIsInstance(run.call_args.args[5], mirror.AppTokenProvider)

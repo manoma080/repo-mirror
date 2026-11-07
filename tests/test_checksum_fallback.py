@@ -7,6 +7,11 @@ from test_reconcile_assets import SOURCE
 
 
 class ChecksumFallbackTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_checksum_manifest_skips_matching_asset(self):
         content = (hashlib.sha256(b'new').hexdigest() + '  changed\n').encode()
         class ChecksumSource(DigestSource):
@@ -101,5 +106,5 @@ class ChecksumFallbackTests(unittest.TestCase):
         with patch.object(mirror, 'mirror_git'):
             with self.assertRaises(mirror.ReleaseRecoveryError):
                 mirror.mirror_repository(SOURCE, 'demo', 'dest', src, dst, 'token')
-        self.assertTrue(dst.release['name'].startswith('[repo-mirror:pending:'))
+        self.assertIn('[repo-mirror:pending:v3]', dst.release['body'])
         self.assertEqual(dst.deleted, [])

@@ -4,6 +4,11 @@ import mirror
 
 
 class ReleaseTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_existing_release_metadata_is_updated(self):
         source = {'type':'github', 'base_url':'https://github.com', 'owner':'alice'}
         class Src:

@@ -7,6 +7,11 @@ import mirror
 
 
 class FinalVerificationTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def run_scenario(self, *, source_change=False, destination='uploaded'):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice'}
 
@@ -49,8 +54,10 @@ class FinalVerificationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 mirror.mirror_repository(source, 'demo', 'dest', src, dst, 'token')
         self.assertTrue(dst.uploaded)
-        self.assertTrue(dst.release['name'].startswith('[repo-mirror:pending:v1]'))
-        self.assertEqual(dst.patches, [])
+        self.assertIn('[repo-mirror:pending:v3]', dst.release['body'])
+        self.assertEqual(len(dst.patches), 2)
+        self.assertIn('WAITING_SOURCE', dst.patches[0]['body'])
+        self.assertIn('BOUND', dst.patches[1]['body'])
 
     def test_source_manifest_changes_during_upload(self):
         self.run_scenario(source_change=True)

@@ -11,6 +11,10 @@ from test_mirror import pending
 
 
 class StarterAssetTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
     def test_zero_byte_starter_requires_manual_removal_even_for_empty_source(self):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo']}
         class Src:

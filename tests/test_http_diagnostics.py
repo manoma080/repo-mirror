@@ -11,6 +11,10 @@ import mirror
 
 
 class HTTPDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
     def test_sync_http_error_reports_status_without_untrusted_url_or_reason(self):
         config = {'destination_account_type': 'personal', 'sources': [
             {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo']}]}
