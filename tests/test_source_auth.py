@@ -11,6 +11,10 @@ import mirror
 
 
 class SourceAuthTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
     def test_github_source_api_authenticates_only_exact_api_origin(self):
         api = mirror.SourceAPI('secret')
         response = Mock()

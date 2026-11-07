@@ -10,6 +10,10 @@ import mirror
 
 
 class DiscoveryResilienceTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
     def test_failed_source_reported_and_other_source_mirrored(self):
         sources = [
             {'type': 'github', 'base_url': 'https://github.com', 'owner': 'bad', 'repos': 'all'},

@@ -9,6 +9,11 @@ SOURCE = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice'}
 
 
 class ReleasePolicyTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_existing_release_gets_new_assets_and_updated_metadata(self):
         class Source:
             def request(self, *args):
@@ -29,8 +34,10 @@ class ReleasePolicyTests(unittest.TestCase):
                 if method == 'PATCH' and url.endswith('/releases/2'): self.release.update(data)
                 return {}
             def pages(self, url): return self.assets.copy()
+            def download(self, url, out): out.write(self.content)
             def upload(self, url, data, content_type):
-                self.assets.append({'name': 'a', 'size': len(data.read()), 'state': 'uploaded'})
+                self.content = data.read()
+                self.assets.append({'name': 'a', 'size': len(self.content), 'state': 'uploaded', 'url': 'https://api.github.com/a'})
         dst = Destination()
         with patch.object(mirror, 'mirror_git'):
             mirror.mirror_repository(SOURCE, 'demo', 'dest', Source(), dst, 'token')

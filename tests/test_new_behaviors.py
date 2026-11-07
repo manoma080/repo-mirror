@@ -4,6 +4,11 @@ from unittest.mock import patch
 import mirror
 
 class NewBehaviorTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_forgejo_assets_not_paginated(self):
         source = {'type':'forgejo','base_url':'https://src.example','owner':'alice'}
         class Src:

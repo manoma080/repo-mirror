@@ -37,6 +37,11 @@ class Destination:
         self.assets[url.split('name=')[1]] = data.read()
 
 class ReconcileTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_source_removed_before_replacement_is_never_deleted(self):
         class ChangingSource(Source):
             def __init__(self): self.count = 0

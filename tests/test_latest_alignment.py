@@ -67,6 +67,11 @@ def run(src, dst):
 
 
 class LatestAlignmentTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_initial_order_and_authoritative_latest(self):
         releases = [release(3, True), release(2), release(1)]
         dst = Destination(True)

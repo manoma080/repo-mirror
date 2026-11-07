@@ -11,6 +11,11 @@ from test_reconcile_assets import Source, Destination, SOURCE
 
 
 class ProgressRegressionTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_error_details_only_allow_exact_known_messages(self):
         message = 'source default branch missing; refusing to prune'
         self.assertEqual(mirror.error_detail(RuntimeError(message)), message)
@@ -41,6 +46,9 @@ class ProgressRegressionTests(unittest.TestCase):
                     data[1]['name'] = 'https://example.test/file?token=secret\n::warning::oops'
                 return data
         class DecodingDestination(Destination):
+            def download(self, url, out):
+                name = url.partition('/assets/')[2]
+                out.write(self.assets[name])
             def upload(self, url, data, content_type):
                 from urllib.parse import parse_qs, urlparse
                 self.assets[parse_qs(urlparse(url).query)['name'][0]] = data.read()

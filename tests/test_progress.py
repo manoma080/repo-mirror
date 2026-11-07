@@ -12,6 +12,11 @@ from test_reconcile_assets import Source, Destination, SOURCE
 
 
 class ProgressTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_main_reports_counts_and_never_logs_destination(self):
         config = {'destination_account_type': 'personal', 'sources': [dict(SOURCE, repos=['demo'])]}
         output = io.StringIO()

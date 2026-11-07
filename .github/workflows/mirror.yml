@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 */3 * * *'
   workflow_dispatch:
+    inputs:
+      source_urls:
+        description: 'Comma-separated exact source repository URLs (blank mirrors all)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -41,6 +47,7 @@ jobs:
       - name: Mirror
         env:
           DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
+          MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}
           MIRROR_APP_ID: ${{ secrets.MIRROR_APP_ID }}
           MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
           MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}

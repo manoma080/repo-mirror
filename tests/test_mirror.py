@@ -40,7 +40,7 @@ class EngineTests(unittest.TestCase):
             def pages(self, url):
                 if url.endswith('/releases'): return [{'id': 4, 'tag_name': 'v1', 'name': 'one', 'body': 'notes', 'draft': False, 'prerelease': False, 'assets': [], 'tarball_url': 'https://src.example/tar'}]
                 if url.endswith('/releases/4/assets'): return [{'name': 'bin.zip', 'browser_download_url': 'https://src.example/bin.zip', 'size': 4}]
-                if url.endswith('/releases/11/assets') and self.uploaded: return [{'name': 'bin.zip', 'size': 4, 'state': 'uploaded'}]
+                if url.endswith('/releases/11/assets') and self.uploaded: return [{'name': 'bin.zip', 'size': 4, 'state': 'uploaded', 'url': 'https://api.github.com/bin.zip'}]
                 return []
             def download(self, url, output): output.write(b'data')
             def upload(self, url, data, content_type): self.calls.append(('UPLOAD', url, data)); self.uploaded = True
@@ -74,7 +74,7 @@ class EngineTests(unittest.TestCase):
                 self.visited.append(url)
                 if url.endswith('/releases'): return [{'id': 4, 'tag_name': 'v1', 'assets': []}]
                 if url.endswith('/releases/4/assets'): return [{'name':'file', 'size':1, 'browser_download_url':'https://src.example/file'}]
-                if url.endswith('/releases/9/assets') and self.uploaded: return [{'name':'file', 'size':1, 'state':'uploaded'}]
+                if url.endswith('/releases/9/assets') and self.uploaded: return [{'name':'file', 'size':1, 'state':'uploaded', 'url':'https://api.github.com/file'}]
                 return []
             def download(self, url, output): output.write(b'x')
             def upload(self, url, data, content_type): self.visited.append(url); self.uploaded = True

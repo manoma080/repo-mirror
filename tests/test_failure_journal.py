@@ -9,6 +9,11 @@ import mirror
 
 
 class FailureJournalTest(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_recorded_assets_are_prioritized_for_retry(self):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice'}
         with tempfile.TemporaryDirectory() as directory:
@@ -53,7 +58,8 @@ class FailureJournalTest(unittest.TestCase):
             def pages(self, url): return self.assets if url.endswith('/assets') else []
             def upload(self, *args):
                 if self.fail: raise RuntimeError('secret token must not be persisted')
-                self.assets = [{'name': 'file', 'size': 3, 'state': 'uploaded'}]
+                self.assets = [{'name': 'file', 'size': 3, 'state': 'uploaded', 'url': 'https://api.github.com/file'}]
+            def download(self, url, out): out.write(b'abc')
         with tempfile.TemporaryDirectory() as directory, patch.object(mirror, 'mirror_git'):
             path = Path(directory) / 'failures.json'
             journal = mirror.FailureJournal(path)

@@ -15,8 +15,8 @@ class TimestampSource(Source):
     def pages(self, url):
         assets = super().pages(url)
         if not url.endswith('/releases'):
-            for a in assets:
-                a.update(id=123, updated_at=self.timestamp)
+            for index, a in enumerate(assets):
+                a.update(id=123 + index, updated_at=self.timestamp)
         return assets
     def download(self, url, out):
         self.downloads.append(url)
@@ -66,14 +66,15 @@ class TimestampTests(unittest.TestCase):
             mirror.mirror_repository(SOURCE, 'demo', 'dest', src, dst, 'token')
         self.assertNotIn('https://github.com/changed', src.downloads)
 
-    def test_missing_secret_disables_cache(self):
+    def test_missing_secret_rejects_v3_before_release_mutation(self):
         src, dst = TimestampSource(), TimestampDestination()
         dst.assets.update(changed=b'new', new=b'n')
         with patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': ''}), patch.object(mirror, 'mirror_git'):
-            mirror.mirror_repository(SOURCE, 'demo', 'dest', src, dst, 'token')
-            mirror.mirror_repository(SOURCE, 'demo', 'dest', src, dst, 'token')
+            with self.assertRaisesRegex(mirror.ReleaseRecoveryError, 'MIRROR_TIMESTAMP_SECRET'):
+                mirror.mirror_repository(SOURCE, 'demo', 'dest', src, dst, 'token')
         self.assertNotIn('TIMESTAMPS.txt', dst.assets)
-        self.assertEqual(src.downloads.count('https://github.com/changed'), 2)
+        self.assertEqual(src.downloads, [])
+        self.assertEqual(dst.deleted, [])
 
     def test_tampered_signed_cache_is_not_used_or_deleted(self):
         src, dst = TimestampSource(), TimestampDestination()

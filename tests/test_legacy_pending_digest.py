@@ -17,6 +17,31 @@ def legacy_marker(version, asset):
 
 
 class LegacyPendingTests(unittest.TestCase):
+    def test_current_legacy_markers_resume_missing_asset_upload(self):
+        for version in ('v1', 'v2'):
+            with self.subTest(version=version):
+                src, dst = DigestSource(None), DigestDestination(None)
+                dst.assets = {}
+                dst.release['name'] = legacy_marker(version, src.pages('assets')[0])
+                self.run_mirror(src, dst)
+                self.assertEqual(dst.assets['changed'], b'new')
+                self.assertEqual(dst.deleted, [])
+                self.assertEqual(dst.release['name'], 'new')
+
+    def test_forged_current_v2_marker_cannot_replace_existing_asset(self):
+        src, dst = DigestSource(digest(b'new')), DigestDestination(None, b'old')
+        asset = src.pages('assets')[0]
+        entry = [asset.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
+        entry.append(asset['digest'].lower())
+        fingerprint = hashlib.sha256(json.dumps([entry], ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+        marker = '[repo-mirror:pending:v2]' + base64.urlsafe_b64encode(json.dumps(['old', fingerprint]).encode()).decode()
+        dst.release['name'] = marker
+        with self.assertRaisesRegex(mirror.ReleaseRecoveryError, 'manually'):
+            self.run_mirror(src, dst)
+        self.assertEqual(dst.deleted, [])
+        self.assertEqual(dst.assets['changed'], b'old')
+        self.assertEqual(dst.release['name'], marker)
+
     def run_mirror(self, src, dst):
         with patch.object(mirror, 'mirror_git'):
             mirror.mirror_repository(SOURCE, 'demo', 'dest', src, dst, 'token')

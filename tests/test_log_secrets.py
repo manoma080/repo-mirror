@@ -13,6 +13,11 @@ from test_reconcile_assets import SOURCE, Source, Destination
 
 
 class LogSecretsTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_untrusted_identifiers_are_not_logged(self):
         secret = 'ghp_' + 'A' * 36
         config = {'destination_account_type': 'personal', 'sources': [dict(SOURCE, owner=secret, repos=[secret])]}

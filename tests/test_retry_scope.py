@@ -40,6 +40,11 @@ class Destination:
 
 
 class RetryScopeTests(unittest.TestCase):
+    def setUp(self):
+        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret.start()
+        self.addCleanup(secret.stop)
+
     def test_pending_release_restores_current_source_name(self):
         dst = Destination(['0'])
         src = Source()
@@ -65,7 +70,9 @@ class RetryScopeTests(unittest.TestCase):
                 if url.endswith('/11/assets'): return self.assets
                 return super().pages(url)
             def upload(self, url, data, content_type):
-                self.assets.append({'name': 'file', 'size': len(data.read()), 'state': 'uploaded'})
+                self.content = data.read()
+                self.assets.append({'name': 'file', 'size': len(self.content), 'state': 'uploaded', 'url': 'https://api.github.com/file'})
+            def download(self, url, out): out.write(self.content)
         dst = AssetDestination()
         with tempfile.TemporaryDirectory() as directory:
             journal = mirror.FailureJournal(directory + '/failures.json')
