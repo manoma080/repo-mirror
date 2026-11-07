@@ -719,12 +719,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                 # Legacy name markers are unsigned and cannot authorize deletion.
                 may_replace = False if pending else state['replace']
                 asset_url = upstream + '/releases/' + str(release['id']) + '/assets'
-                observed_legacy_metadata = None
+                observed_stable_snapshot = None
                 all_source_names = set()
                 observed_starter_names = set()
                 @timed_call(lambda: 'step source-manifest target=source')
                 def fetch_source_assets():
-                    nonlocal observed_legacy_metadata, all_source_names, state
+                    nonlocal observed_stable_snapshot, all_source_names, state
                     assets = (src.request('GET', asset_url) if source['type'] == 'forgejo'
                               else src.pages(asset_url))
                     if not isinstance(assets, list):
@@ -732,11 +732,47 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     all_source_names = [a.get('name') for a in assets]
                     if len(set(all_source_names)) != len(all_source_names):
                         raise ReleaseRecoveryError('mismatch')
+                    def stable_entry(a):
+                        # Whitelist of stable, meaningful fields only. Volatile
+                        # provider metadata (download_count, timestamps, URLs,
+                        # uploader, labels, content type, the full asset object)
+                        # is deliberately excluded so routine provider-side
+                        # updates do not look like source changes.
+                        published = a.get('digest')
+                        if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                            published = published.lower()
+                        return [a.get('name'), a.get('size'), a.get('id'),
+                                a.get('state'), published]
+                    def legacy_entry(a, include_created_at=True):
+                        # Pre-fix manifest shape, retained only to recognise
+                        # digests stored by old pending markers. The historical
+                        # main manifest appended created_at (after the
+                        # published digest) whenever present — real GitHub
+                        # assets always carry it — so it is restored here.
+                        # The even older previous-manifest form omitted it;
+                        # that variant is recognised as well below. Neither
+                        # form is used for new manifests: the stable manifest
+                        # governs BOUND releases and the pending snapshot.
+                        entry = [a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
+                        published = a.get('digest')
+                        if published is not None:
+                            if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                                published = published.lower()
+                            entry.append(published)
+                        if include_created_at and a.get('created_at') is not None:
+                            entry.append(a['created_at'])
+                        return entry
                     if pending:
-                        metadata = sorted(json.dumps(a, sort_keys=True, ensure_ascii=True, separators=(',', ':')) for a in assets)
-                        if observed_legacy_metadata is not None and metadata != observed_legacy_metadata:
+                        # Only stable fields are compared between fetches. The
+                        # full provider asset object is never hashed: it carries
+                        # volatile values such as download_count (which our own
+                        # downloads increment), timestamps, URLs and uploader
+                        # data, so hashing it makes every pending sync fail.
+                        snapshot = sorted((stable_entry(a) for a in assets),
+                                          key=lambda entry: str(entry[0]))
+                        if observed_stable_snapshot is not None and snapshot != observed_stable_snapshot:
                             raise ReleaseRecoveryError('changed')
-                        observed_legacy_metadata = metadata
+                        observed_stable_snapshot = snapshot
                     incomplete = [a for a in assets if a.get('state') == 'starter']
                     observed_starter_names.update(a['name'] for a in incomplete if isinstance(a.get('name'), str))
                     if incomplete:
@@ -766,31 +802,16 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                         observed_starter_names.update(candidate_skipped)
                         all_source_names = list(set(all_source_names) | set(candidate_skipped))
                         assets = [a for a in assets if a.get('name') not in candidate_skipped]
-                    manifest = []
-                    for a in assets:
-                        entry = [a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
-                        if not pending:
-                            entry.append(['metadata', json.dumps(a, sort_keys=True, ensure_ascii=True, separators=(',', ':'))])
-                        published = a.get('digest')
-                        if published is not None:
-                            if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
-                                published = published.lower()
-                            entry.append(published)
-                        if a.get('created_at') is not None:
-                            entry.append(a['created_at'])
-                        manifest.append(entry)
+                    manifest = [stable_entry(a) for a in assets]
                     manifest.sort(key=lambda a: str(a[0]))
-                    previous_manifest = []
-                    for a in assets:
-                        entry = [a.get(k) for k in ('name', 'size', 'id', 'updated_at', 'browser_download_url')]
-                        published = a.get('digest')
-                        if published is not None:
-                            if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
-                                published = published.lower()
-                            entry.append(published)
-                        previous_manifest.append(entry)
+                    previous_manifest = [legacy_entry(a) for a in assets]
                     previous_manifest.sort(key=lambda a: str(a[0]))
+                    # Same form without created_at, for markers stored under
+                    # the still older previous-manifest scheme.
+                    alternate_manifest = [legacy_entry(a, include_created_at=False) for a in assets]
+                    alternate_manifest.sort(key=lambda a: str(a[0]))
                     pre_checksum_digest = hashlib.sha256(json.dumps(previous_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+                    alternate_pre_checksum_digest = hashlib.sha256(json.dumps(alternate_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
                     checksums = {}
                     checksum_files = [a for a in assets if a.get('state') != 'starter' and isinstance(a.get('name'), str) and
                                       re.fullmatch(r'SHA256SUMS(?:\.txt)?', a['name'], re.I)]
@@ -809,6 +830,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                                     raise RuntimeError('source asset digest mismatch')
                             manifest.append(['repo-mirror-checksum-content', hashlib.sha256(content).hexdigest()])
                             previous_manifest.append(['repo-mirror-checksum-content', hashlib.sha256(content).hexdigest()])
+                            alternate_manifest.append(['repo-mirror-checksum-content', hashlib.sha256(content).hexdigest()])
                             try:
                                 lines = content.decode('utf-8').splitlines()
                                 for line in lines:
@@ -821,15 +843,61 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                                 checksums = {}
                     digest = hashlib.sha256(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
                     previous_digest = hashlib.sha256(json.dumps(previous_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
+                    alternate_digest = hashlib.sha256(json.dumps(alternate_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
                     if candidate_skipped is not None:
                         new_snapshot = [{'name': n, 'id': candidate_skipped[n]} for n in sorted(candidate_skipped)]
-                        if state['phase'] == 'BOUND' and digest != state['digest']:
-                            raise ReleaseRecoveryError('changed')
+                        # A BOUND digest mismatch is not raised here: the caller
+                        # may migrate a polluted pre-fix digest after verifying
+                        # that every destination asset still matches the source.
                         if state.get('skipped') != new_snapshot:
                             state = dict(state, skipped=new_snapshot)
                             if state['phase'] == 'BOUND':
                                 dst.request('PATCH', target + '/releases/' + str(existing['id']), {'body': marked_body(body, state)})
-                    return [a for a in assets if a.get('state') != 'starter'], digest, checksums, (previous_digest, pre_checksum_digest)
+                    return [a for a in assets if a.get('state') != 'starter'], digest, checksums, (previous_digest, pre_checksum_digest, alternate_digest, alternate_pre_checksum_digest)
+                def verify_destination_matches_source(assets, strict_names):
+                    """Byte-verify every source asset against the destination.
+
+                    Raises ReleaseRecoveryError unless every source asset is
+                    present at the destination as an uploaded asset of the same
+                    size and identical bytes (and any published source digest
+                    matches those bytes). Used before migrating a marker whose
+                    stored digest predates the stable manifest scheme; nothing
+                    is deleted or uploaded here.
+                    """
+                    old_assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
+                    old_by_name = {a['name']: a for a in old_assets}
+                    if (len(old_by_name) != len(old_assets)
+                            or len({a['name'] for a in assets}) != len(assets)):
+                        raise ReleaseRecoveryError('mismatch')
+                    if strict_names:
+                        # Destination assets absent from the source are only
+                        # tolerated when they are this mirror's own auxiliary
+                        # cache assets; any other extra asset means the source
+                        # asset set changed.
+                        extras = set(old_by_name) - {a['name'] for a in assets} - {
+                            'TIMESTAMPS.txt', 'TIMESTAMPS.txt.repo-mirror-staging'}
+                        if extras:
+                            raise ReleaseRecoveryError('changed')
+                    for asset in assets:
+                        previous = old_by_name.get(asset['name'])
+                        if (previous is None or previous.get('state') != 'uploaded'
+                                or isinstance(asset.get('size'), bool)
+                                or type(asset.get('size')) is not int or asset['size'] < 0
+                                or type(previous.get('size')) is not int or previous['size'] != asset['size']):
+                            raise ReleaseRecoveryError('changed')
+                        with tempfile.TemporaryFile() as source_data, tempfile.TemporaryFile() as dest_data:
+                            src.download(asset['browser_download_url'], source_data)
+                            dst.download(previous['url'], dest_data)
+                            if source_data.tell() != asset['size'] or not same_file(source_data, dest_data):
+                                raise ReleaseRecoveryError('changed')
+                            published = asset.get('digest')
+                            if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                                source_data.seek(0)
+                                content_hash = hashlib.sha256()
+                                for chunk in iter(lambda: source_data.read(CHUNK_SIZE), b''):
+                                    content_hash.update(chunk)
+                                if content_hash.hexdigest() != published[7:].lower():
+                                    raise ReleaseRecoveryError('changed')
                 source_assets, digest, checksums, previous_digest = fetch_source_assets()
                 print(f'release {release_index}/{len(selected)} assets={len(source_assets)}', file=sys.stderr, flush=True)
                 if existing and pending:
@@ -848,44 +916,58 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                         legacy_digest = hashlib.sha256(json.dumps(legacy_manifest, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
                         if expected_digest not in (legacy_digest, *previous_digest):
                             raise ReleaseRecoveryError('changed')
-                        # Old markers cannot attest to the original content digest. Only
-                        # migrate when every current asset already matches the destination;
-                        # otherwise an interrupted replacement cannot be distinguished
-                        # safely from an unobserved source-content change.
-                        old_assets = dst.pages(target + '/releases/' + str(existing['id']) + '/assets')
-                        old_by_name = {a['name']: a for a in old_assets}
-                        if len(old_by_name) != len(old_assets) or len({a['name'] for a in source_assets}) != len(source_assets):
-                            raise ReleaseRecoveryError('mismatch')
-                        for asset in source_assets:
-                            previous = old_by_name.get(asset['name'])
-                            if (previous is None or previous.get('state') != 'uploaded' or
-                                    type(asset.get('size')) is not int or asset['size'] < 0 or
-                                    type(previous.get('size')) is not int or previous['size'] != asset['size']):
-                                raise ReleaseRecoveryError('changed')
-                            with tempfile.TemporaryFile() as source_data, tempfile.TemporaryFile() as dest_data:
-                                src.download(asset['browser_download_url'], source_data)
-                                dst.download(previous['url'], dest_data)
-                                if source_data.tell() != asset['size'] or not same_file(source_data, dest_data):
-                                    raise ReleaseRecoveryError('changed')
-                                published = asset.get('digest')
-                                if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
-                                    source_data.seek(0)
-                                    content_hash = hashlib.sha256()
-                                    for chunk in iter(lambda: source_data.read(CHUNK_SIZE), b''):
-                                        content_hash.update(chunk)
-                                    if content_hash.hexdigest() != published[7:].lower():
-                                        raise ReleaseRecoveryError('changed')
+                        # A marker whose digest is exactly the plain legacy
+                        # manifest of the current assets (no published digest,
+                        # no created_at, no checksum file) was an exact match
+                        # under the old scheme; upgrade it directly, as before
+                        # the stable scheme. Missing or differing destination
+                        # assets are still handled (and replacements refused)
+                        # by the asset loop below, since pending releases may
+                        # not replace.
+                        direct_upgrade = (expected_digest == legacy_digest
+                                          and all(a.get('digest') is None and a.get('created_at') is None
+                                                  for a in source_assets)
+                                          and not any(isinstance(a.get('name'), str)
+                                                      and re.fullmatch(r'SHA256SUMS(?:\.txt)?', a['name'], re.I)
+                                                      for a in source_assets))
+                        if not direct_upgrade:
+                            # Old markers cannot attest to the original content digest. Only
+                            # migrate when every current asset already matches the destination;
+                            # otherwise an interrupted replacement cannot be distinguished
+                            # safely from an unobserved source-content change.
+                            verify_destination_matches_source(source_assets, strict_names=False)
                         _, checked_digest, _, _ = fetch_source_assets()
                         if checked_digest != digest:
                             raise ReleaseRecoveryError('changed')
-                        encoded = base64.urlsafe_b64encode(json.dumps([original_name, digest], ensure_ascii=True).encode()).decode()
-                        pending_name = prefix + encoded
-                        if len(pending_name) > 255:
-                            raise ValueError('release name too long for pending marker')
-                        dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': pending_name})
+                        if not direct_upgrade:
+                            encoded = base64.urlsafe_b64encode(json.dumps([original_name, digest], ensure_ascii=True).encode()).decode()
+                            pending_name = prefix + encoded
+                            if len(pending_name) > 255:
+                                raise ValueError('release name too long for pending marker')
+                            dst.request('PATCH', target + '/releases/' + str(existing['id']), {'name': pending_name})
+                        # For a direct legacy upgrade the pending name is left
+                        # untouched (as under the old scheme, where the digest
+                        # already matched); the asset loop runs first, so a
+                        # truncated or starter destination still stops the run
+                        # without any release mutation.
                 else:
                     if state['phase'] == 'BOUND' and state['digest'] != digest:
-                        raise ReleaseRecoveryError('changed')
+                        # Pre-fix BOUND markers hashed the full provider asset
+                        # object (including download_count), so their digest can
+                        # never match the stable digest again. Migrate only
+                        # after byte-verifying that every destination asset
+                        # still matches the current source; anything else stays
+                        # a manual-review stop. No release or asset is deleted.
+                        # An empty current source set never migrates: a BOUND
+                        # release whose assets all vanished needs review.
+                        if not source_assets:
+                            raise ReleaseRecoveryError('changed')
+                        verify_destination_matches_source(source_assets, strict_names=True)
+                        _, checked_digest, _, _ = fetch_source_assets()
+                        if checked_digest != digest:
+                            raise ReleaseRecoveryError('changed')
+                        state = dict(state, digest=digest)
+                        dst.request('PATCH', target + '/releases/' + str(existing['id']), {'body': marked_body(body, state)})
                     if state['phase'] == 'WAITING_SOURCE':
                         state = dict(state, phase='BOUND', digest=digest)
                         dst.request('PATCH', target + '/releases/' + str(existing['id']), {'body': marked_body(body, state)})
