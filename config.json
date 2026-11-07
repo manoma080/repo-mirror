@@ -364,6 +364,14 @@
     {
       "type": "github",
       "base_url": "https://github.com",
+      "owner": "phantomptr",
+      "repos": [
+        "ps5upload"
+      ]
+    },
+    {
+      "type": "github",
+      "base_url": "https://github.com",
       "owner": "PS5Dev",
       "repos": [
         "Byepervisor",
