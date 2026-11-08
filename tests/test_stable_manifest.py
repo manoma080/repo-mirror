@@ -166,6 +166,18 @@ class StableManifestTests(unittest.TestCase):
         self.assertIn('new', dst.assets)
         self.assertEqual(dst.deleted, deleted_before)
 
+    def test_polluted_bound_empty_destination_uploads_all_assets(self):
+        # BOUND release with no assets at the destination (the run stopped
+        # right after binding). Nothing to verify at the destination, so the
+        # normal asset loop uploads everything; no release is deleted.
+        dst = self.interrupted_bound_destination()
+        dst.assets = {}
+        deleted_before = list(dst.deleted)
+        self.run_mirror(Source(), dst)
+        self.assertEqual(dst.release['body'], 'notes')
+        self.assertEqual(dst.assets.get('changed'), b'new')
+        self.assertEqual(dst.deleted, deleted_before)
+
     def test_polluted_bound_digest_stays_manual_when_destination_differs(self):
         dst = self.interrupted_bound_destination()
         deleted_before = list(dst.deleted)

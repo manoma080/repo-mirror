@@ -872,9 +872,6 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     if (len(old_by_name) != len(old_assets)
                             or len({a['name'] for a in assets}) != len(assets)):
                         raise ReleaseRecoveryError('mismatch')
-                    if allow_missing and not old_by_name:
-                        # An empty destination cannot be told apart from a changed source.
-                        raise _verify_fail('empty-destination')
                     if strict_names:
                         # Destination assets absent from the source are only
                         # tolerated when they are this mirror's own auxiliary
@@ -887,7 +884,20 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     for asset in assets:
                         previous = old_by_name.get(asset['name'])
                         if previous is None and allow_missing:
-                            # Interrupted upload: the normal asset loop uploads it from source.
+                            # Interrupted upload: check only the source copy (size and
+                            # published digest); the normal asset loop uploads it afterwards.
+                            with tempfile.TemporaryFile() as source_data:
+                                src.download(asset['browser_download_url'], source_data)
+                                if source_data.tell() != asset['size']:
+                                    raise _verify_fail('missing-source-size-mismatch')
+                                published = asset.get('digest')
+                                if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
+                                    source_data.seek(0)
+                                    content_hash = hashlib.sha256()
+                                    for chunk in iter(lambda: source_data.read(CHUNK_SIZE), b''):
+                                        content_hash.update(chunk)
+                                    if content_hash.hexdigest() != published[7:].lower():
+                                        raise _verify_fail('missing-source-digest-mismatch')
                             continue
                         if (previous is None or previous.get('state') != 'uploaded'
                                 or isinstance(asset.get('size'), bool)
