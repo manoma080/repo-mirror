@@ -690,35 +690,6 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                                 if content_hash.hexdigest() != published[7:].lower():
                                     raise _verify_fail("published-digest-mismatch")
 
-                def published_digests_match(assets):
-                    """Return True when every source asset is already uploaded with the same published digest.
-
-                    Step 1 of the fallback chain: compares the sha256 digests GitHub
-                    publishes for each asset, with no downloads. Names, sizes and
-                    upload state must match exactly. Returns False when any asset
-                    lacks a published digest, so the byte fallback still runs.
-                    """
-                    if not assets:
-                        return False
-                    old_assets = dst.pages(target + "/releases/" + str(existing["id"]) + "/assets")
-                    old_by_name = {a.get("name"): a for a in old_assets}
-                    if len(old_by_name) != len(old_assets) or {a["name"] for a in assets} != set(old_by_name):
-                        return False
-                    for asset in assets:
-                        published = asset.get("digest")
-                        previous = old_by_name[asset["name"]]
-                        if not (
-                            isinstance(published, str)
-                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", published)
-                            and previous.get("state") == "uploaded"
-                            and type(asset.get("size")) is int
-                            and previous.get("size") == asset["size"]
-                            and isinstance(previous.get("digest"), str)
-                            and previous["digest"].lower() == published.lower()
-                        ):
-                            return False
-                    return True
-
                 source_assets, digest, checksums, previous_digest = fetch_source_assets()
                 print(
                     f"release {release_index}/{len(selected)} assets={len(source_assets)}",
@@ -792,15 +763,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         # truncated or starter destination still stops the run
                         # without any release mutation.
                 else:
-                    if (
-                        state["phase"] == "BOUND"
-                        and state["digest"] != digest
-                        and published_digests_match(source_assets)
-                    ):
-                        # Step 1: every asset already matches its published digest, so the
-                        # release is unchanged. The stored BOUND digest is not needed.
-                        print("release unchanged by published digests", file=sys.stderr, flush=True)
-                    elif state["phase"] == "BOUND" and state["digest"] != digest:
+                    if state["phase"] == "BOUND" and state["digest"] != digest:
                         # Pre-fix BOUND markers hashed the full provider asset
                         # object (including download_count), so their digest can
                         # never match the stable digest again. Migrate only
