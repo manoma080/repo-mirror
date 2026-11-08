@@ -136,8 +136,8 @@ A retry checks files that are already uploaded and copies missing ones. Each fil
 
 1. **Published SHA-256 digest** (a fingerprint of the file's bytes). Used when both sites publish a valid digest, they match, and the sizes match. Forgejo often has no digest.
 2. **Checksum file fallback.** If the source has exactly one `SHA256SUMS` or `SHA256SUMS.txt` (up to 1 MiB), its strictly formatted lines are used as digests. Bad lines, duplicate names, unsafe paths or several checksum files turn this off.
-3. **Byte comparison.** If the first two steps cannot decide, the file is downloaded and compared byte by byte.
-4. **Timestamp and size cache (heuristic).** Used only for files with a usable ID, timestamp and size. See below.
+3. **Timestamp and size cache (heuristic).** Used only for files with a usable ID, timestamp and size, and only if a verified `TIMESTAMPS.txt` exists. See below.
+4. **Byte comparison.** If the first three steps cannot decide, the file is downloaded and compared byte by byte.
 
 Missing or bad digests are never treated as proof of a match. Equal sizes alone do not prove equal contents.
 

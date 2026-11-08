@@ -846,27 +846,6 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         ident = identity(asset) if cache_enabled else None
                         entry = cached.get(asset["name"]) if ident else None
                         if (
-                            isinstance(entry, dict)
-                            and all(entry.get(k) == v for k, v in ident.items())
-                            and isinstance(entry.get("sha256"), str)
-                            and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
-                            and previous
-                            and previous.get("state") == "uploaded"
-                            and type(previous.get("size")) is int
-                            and previous["size"] == ident["size"]
-                            and isinstance(target_hash, str)
-                            and target_hash.lower() == "sha256:" + entry["sha256"]
-                            and (not source_hash or source_hash.lower() == target_hash.lower())
-                        ):
-                            print(
-                                "asset unchanged reason=verified-timestamp-manifest",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                            records[asset["name"]] = dict(ident, sha256=entry["sha256"])
-                            skipped += 1
-                            continue
-                        if (
                             type(asset.get("size")) is int
                             and asset["size"] >= 0
                             and previous is not None
@@ -886,6 +865,27 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                             )
                             if ident:
                                 records[asset["name"]] = dict(ident, sha256=source_hash[7:].lower())
+                            skipped += 1
+                            continue
+                        if (
+                            isinstance(entry, dict)
+                            and all(entry.get(k) == v for k, v in ident.items())
+                            and isinstance(entry.get("sha256"), str)
+                            and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
+                            and previous
+                            and previous.get("state") == "uploaded"
+                            and type(previous.get("size")) is int
+                            and previous["size"] == ident["size"]
+                            and isinstance(target_hash, str)
+                            and target_hash.lower() == "sha256:" + entry["sha256"]
+                            and (not source_hash or source_hash.lower() == target_hash.lower())
+                        ):
+                            print(
+                                "asset unchanged reason=verified-timestamp-manifest",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            records[asset["name"]] = dict(ident, sha256=entry["sha256"])
                             skipped += 1
                             continue
                         print(
