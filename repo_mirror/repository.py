@@ -20,6 +20,27 @@ from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_cal
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker
 
 
+def find_tag_releases(dst, target, tag, source_name):
+    """Return destination releases for a tag, including unpublished drafts.
+
+    GitHub renames a draft that has no published tag to ``untagged-<hash>``, so an
+    exact ``tag_name`` match can miss it and the mirror creates a duplicate draft.
+    Fallback: drafts with that exact name and an ``untagged-`` tag name.
+    """
+    releases = list(dst.pages(target + "/releases"))
+    exact = [r for r in releases if r.get("tag_name") == tag]
+    if exact:
+        return exact
+    return [
+        r
+        for r in releases
+        if r.get("draft") is True
+        and isinstance(r.get("tag_name"), str)
+        and r["tag_name"].startswith("untagged-")
+        and r.get("name") == source_name
+    ]
+
+
 @timed_repository
 def mirror_repository(source, name, owner, src, dst, token, account_type="organization", journal=None):
     """Mirror one source repository to its destination: branches, tags, releases and assets."""
@@ -201,7 +222,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         raise
                     e.close()
                     # The tag endpoint can omit drafts, which still need to be found.
-                    matches = [r for r in dst.pages(target + "/releases") if r.get("tag_name") == tag]
+                    matches = find_tag_releases(dst, target, tag, release.get("name"))
                     if len(matches) > 1:
                         raise RuntimeError("multiple destination releases for tag")
                     existing = matches[0] if matches else None
@@ -358,7 +379,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 ):
                     # Provisional markers never authorize replacement. Bind only an
                     # unambiguous tag lookup to the immutable destination release ID.
-                    matches = [r for r in dst.pages(target + "/releases") if r.get("tag_name") == tag]
+                    matches = find_tag_releases(dst, target, tag, release.get("name"))
                     if (
                         type(existing.get("id")) is not int
                         or existing["id"] <= 0
