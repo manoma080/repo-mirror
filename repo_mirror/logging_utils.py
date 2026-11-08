@@ -194,6 +194,9 @@ def error_detail(exc):
         status = getattr(exc, "mirror_asset_status", None)
         if type(status) is int and 100 <= status <= 599:
             return f"HTTP {status} (source asset GET)"
+    release_errors = getattr(exc, "release_errors", None)
+    if type(exc) is RuntimeError and type(release_errors) is list and release_errors:
+        return f"{len(release_errors)} releases failed; first: {error_detail(release_errors[0])}"
     if len(exc.args) == 1 and type(exc.args[0]) is str and exc.args[0] in SAFE_ERROR_MESSAGES:
         return exc.args[0]
     for kind in (ValueError, RuntimeError, URLError, OSError, KeyError, TypeError):
