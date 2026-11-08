@@ -19,6 +19,10 @@ from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker
 
+# Checksum file names accepted as a fallback source, any letter case:
+# SHA256SUM, SHA256SUMS, SHA256SUM.txt, SHA256SUMS.txt.
+CHECKSUM_FILE_NAME = re.compile(r"SHA256SUMS?(?:\.txt)?", re.I)
+
 
 def release_marker_is_pending(body):
     """Return True only for v3 markers still waiting for the source (phase WAITING_SOURCE).
@@ -535,7 +539,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         for a in assets
                         if a.get("state") != "starter"
                         and isinstance(a.get("name"), str)
-                        and re.fullmatch(r"SHA256SUMS(?:\.txt)?", a["name"], re.I)
+                        and CHECKSUM_FILE_NAME.fullmatch(a["name"])
                     ]
                     if len(checksum_files) == 1:
                         checksum_file = checksum_files[0]
@@ -730,8 +734,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                                 a.get("digest") is None and a.get("created_at") is None for a in source_assets
                             )
                             and not any(
-                                isinstance(a.get("name"), str)
-                                and re.fullmatch(r"SHA256SUMS(?:\.txt)?", a["name"], re.I)
+                                isinstance(a.get("name"), str) and CHECKSUM_FILE_NAME.fullmatch(a["name"])
                                 for a in source_assets
                             )
                         )
