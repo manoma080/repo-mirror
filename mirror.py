@@ -854,7 +854,10 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                             if state['phase'] == 'BOUND':
                                 dst.request('PATCH', target + '/releases/' + str(existing['id']), {'body': marked_body(body, state)})
                     return [a for a in assets if a.get('state') != 'starter'], digest, checksums, (previous_digest, pre_checksum_digest, alternate_digest, alternate_pre_checksum_digest)
-                def verify_destination_matches_source(assets, strict_names):
+                def _verify_fail(reason):
+                    print(f'verify-destination failed reason={reason} tag={tag}', file=sys.stderr, flush=True)
+                    return ReleaseRecoveryError('changed')
+                def verify_destination_matches_source(assets, strict_names, allow_missing=False):
                     """Byte-verify every source asset against the destination.
 
                     Raises ReleaseRecoveryError unless every source asset is
@@ -869,6 +872,9 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                     if (len(old_by_name) != len(old_assets)
                             or len({a['name'] for a in assets}) != len(assets)):
                         raise ReleaseRecoveryError('mismatch')
+                    if allow_missing and not old_by_name:
+                        # An empty destination cannot be told apart from a changed source.
+                        raise _verify_fail('empty-destination')
                     if strict_names:
                         # Destination assets absent from the source are only
                         # tolerated when they are this mirror's own auxiliary
@@ -877,19 +883,22 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                         extras = set(old_by_name) - {a['name'] for a in assets} - {
                             'TIMESTAMPS.txt', 'TIMESTAMPS.txt.repo-mirror-staging'}
                         if extras:
-                            raise ReleaseRecoveryError('changed')
+                            raise _verify_fail('extra-destination-asset')
                     for asset in assets:
                         previous = old_by_name.get(asset['name'])
+                        if previous is None and allow_missing:
+                            # Interrupted upload: the normal asset loop uploads it from source.
+                            continue
                         if (previous is None or previous.get('state') != 'uploaded'
                                 or isinstance(asset.get('size'), bool)
                                 or type(asset.get('size')) is not int or asset['size'] < 0
                                 or type(previous.get('size')) is not int or previous['size'] != asset['size']):
-                            raise ReleaseRecoveryError('changed')
+                            raise _verify_fail('not-uploaded-or-size-mismatch')
                         with tempfile.TemporaryFile() as source_data, tempfile.TemporaryFile() as dest_data:
                             src.download(asset['browser_download_url'], source_data)
                             dst.download(previous['url'], dest_data)
                             if source_data.tell() != asset['size'] or not same_file(source_data, dest_data):
-                                raise ReleaseRecoveryError('changed')
+                                raise _verify_fail('byte-mismatch')
                             published = asset.get('digest')
                             if isinstance(published, str) and re.fullmatch(r'sha256:[0-9a-fA-F]{64}', published):
                                 source_data.seek(0)
@@ -897,7 +906,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                                 for chunk in iter(lambda: source_data.read(CHUNK_SIZE), b''):
                                     content_hash.update(chunk)
                                 if content_hash.hexdigest() != published[7:].lower():
-                                    raise ReleaseRecoveryError('changed')
+                                    raise _verify_fail('published-digest-mismatch')
                 source_assets, digest, checksums, previous_digest = fetch_source_assets()
                 print(f'release {release_index}/{len(selected)} assets={len(source_assets)}', file=sys.stderr, flush=True)
                 if existing and pending:
@@ -962,7 +971,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type='organi
                         # release whose assets all vanished needs review.
                         if not source_assets:
                             raise ReleaseRecoveryError('changed')
-                        verify_destination_matches_source(source_assets, strict_names=True)
+                        verify_destination_matches_source(source_assets, strict_names=True, allow_missing=True)
                         _, checked_digest, _, _ = fetch_source_assets()
                         if checked_digest != digest:
                             raise ReleaseRecoveryError('changed')

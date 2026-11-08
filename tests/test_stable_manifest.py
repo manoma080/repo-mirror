@@ -153,6 +153,19 @@ class StableManifestTests(unittest.TestCase):
         self.assertEqual(dst.release['body'], 'notes')
         self.assertEqual(dst.assets['changed'], b'new')
 
+    def test_polluted_bound_partial_upload_resumes_missing_assets(self):
+        # An interrupted upload leaves only some assets at the destination.
+        # Present assets that byte-match the source must not block the
+        # migration; the missing asset is uploaded by the normal asset loop.
+        dst = self.interrupted_bound_destination()
+        dst.assets = {'changed': b'new'}
+        deleted_before = list(dst.deleted)
+        self.run_mirror(Source(), dst)
+        self.assertEqual(dst.release['body'], 'notes')
+        self.assertEqual(dst.assets['changed'], b'new')
+        self.assertIn('new', dst.assets)
+        self.assertEqual(dst.deleted, deleted_before)
+
     def test_polluted_bound_digest_stays_manual_when_destination_differs(self):
         dst = self.interrupted_bound_destination()
         deleted_before = list(dst.deleted)
