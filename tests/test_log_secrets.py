@@ -1,4 +1,3 @@
-
 import io
 import json
 import os
@@ -8,57 +7,75 @@ from contextlib import redirect_stderr
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from mirror_test_support import patch_everywhere
+from test_reconcile_assets import SOURCE, Destination, Source
+
 import mirror
-from test_reconcile_assets import SOURCE, Source, Destination
 
 
 class LogSecretsTests(unittest.TestCase):
     def setUp(self):
-        secret = patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'})
+        secret = patch.dict("os.environ", {"MIRROR_TIMESTAMP_SECRET": "synthetic-test-only-secret"})
         secret.start()
         self.addCleanup(secret.stop)
 
     def test_untrusted_identifiers_are_not_logged(self):
-        secret = 'ghp_' + 'A' * 36
-        config = {'destination_account_type': 'personal', 'sources': [dict(SOURCE, owner=secret, repos=[secret])]}
+        secret = "ghp_" + "A" * 36
+        config = {
+            "destination_account_type": "personal",
+            "sources": [dict(SOURCE, owner=secret, repos=[secret])],
+        }
         output = io.StringIO()
-        with tempfile.NamedTemporaryFile(mode='w') as f:
-            json.dump(config, f); f.flush()
-            with patch.dict(os.environ, {'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}), patch.object(mirror, 'get_existing', return_value=None), patch.object(mirror, 'mirror_repository'), redirect_stderr(output):
-                mirror.main(['--config', f.name])
+        with tempfile.NamedTemporaryFile(mode="w") as f:
+            json.dump(config, f)
+            f.flush()
+            with (
+                patch.dict(os.environ, {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest"}),
+                patch_everywhere("get_existing", return_value=None),
+                patch_everywhere("mirror_repository"),
+                redirect_stderr(output),
+            ):
+                mirror.main(["--config", f.name])
         self.assertNotIn(secret, output.getvalue())
-        self.assertIn('source 1/1', output.getvalue())
-        self.assertIn('repository 1/1', output.getvalue())
+        self.assertIn("source 1/1", output.getvalue())
+        self.assertIn("repository 1/1", output.getvalue())
 
     def test_release_and_asset_names_are_not_logged(self):
-        secret = 'github_pat_' + 'A' * 50
+        secret = "github_pat_" + "A" * 50
+
         class SecretSource(Source):
             def pages(self, url):
                 values = super().pages(url)
-                if url.endswith('/releases'):
-                    values[0]['tag_name'] = secret
+                if url.endswith("/releases"):
+                    values[0]["tag_name"] = secret
                 else:
-                    values[0]['name'] = secret
+                    values[0]["name"] = secret
                 return values
+
         output = io.StringIO()
-        with patch.object(mirror, 'mirror_git'), redirect_stderr(output):
-            with self.assertRaises(RuntimeError):
-                mirror.mirror_repository(SOURCE, 'demo', 'dest', SecretSource(), Destination(), 'token')
+        with patch_everywhere("mirror_git"), redirect_stderr(output), self.assertRaises(RuntimeError):
+            mirror.mirror_repository(SOURCE, "demo", "dest", SecretSource(), Destination(), "token")
         self.assertNotIn(secret, output.getvalue())
-        self.assertIn('release 1/1', output.getvalue())
-        self.assertIn('asset 1/2', output.getvalue())
+        self.assertIn("release 1/1", output.getvalue())
+        self.assertIn("asset 1/2", output.getvalue())
 
     def test_journal_upload_http_failure_reports_safe_status(self):
         class FailedDestination(Destination):
             def upload(self, url, data, content_type):
-                raise HTTPError('https://example.test/?token=secret', 403, 'secret', {}, io.BytesIO())
+                raise HTTPError("https://example.test/?token=secret", 403, "secret", {}, io.BytesIO())
 
         output = io.StringIO()
-        with tempfile.TemporaryDirectory() as directory, patch.object(mirror, 'mirror_git'), redirect_stderr(output):
-            journal = mirror.FailureJournal(os.path.join(directory, 'journal'))
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch_everywhere("mirror_git"),
+            redirect_stderr(output),
+        ):
+            journal = mirror.FailureJournal(os.path.join(directory, "journal"))
             with self.assertRaises(RuntimeError) as raised:
-                mirror.mirror_repository(SOURCE, 'demo', 'dest', Source(), FailedDestination(), 'token', journal=journal)
-        self.assertIn('HTTP 403', mirror.error_detail(raised.exception))
-        self.assertNotIn('secret', mirror.error_detail(raised.exception))
-        self.assertIn('HTTP 403', output.getvalue())
-        self.assertNotIn('secret', output.getvalue())
+                mirror.mirror_repository(
+                    SOURCE, "demo", "dest", Source(), FailedDestination(), "token", journal=journal
+                )
+        self.assertIn("HTTP 403", mirror.error_detail(raised.exception))
+        self.assertNotIn("secret", mirror.error_detail(raised.exception))
+        self.assertIn("HTTP 403", output.getvalue())
+        self.assertNotIn("secret", output.getvalue())

@@ -1,0 +1,32 @@
+[project]
+name = "repo-mirror"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.4",
+    "ty>=0.0.99",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+extend-exclude = ["__pycache__"]
+
+[tool.ruff.lint]
+# Explicit rule set: pycodestyle, pyflakes, isort, pyupgrade, bugbear, simplify, ruff-native
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501",   # long lines: the formatter handles wrapping
+    "B904",   # keep existing exception chaining behavior
+    "BLE001", # the mirror deliberately catches broad errors to log them
+    "S110",   # try/except/pass is used for best-effort cleanup
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["repo_mirror", "mirror"]
+
+[tool.ty.environment]
+python-version = "3.14"
