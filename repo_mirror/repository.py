@@ -1192,7 +1192,9 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     if release_errors:
         if len(release_errors) == 1:
             raise release_errors[0]
-        raise RuntimeError(f"{len(release_errors)} releases failed") from release_errors[0]
+        summary = RuntimeError(f"{len(release_errors)} releases failed")
+        summary.release_errors = list(release_errors)  # read by error_detail for the log line
+        raise summary from release_errors[0]
     if latest_id is not None:
         dst.request("PATCH", target + "/releases/" + str(latest_id), {"make_latest": "true"})
     if initializing:
