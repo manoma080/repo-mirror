@@ -6,10 +6,15 @@ on:
   workflow_dispatch:
     inputs:
       source_urls:
-        description: 'Comma-separated exact source repository URLs (blank mirrors all)'
+        description: 'Comma-separated exact source repository URLs, e.g. https://github.com/owner/repo (blank mirrors all)'
         required: false
         type: string
         default: ''
+      add_to_config:
+        description: 'Save the URLs above to config.json so scheduled runs mirror them too (unticked = one-time mirror only)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,14 +24,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  configure:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      configured-sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Add requested repositories to config.json
+        id: commit
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.add_to_config && inputs.source_urls != '' }}
+        env:
+          REQUESTED_SOURCE_URLS: ${{ inputs.source_urls }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_TOKEN_VALUE: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/heads/$DEFAULT_BRANCH"
+          test ! -L config.json
+          python -m repo_mirror.adhoc --config config.json --urls "$REQUESTED_SOURCE_URLS"
+          if git diff --quiet -- config.json; then
+            echo "No config change needed"
+          else
+            git -c core.hooksPath=/dev/null add -- config.json
+            git -c core.hooksPath=/dev/null -c user.name=repo-mirror -c user.email=repo-mirror@users.noreply.github.com commit -m "Add mirror sources from manual run"
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN_VALUE" | base64 -w0)"
+            git -c core.hooksPath=/dev/null push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: configure
     runs-on: ubuntu-latest
     outputs:
       tested-sha: ${{ steps.revision.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          # Test the commit produced by configure (or the default branch head when nothing was added).
+          ref: ${{ needs.configure.outputs.configured-sha || github.event.repository.default_branch }}
           persist-credentials: false
       - name: Record tested revision
         id: revision
@@ -36,6 +79,7 @@ jobs:
 
   mirror:
     needs: test
+    # Checks out tested-sha, which already contains any config.json commit made above.
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -7,6 +7,15 @@ abort filtered runs if discovery failed. No I/O or journal changes occur here.
 from urllib.parse import urlsplit
 
 
+def entry_urls(source, name):
+    """Return the set of URLs that select one planned repository."""
+    url = f"{source['base_url'].rstrip('/')}/{source['owner']}/{name}"
+    urls = {url}
+    if source.get("type") == "github" and source["base_url"].rstrip("/") == "https://api.github.com":
+        urls.add(f"https://github.com/{source['owner']}/{name}")
+    return urls
+
+
 def filter_plan(plan, source_urls):
     """Return selected (source_index, source, name) entries in plan order.
 
@@ -47,10 +56,7 @@ def filter_plan(plan, source_urls):
     matches = {}
     for entry in plan:
         _, source, name = entry
-        url = f"{source['base_url'].rstrip('/')}/{source['owner']}/{name}"
-        urls = {url}
-        if source.get("type") == "github" and source["base_url"].rstrip("/") == "https://api.github.com":
-            urls.add(f"https://github.com/{source['owner']}/{name}")
+        urls = entry_urls(source, name)
         if len(urls & requested) > 1:
             raise ValueError("duplicate source repository URL")
         for candidate in urls & requested:

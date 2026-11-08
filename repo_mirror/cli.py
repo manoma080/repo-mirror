@@ -9,6 +9,7 @@ from urllib.parse import quote
 from repo_mirror.constants import GITHUB, NAME
 from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
+from repo_mirror.adhoc import one_time_sources
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_main
 from repo_mirror.repository import mirror_repository
 from repo_mirror.source_filter import filter_plan
@@ -99,6 +100,15 @@ def main(argv=None):
     selected_urls = os.environ.get("MIRROR_SOURCE_URLS")
     if selected_urls and selected_urls.strip() and discovery_failures:
         raise RuntimeError("filtered run requires successful discovery of every source")
+    # URLs not in config.json become one-time sources: mirrored now, never saved.
+    for source in one_time_sources(selected_urls, plan):
+        sources.append(source)
+        name = source["repos"][0]
+        target = destination_name(source, name).lower()
+        if target in seen:
+            raise ValueError("duplicate destination repository")
+        seen.add(target)
+        plan.append((len(sources), source, name))
     plan = filter_plan(plan, selected_urls)
     failures = []
     ready = []

@@ -24,6 +24,15 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 - The run first looks up every source and checks for name clashes. If any lookup fails, the run stops before copying.
 - Scheduled runs always mirror everything.
 
+### Add to config checkbox
+
+- **Ticked** with URLs: the URLs are written into `config.json` and committed to the default branch first. The test and mirror jobs then run on that commit, and only the typed repositories are mirrored. Future scheduled runs include them.
+- **Unticked** with URLs: a one-time mirror. The repositories are copied now but are not saved to `config.json`, so scheduled runs skip them. They do not need to be in the config, but the same host, owner and name rules apply.
+- **Empty** (ticked or not): a regular full run of everything in the config.
+- Repositories already in the config are not written twice. If nothing changes, no commit is made.
+- Repository URLs on `github.com` are read as GitHub sources. Any other host is read as a Forgejo source.
+- Terms: *config* means `config.json`, the list of sources the mirror reads. *One-time mirror* means a run that copies repositories without saving them for later runs.
+
 ## Configure sources
 
 Edit [`config.json`](config.json). Each entry copies chosen repositories, or all public repositories owned by one user or organization.
