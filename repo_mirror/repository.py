@@ -20,6 +20,22 @@ from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_cal
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker
 
 
+def release_marker_is_pending(body):
+    """Return True only for v3 markers still waiting for the source (phase WAITING_SOURCE).
+
+    A BOUND marker means the release finished and is recorded; it must not make
+    later runs recheck that release.
+    """
+    sentinel = "[repo-mirror:pending:v3]"
+    if not isinstance(body, str) or sentinel not in body:
+        return False
+    try:
+        state = json.loads(body.split("\n" + sentinel, 1)[1])
+    except IndexError, ValueError:
+        return True  # unreadable marker: keep it selected so the run can report it
+    return isinstance(state, dict) and state.get("phase") != "BOUND"
+
+
 def find_tag_releases(dst, target, tag, source_name):
     """Return destination releases for a tag, including unpublished drafts.
 
@@ -162,7 +178,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 isinstance(r.get("name"), str)
                 and r["name"].startswith(("[repo-mirror:pending:v1]", "[repo-mirror:pending:v2]"))
             )
-            or (isinstance(r.get("body"), str) and "[repo-mirror:pending:v3]" in r["body"])
+            or release_marker_is_pending(r.get("body"))
         }
         failed_releases = {key.split(":", 1)[0] for key in journal.failures} if journal else set()
         selected = releases[:1] + [
