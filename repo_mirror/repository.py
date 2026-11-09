@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
-from repo_mirror.git_sync import mirror_git
+from repo_mirror.git_sync import create_archive, mirror_git
 from repo_mirror.github_api import not_found, same_file
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
@@ -141,8 +141,45 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         if repo.get("default_branch") != default_branch:
             dst.request("PATCH", target, {"default_branch": default_branch})
 
+    expected_default = repo.get("default_branch")
+
+    def switch_default(ref, *, initial_refs=None):
+        nonlocal expected_default
+        branch = ref.removeprefix("refs/heads/")
+        current = dst.request("GET", target)
+        actual = current.get("default_branch")
+        # Only an observed empty destination can have its default selected by
+        # the first push, and the selection must be among those pushed branches.
+        selected_on_first_push = (
+            initial_refs is not None
+            and isinstance(actual, str)
+            and "refs/heads/" + actual in initial_refs
+        )
+        if actual != expected_default and not selected_on_first_push:
+            raise RuntimeError("destination default branch changed; refusing to switch")
+        if actual != branch:
+            dst.request("PATCH", target, {"default_branch": branch})
+            if dst.request("GET", target).get("default_branch") != branch:
+                raise RuntimeError("destination default branch change not verified")
+        expected_default = branch
+
+    def archive_factory():
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        return create_archive(dst, owner, dest_name, account_type, stamp)
+
     with timed("step git mirror"):
-        mirror_git(clone_url, f"https://github.com/{qowner}/{qname}.git", token, update_default)
+        mirror_git(
+            clone_url,
+            f"https://github.com/{qowner}/{qname}.git",
+            token,
+            update_default,
+            safety={
+                "source_default": default_branch,
+                "dest_default": repo.get("default_branch"),
+                "archive_factory": archive_factory,
+                "switch_default": switch_default,
+            },
+        )
     with timed("step release-discovery target=source"):
         releases = src.pages(upstream + "/releases")
     invalid_releases = [

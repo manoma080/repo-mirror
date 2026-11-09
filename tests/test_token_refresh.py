@@ -134,9 +134,17 @@ class TokenRefreshTests(unittest.TestCase):
             commands.append((args, kwargs["env"]))
             return subprocess.CompletedProcess(args, 0, stdout=b"refs/heads/main\n", stderr=b"")
 
+        from repo_mirror import git_sync
+
+        def sync(source_run, dest_run, *args):
+            source_run(["fetch", "source"])
+            dest_run(["push", "destination"])
+            dest_run(["push", "destination"])
+
+        safety = {"source_default": "main", "dest_default": "main", "archive_factory": lambda: None, "switch_default": lambda ref: None}
         tokens = iter(["one", "two"])
-        with patch("mirror.subprocess.run", side_effect=run):
-            mirror.mirror_git("https://example.com/a", "https://github.com/a/b.git", lambda: next(tokens))
+        with patch("mirror.subprocess.run", side_effect=run), patch.object(git_sync, "synchronize_snapshots", side_effect=sync):
+            mirror.mirror_git("https://example.com/a", "https://github.com/a/b.git", lambda: next(tokens), safety=safety)
         pushes = [env for args, env in commands if "push" in args]
         import base64
 

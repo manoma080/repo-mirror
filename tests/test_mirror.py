@@ -192,8 +192,14 @@ class EngineTests(unittest.TestCase):
             calls.append((args, kwargs["env"]))
             return SimpleNamespace(stdout=b"refs/heads/main\n")
 
-        with patch.dict(os.environ, {"GH_TOKEN": "secret"}), patch("subprocess.run", side_effect=run):
-            mirror.mirror_git("https://src.example/a/b.git", "https://github.com/d/b.git", "secret")
+        def sync(source_run, dest_run, *args):
+            source_run(["fetch", "source"])
+            dest_run(["fetch", "destination"])
+
+        from repo_mirror import git_sync
+        safety = {"source_default": "main", "dest_default": "main", "archive_factory": lambda: None, "switch_default": lambda ref: None}
+        with patch.dict(os.environ, {"GH_TOKEN": "secret"}), patch("subprocess.run", side_effect=run), patch.object(git_sync, "synchronize_snapshots", side_effect=sync):
+            mirror.mirror_git("https://src.example/a/b.git", "https://github.com/d/b.git", "secret", safety=safety)
         fetch_env = next(env for args, env in calls if "fetch" in args)
         self.assertNotIn("GH_TOKEN", fetch_env)
         self.assertNotIn("GIT_CONFIG_VALUE_0", fetch_env)
