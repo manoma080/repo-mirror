@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 from repo_mirror.constants import GITHUB, NAME
 from repo_mirror.logging_utils import timed
-from repo_mirror.snapshot_push import _default_branch, archive_snapshot, capture_snapshot, push_snapshot
+from repo_mirror.snapshot_push import _default_branch, archive_snapshot, capture_snapshot, git_phase, push_snapshot
 from repo_mirror.wipe_detection import detect_wipe
 
 
@@ -53,11 +53,12 @@ def synchronize_snapshots(
         if observed and _default_branch(dest_run, destination) != old_ref:
             raise RuntimeError("destination default branch changed; refusing to push")
         push_snapshot(dest_run, store, destination, desired, observed, switch_default)
-        if observed:
-            switch_default(new_ref)
-        else:
-            # GitHub may pick any branch from the first push as its default.
-            switch_default(new_ref, initial_refs=desired)
+        with git_phase("default switch"):
+            if observed:
+                switch_default(new_ref)
+            else:
+                # GitHub may pick any branch from the first push as its default.
+                switch_default(new_ref, initial_refs=desired)
     return True
 
 
