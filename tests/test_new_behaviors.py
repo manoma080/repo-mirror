@@ -59,20 +59,20 @@ class NewBehaviorTests(unittest.TestCase):
                 mirror.copy_asset(Stream(), io.BytesIO())
 
     def test_push_switch_prune_order(self):
-        from types import SimpleNamespace
+        from repo_mirror import snapshot_push
 
-        calls = []
-
-        def run(args, **kw):
-            if "push" in args:
-                calls.append("prune" if "--prune" in args else "push")
-            return SimpleNamespace(stdout=b"refs/heads/main\n")
-
-        with patch("subprocess.run", side_effect=run):
-            mirror.mirror_git(
-                "https://src/a", "https://github.com/x/a", "token", lambda: calls.append("switch")
+        oid = "a" * 40
+        events = []
+        def push(run, store, remote, updates, expected):
+            events.append("prune" if any(value is None for value in updates.values()) else "push")
+        with patch.object(snapshot_push, "_push", side_effect=push), patch.object(
+            snapshot_push, "_verify"
+        ), patch.object(snapshot_push, "_default_branch", side_effect=["refs/heads/old", "refs/heads/main"]):
+            snapshot_push.push_snapshot(
+                None, "store", "dest", {"refs/heads/main": oid}, {"refs/heads/old": oid},
+                lambda ref: events.append("switch"),
             )
-        self.assertEqual(calls, ["push", "switch", "prune"])
+        self.assertEqual(events, ["push", "switch", "prune"])
 
     def test_download_streams_to_file_and_upload_sets_length(self):
         class Response:
@@ -133,7 +133,7 @@ class LocalIntegrationTests(unittest.TestCase):
             git("-C", work, "branch", "stale")
             git("-C", work, "tag", "stale")
             git("-C", work, "push", dst, "main", "refs/heads/stale", "refs/tags/stale")
-            git("--git-dir=" + dst, "symbolic-ref", "HEAD", "refs/heads/main")
+            git("--git-dir=" + dst, "symbolic-ref", "HEAD", "refs/heads/stale")
 
             def local_run(args, **kwargs):
                 args = list(args)
@@ -142,12 +142,14 @@ class LocalIntegrationTests(unittest.TestCase):
 
             observed = []
 
-            def switch():
+            def switch(ref):
                 refs = git("--git-dir=" + dst, "for-each-ref", "--format=%(refname)").decode()
                 observed.append(refs)
+                git("--git-dir=" + dst, "symbolic-ref", "HEAD", ref)
 
+            safety = {"source_default": "main", "dest_default": "stale", "archive_factory": lambda: None, "switch_default": switch}
             with patch("subprocess.run", side_effect=local_run):
-                mirror.mirror_git(src, dst, "token", switch)
+                mirror.mirror_git(src, dst, "token", safety=safety)
             self.assertIn("refs/heads/stale", observed[0])
             refs = git("--git-dir=" + dst, "for-each-ref", "--format=%(refname)").decode().splitlines()
             self.assertEqual(refs, ["refs/heads/main", "refs/tags/keep"])

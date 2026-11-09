@@ -34,7 +34,7 @@ class RegressionTests(unittest.TestCase):
                 return {}
 
         dst = Destination()
-        with patch_everywhere("mirror_git", side_effect=lambda a, b, c, callback: callback()):
+        with patch_everywhere("mirror_git", side_effect=lambda a, b, c, callback, **kwargs: callback()):
             mirror.mirror_repository(source, "demo", "dest", Source(), dst, "token")
         self.assertTrue(
             any(method == "PATCH" and data == {"default_branch": "main"} for method, url, data in dst.calls)
@@ -50,22 +50,26 @@ class RegressionTests(unittest.TestCase):
             return SimpleNamespace(stdout=b"")
 
         with patch("subprocess.run", side_effect=run):
-            mirror.mirror_git("https://src.example/a.git", "https://github.com/x/a.git", "token")
+            mirror.mirror_git("https://src.example/a.git", "https://github.com/x/a.git", "token", safety={"source_default": "main", "dest_default": "main", "archive_factory": lambda: None, "switch_default": lambda ref: None})
         self.assertFalse(any("push" in args for args in calls))
 
     def test_push_does_not_prune_old_default_before_github_switch(self):
-        from types import SimpleNamespace
+        from repo_mirror import snapshot_push
 
-        calls = []
-
-        def run(args, **kwargs):
-            calls.append(args)
-            return SimpleNamespace(stdout=b"refs/heads/main\n")
-
-        with patch("subprocess.run", side_effect=run):
-            mirror.mirror_git("https://src.example/a.git", "https://github.com/x/a.git", "token")
-        push = next(args for args in calls if "push" in args)
-        self.assertNotIn("--prune", push)
+        oid = "a" * 40
+        events = []
+        def push(run, store, remote, updates, expected):
+            events.append(dict(updates))
+        def switch(ref):
+            self.assertEqual(len(events), 1)
+            self.assertNotIn("refs/heads/old", events[0])
+        with patch.object(snapshot_push, "_push", side_effect=push), patch.object(
+            snapshot_push, "_verify"
+        ), patch.object(snapshot_push, "_default_branch", side_effect=["refs/heads/old", "refs/heads/main"]):
+            snapshot_push.push_snapshot(
+                None, "store", "dest", {"refs/heads/main": oid}, {"refs/heads/old": oid}, switch
+            )
+        self.assertEqual(events[1], {"refs/heads/old": None})
 
     def test_destination_asset_download_has_bounded_read(self):
         class Response:
