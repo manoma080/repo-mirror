@@ -20,6 +20,17 @@ retry without a fresh safety decision and snapshot. Concurrent new refs survive.
 
 import re
 import uuid
+from contextlib import contextmanager
+
+
+@contextmanager
+def git_phase(phase):
+    try:
+        yield
+    except Exception as exc:
+        if not hasattr(exc, "mirror_git_phase"):
+            setattr(exc, "mirror_git_phase", phase)
+        raise
 
 
 class SnapshotError(RuntimeError):
@@ -46,15 +57,16 @@ def _refs(run, remote, all_refs=False):
 
 def capture_snapshot(run, store, remote):
     """Fetch and pin precisely the advertised branches and tags, or fail."""
-    refs = _refs(run, remote)
-    if refs:
-        prefix = "refs/repo-mirror/snapshots/" + uuid.uuid4().hex + "/"
-        specs = [f"{ref}:{prefix}{ref}" for ref in refs]
-        run(["-C", store, "fetch", "--no-tags", "--", remote, *specs])
-        for ref, oid in refs.items():
-            actual = run(["-C", store, "rev-parse", "--verify", prefix + ref]).decode("ascii").strip()
-            if actual != oid:
-                raise SnapshotError("remote changed during snapshot capture")
+    with git_phase("snapshot fetch"):
+        refs = _refs(run, remote)
+        if refs:
+            prefix = "refs/repo-mirror/snapshots/" + uuid.uuid4().hex + "/"
+            specs = [f"{ref}:{prefix}{ref}" for ref in refs]
+            run(["-C", store, "fetch", "--no-tags", "--", remote, *specs])
+            for ref, oid in refs.items():
+                actual = run(["-C", store, "rev-parse", "--verify", prefix + ref]).decode("ascii").strip()
+                if actual != oid:
+                    raise SnapshotError("remote changed during snapshot capture")
     return refs
 
 
@@ -78,9 +90,10 @@ def _push(run, store, remote, updates, expected):
 
 
 def _verify(run, remote, wanted, removed=()):
-    actual = _refs(run, remote)
-    if any(actual.get(ref) != oid for ref, oid in wanted.items()) or any(ref in actual for ref in removed):
-        raise SnapshotError("remote verification failed")
+    with git_phase("remote verification"):
+        actual = _refs(run, remote)
+        if any(actual.get(ref) != oid for ref, oid in wanted.items()) or any(ref in actual for ref in removed):
+            raise SnapshotError("remote verification failed")
 
 
 def archive_snapshot(run, store, archive, snapshot):
@@ -106,6 +119,11 @@ def _default_branch(run, remote):
 
 
 def push_snapshot(run, store, destination, snapshot, observed, switch_default=None):
+    with git_phase("snapshot push"):
+        return _push_snapshot(run, store, destination, snapshot, observed, switch_default)
+
+
+def _push_snapshot(run, store, destination, snapshot, observed, switch_default=None):
     """Apply snapshot with explicit leases against the archived destination."""
     _validate(snapshot)
     _validate(observed)
@@ -133,8 +151,9 @@ def push_snapshot(run, store, destination, snapshot, observed, switch_default=No
         if switch_default is None:
             raise SnapshotError("default branch removal requires a replacement and callback")
         replacement = next(r for r in sorted(snapshot) if r.startswith("refs/heads/"))
-        switch_default(replacement)
-        if _default_branch(run, destination) != replacement:
-            raise SnapshotError("default branch change not verified")
+        with git_phase("default switch"):
+            switch_default(replacement)
+            if _default_branch(run, destination) != replacement:
+                raise SnapshotError("default branch change not verified")
     _push(run, store, destination, dict.fromkeys(sorted(removed)), observed)
     _verify(run, destination, snapshot, removed)

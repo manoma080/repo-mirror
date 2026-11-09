@@ -3,6 +3,7 @@
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -154,6 +155,26 @@ SAFE_ERROR_MESSAGES = frozenset(
 def error_detail(exc):
     # Never emit arbitrary exception text, URLs, response bodies or class names.
     """Build a short, redacted description of an exception for public logs."""
+    phase = getattr(exc, "mirror_git_phase", None)
+    if phase in ("snapshot fetch", "snapshot push", "remote verification", "default switch"):
+        if isinstance(exc, subprocess.CalledProcessError):
+            raw = exc.stderr
+            text = raw.decode("utf-8", "replace").lower() if isinstance(raw, bytes) else raw.lower() if isinstance(raw, str) else ""
+            if "gh001" in text or "exceeds github's file size limit" in text:
+                reason = "large file rejected (100 MB limit); inspect repository history and consider Git LFS"
+            elif "pack exceeds maximum allowed size" in text or "push cannot exceed 2gb" in text or "push cannot exceed 2 gb" in text:
+                reason = "push exceeds 2 GB limit; split the history into smaller pushes"
+            elif any(s in text for s in ("permission denied", "403", "authentication failed", "access denied", "write access to repository not granted")):
+                reason = "permission or authentication failure; check repository access and token permissions"
+            elif any(s in text for s in ("could not resolve host", "connection timed out", "connection reset", "failed to connect", "remote end hung up unexpectedly")):
+                reason = "network failure; check connectivity and retry after a fresh safety check"
+            else:
+                reason = "unclassified Git failure; inspect safely on a trusted system"
+        elif isinstance(exc, HTTPError) and type(exc.code) is int and 100 <= exc.code <= 599:
+            reason = f"HTTP {exc.code}"
+        else:
+            reason = "operation failed; inspect safely on a trusted system"
+        return f"git {phase}: {reason}"
     if isinstance(exc, HTTPError):
         if type(exc.code) is int and 100 <= exc.code <= 599:
             detail = f"HTTP {exc.code}"
