@@ -1,0 +1,33 @@
+name: Bind approved draft 437729977
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-mirror
+  cancel-in-progress: false
+
+jobs:
+  bind:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Bind only the approved draft
+        env:
+          DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
+          MIRROR_APP_ID: ${{ secrets.MIRROR_APP_ID }}
+          MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
+        run: python -m repo_mirror.one_time_draft_binding
