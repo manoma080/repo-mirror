@@ -74,3 +74,23 @@ class ArchiveCreationTests(unittest.TestCase):
         ]
         with self.assertRaises(RuntimeError):
             create_archive(api, "owner", "mirror", "organization", "20261109T120000Z")
+
+
+    def test_long_mirror_names_produce_distinct_archives_at_same_timestamp(self):
+        class API:
+            def __init__(self):
+                self.names = []
+
+            def request(self, method, url, data=None):
+                if method == "POST":
+                    self.names.append(data["name"])
+                    return {"full_name": "owner/" + data["name"], "private": True}
+                if url.endswith("/actions/permissions"):
+                    return {"enabled": False}
+                return {"full_name": "owner/" + url.rsplit("/", 1)[-1], "private": True}
+
+        api = API()
+        for name in ("a" * 90 + "x", "a" * 90 + "y"):
+            create_archive(api, "owner", name, "organization", "20261109T120000Z")
+        self.assertEqual(len(set(api.names)), 2)
+        self.assertTrue(all(len(name) <= 100 for name in api.names))

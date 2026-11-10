@@ -172,7 +172,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "failed"),
             ):
                 mirror.main(["--config", f.name])
-        self.assertEqual(called, ["one", "two"])
+        self.assertCountEqual(called, ["one", "two"])
 
     def test_truncated_source_asset_does_not_finish_release(self):
         source = {"type": "github", "base_url": "https://github.com", "owner": "alice"}

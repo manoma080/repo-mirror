@@ -53,7 +53,8 @@ def upload_with_reconciliation(dst, upload_url, data, content_type, assets_url, 
                     if not same_file(data, remote):
                         raise ReleaseRecoveryError("mismatch") from exc
                 return
-            if conflict or attempt == 3:
+            if not (isinstance(exc, HTTPError) and exc.code == 429
+                    and getattr(exc, "direct_upload_rejection", False) is True) or attempt == 3:
                 raise
             delay = transfer_retry_delay(exc, attempt)
             if delay is None:

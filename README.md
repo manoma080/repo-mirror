@@ -85,14 +85,15 @@ Never put keys or tokens in the repository's files. If GitHub asks you to approv
 - The mirror finds the app's installation for `MIRROR_OWNER` and checks the owner name.
 - It gets a short-lived **installation token** (a temporary login). It renews the token when fewer than five minutes remain, including during long runs.
 - The private key stays inside the mirror process. It is passed to OpenSSL (the encryption tool) through a pipe, never in command arguments, logs or files. OpenSSL must be installed.
-- Jobs run one after another, so the failure file is never written by two jobs at once.
+- Up to four repositories are mirrored concurrently. Failure journal updates and token renewal are synchronized within each run; separate runs must not share the same failure file.
+- API clients in the same process share per-host cooldowns after HTTP 429 or a rate-limited HTTP 403. API retry waits are limited to 60 seconds; longer server-requested delays fail rather than retry early. Ordinary 403s are not retried. Existing PUT, PATCH and DELETE retry behavior remains unchanged; POST is not automatically retried. This coordination does not cover separate runs, Git operations, authentication requests or asset transfers.
 - A transfer already in progress keeps its old token. If it fails, that repository is reported as failed and retried on a later run.
 
 The token is also sent with GitHub API read requests (to `api.github.com` only, on port 443). This reduces rate-limit errors. Forgejo and public file downloads never get the token, and redirects to other sites never get it either.
 
 ## Logs and errors
 
-Progress is printed to the run log, which is public in this management repository.
+Progress is printed to the run log, which is public in this management repository. Repository logs are buffered in temporary files and printed as complete groups when each repository finishes; groups can appear in completion order rather than configuration order.
 
 - Logs show source owner and repository names, release tags and file names, with a counter for each.
 - Anything that looks like a secret is hidden. This is a best effort, not a guarantee. Do not put secrets in names, tags or file names.
