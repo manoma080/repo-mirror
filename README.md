@@ -8,7 +8,7 @@ This project copies public GitHub and Forgejo repositories into private GitHub r
 | --- | --- |
 | Schedule | Runs every 3 hours (UTC). You can also start it by hand in **Actions → Mirror repositories → Run workflow**. |
 | Branches and tags | Copied, including rewritten history. Branches and tags deleted at the source are deleted in the mirror. |
-| Releases | A new mirror gets the full release history, oldest first. Later runs update the newest release and any release still pending or failed. |
+| Releases | A new mirror gets the full release history, oldest first. Later runs compare source and destination lists and sync missing releases, the first and latest source releases, and any release still pending or failed. Other existing releases are not rechecked. |
 | Release files | Missing files are added. Files with the same name but different bytes are replaced. Files removed at the source stay in the mirror. |
 | New mirrors | Created as **private** repositories with GitHub Actions turned off. You can make them public later. |
 | Stars | Not copied. |
@@ -105,6 +105,7 @@ When a web request fails, the log shows the HTTP status code and what operation 
 ## Releases in detail
 
 - A release with no files is valid. Each file must be under **2 GiB**.
+- **Drafts:** GitHub may return a synthetic `untagged-` tag for a draft. Source drafts with such tags are rejected rather than copied as real tags (even a legitimate draft tag with that prefix is conservatively rejected). For supported source tags, completed destination drafts retain a visible signed identity marker in their body until publication, so reruns can identify and publish the same release. Pending drafts use an ID-bound v3 recovery marker. Keep `MIRROR_TIMESTAMP_SECRET` stable: changing it, removing/editing a marker, or using older unmarked destination drafts requires manual reconciliation. Names and synthetic destination tags are not identities. If a create succeeds but its ID-bound marker cannot be saved, manual reconciliation can also be necessary.
 - **Latest release:** the source's `/releases/latest` picks the release to mark as latest on GitHub, even if it is older than the usual window. The mirror promotes it only after all selected releases are done. A failed promotion is retried next run. Pre-releases and drafts are never promoted.
 - **404 from `/releases/latest`:** no release is promoted. The repository may be private, or the Forgejo server may be too old. Other errors fail the repository.
 - **Order:** releases are sorted by publish time, then creation time. If a time is missing or invalid, the source's list order is used. GitHub sets its own release times; the source's times are not copied.

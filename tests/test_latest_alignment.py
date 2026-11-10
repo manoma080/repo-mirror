@@ -83,6 +83,24 @@ class LatestAlignmentTests(unittest.TestCase):
         secret.start()
         self.addCleanup(secret.stop)
 
+    def test_initial_draft_does_not_block_later_published_release(self):
+        draft = dict(release(1), draft=True)
+        published = release(2)
+        dst = Destination(True)
+        run(Source([published, draft], published), dst)
+        self.assertEqual([p["tag_name"] for p in dst.posts], ["1", "2"])
+
+    def test_ambiguous_missing_release_does_not_block_existing_release(self):
+        latest, missing = release(2), release(1)
+        dst = Destination(False)
+        dst.releases["2"] = dict(latest, id=20, body="old")
+        dst.releases["unknown"] = {"id": 30, "tag_name": "untagged-x", "draft": True}
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            run(Source([latest, missing], latest), dst)
+        self.assertTrue(any(url.endswith("/20") for url, _ in dst.patches))
+        self.assertFalse(dst.posts)
+        self.assertEqual(dst.releases["unknown"]["id"], 30)
+
     def test_initial_order_and_authoritative_latest(self):
         releases = [release(3, True), release(2), release(1)]
         dst = Destination(True)
@@ -103,7 +121,7 @@ class LatestAlignmentTests(unittest.TestCase):
         releases = [release(n) for n in range(12, 0, -1)]
         dst = Destination(False)
         run(Source(releases, releases[-1]), dst)
-        self.assertEqual(set(dst.releases), {"12", "1"})
+        self.assertEqual(set(dst.releases), {str(n) for n in range(1, 13)})
         self.assertEqual(dst.patches[-1][1]["make_latest"], "true")
         self.assertTrue(dst.patches[-1][0].endswith("/" + str(dst.releases["1"]["id"])))
 

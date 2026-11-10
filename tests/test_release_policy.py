@@ -16,6 +16,41 @@ class ReleasePolicyTests(unittest.TestCase):
         secret.start()
         self.addCleanup(secret.stop)
 
+    def test_initialization_rejects_shared_untagged_draft_name(self):
+        class Source:
+            def request(self, method, url):
+                if url.endswith("/releases/latest"):
+                    raise HTTPError(url, 404, "", {}, io.BytesIO())
+                return {"clone_url": "https://github.com/alice/demo.git"}
+
+            def pages(self, url):
+                return [
+                    {"id": 1, "tag_name": "a", "name": "same", "draft": True},
+                    {"id": 2, "tag_name": "b", "name": "same", "draft": True},
+                ]
+
+        class Destination:
+            def __init__(self):
+                self.writes = []
+
+            def request(self, method, url, data=None):
+                if url.endswith("/repos/dest/mirror-alice-demo"):
+                    return {
+                        "description": mirror.source_marker(SOURCE, "demo") + " [repo-mirror:initializing:v1]"
+                    }
+                if "/releases/tags/" in url:
+                    raise HTTPError(url, 404, "", {}, io.BytesIO())
+                self.writes.append((method, url, data))
+                return {}
+
+            def pages(self, url):
+                return [{"id": 5, "tag_name": "untagged-x", "name": "same", "draft": True}]
+
+        dst = Destination()
+        with patch_everywhere("mirror_git"), self.assertRaisesRegex(RuntimeError, "releases failed"):
+            mirror.mirror_repository(SOURCE, "demo", "dest", Source(), dst, "token")
+        self.assertFalse(any("/releases" in url for _, url, _ in dst.writes))
+
     def test_existing_release_gets_new_assets_and_updated_metadata(self):
         class Source:
             def request(self, *args):
@@ -76,7 +111,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(dst.release["body"], "notes")
         self.assertEqual([a["name"] for a in dst.assets], ["a"])
 
-    def test_existing_mirror_only_considers_first_release(self):
+    def test_existing_mirror_considers_all_missing_releases(self):
         class Source:
             def request(self, *args):
                 if args[1].endswith("/releases/latest"):
@@ -106,7 +141,7 @@ class ReleasePolicyTests(unittest.TestCase):
         dst = Destination()
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(SOURCE, "demo", "dest", Source(), dst, "token")
-        self.assertEqual(dst.tags, ["0"])
+        self.assertEqual(dst.tags, [str(n) for n in range(12)])
 
     def test_new_repository_persists_initialization_until_history_is_complete(self):
         class Source:

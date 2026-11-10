@@ -17,8 +17,8 @@ class MarkerSelectionTests(unittest.TestCase):
     def test_waiting_source_marker_is_pending(self):
         self.assertTrue(release_marker_is_pending(body_with_phase("WAITING_SOURCE")))
 
-    def test_bound_marker_is_not_pending(self):
-        self.assertFalse(release_marker_is_pending(body_with_phase("BOUND")))
+    def test_bound_marker_is_pending_until_final_release_patch(self):
+        self.assertTrue(release_marker_is_pending(body_with_phase("BOUND")))
 
     def test_body_without_marker_is_not_pending(self):
         self.assertFalse(release_marker_is_pending("just notes"))
