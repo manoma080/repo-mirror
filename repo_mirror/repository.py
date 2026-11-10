@@ -22,43 +22,113 @@ from repo_mirror.sources import check_existing, destination_name, get_existing, 
 # Checksum file names accepted as a fallback source, any letter case:
 # SHA256SUM, SHA256SUMS, SHA256SUM.txt, SHA256SUMS.txt.
 CHECKSUM_FILE_NAME = re.compile(r"SHA256SUMS?(?:\.txt)?", re.I)
+IDENTITY_SENTINEL = "[repo-mirror:draft-identity:v1]"
+
+
+def draft_identity_signature(secret, source, tag, target, release_id):
+    payload = json.dumps([source, tag, target, release_id], ensure_ascii=True, separators=(",", ":")).encode()
+    return hmac.new(secret.encode(), b"repo-mirror:draft-identity:v1\0" + payload, hashlib.sha256).hexdigest()
 
 
 def release_marker_is_pending(body):
-    """Return True only for v3 markers still waiting for the source (phase WAITING_SOURCE).
+    """Any recovery marker denotes work not yet finalized, including BOUND."""
+    return isinstance(body, str) and "[repo-mirror:pending:v3]" in body
 
-    A BOUND marker means the release finished and is recorded; it must not make
-    later runs recheck that release.
+
+def draft_original_name(release):
+    name = release.get("name")
+    if isinstance(name, str) and name.startswith(("[repo-mirror:pending:v1]", "[repo-mirror:pending:v2]")):
+        try:
+            name = json.loads(base64.urlsafe_b64decode(name.split("]", 1)[1]))[0]
+        except ValueError, TypeError, IndexError:
+            raise ValueError("ambiguous untagged pending draft") from None
+    return name
+
+
+def find_tag_releases(dst, target, tag, source_name=None, *, releases=None, marker=None):
+    """Find an exact tag or an ID-bound, authenticated recovery draft.
+
+    Names and GitHub's generated untagged-* tags are not identities. If an
+    untagged draft cannot be authenticated, creation is unsafe even when its
+    title differs or is absent.
     """
-    sentinel = "[repo-mirror:pending:v3]"
-    if not isinstance(body, str) or sentinel not in body:
-        return False
-    try:
-        state = json.loads(body.split("\n" + sentinel, 1)[1])
-    except IndexError, ValueError:
-        return True  # unreadable marker: keep it selected so the run can report it
-    return isinstance(state, dict) and state.get("phase") != "BOUND"
-
-
-def find_tag_releases(dst, target, tag, source_name):
-    """Return destination releases for a tag, including unpublished drafts.
-
-    GitHub renames a draft that has no published tag to ``untagged-<hash>``, so an
-    exact ``tag_name`` match can miss it and the mirror creates a duplicate draft.
-    Fallback: drafts with that exact name and an ``untagged-`` tag name.
-    """
-    releases = list(dst.pages(target + "/releases"))
+    if releases is None:
+        releases = list(dst.pages(target + "/releases"))
     exact = [r for r in releases if r.get("tag_name") == tag]
     if exact:
         return exact
-    return [
-        r
-        for r in releases
-        if r.get("draft") is True
-        and isinstance(r.get("tag_name"), str)
-        and r["tag_name"].startswith("untagged-")
-        and r.get("name") == source_name
-    ]
+    untagged = [r for r in releases if r.get("draft") is True
+                and isinstance(r.get("tag_name"), str)
+                and r["tag_name"].startswith("untagged-")]
+    secret = os.environ.get("MIRROR_TIMESTAMP_SECRET", "")
+    verified = []
+    for item in untagged:
+        body = item.get("body")
+        if secret and marker and isinstance(body, str) and body.count(IDENTITY_SENTINEL) == 1:
+            try:
+                signature = body.split("\n" + IDENTITY_SENTINEL, 1)[1]
+                if type(item.get("id")) is int and item["id"] > 0 and hmac.compare_digest(
+                    signature, draft_identity_signature(secret, marker, tag, target, item["id"])
+                ):
+                    verified.append(item)
+                    continue
+            except (IndexError, TypeError):
+                pass
+        sentinel = "[repo-mirror:pending:v3]"
+        if not secret or not marker or not isinstance(body, str) or body.count(sentinel) != 1:
+            continue
+        try:
+            state = json.loads(body.split("\n" + sentinel, 1)[1])
+            signature = state.pop("signature")
+            payload = {"version": "v3", "source": marker, "tag": tag,
+                       "target": target, "release_id": item["id"], "state": state}
+            encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()
+            expected = hmac.new(secret.encode(), b"repo-mirror:release-recovery:v3\0" + encoded,
+                                hashlib.sha256).hexdigest()
+            if isinstance(signature, str) and hmac.compare_digest(signature, expected):
+                verified.append(item)
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            continue
+    if len(verified) == 1:
+        return verified
+    if untagged:
+        raise ValueError("ambiguous untagged destination draft; manual reconciliation required")
+    return []
+
+
+def select_existing_releases(releases, destination, failed_tags, marker=None, target=None, known_draft_tags=None):
+    """Select missing and pending releases without guessing draft identity."""
+    by_tag = {}
+    untagged = []
+    for item in destination:
+        by_tag.setdefault(item.get("tag_name"), []).append(item)
+        if item.get("draft") is True and isinstance(item.get("tag_name"), str) and item["tag_name"].startswith("untagged-"):
+            untagged.append(item)
+    selected = []
+    for index, release in enumerate(releases):
+        tag = release["tag_name"]
+        matches = by_tag.get(tag)
+        if not matches:
+            try:
+                candidates = [item for item in untagged if not known_draft_tags
+                              or item.get("id") not in known_draft_tags
+                              or known_draft_tags[item["id"]] == tag]
+                matches = find_tag_releases(None, target, tag, releases=candidates, marker=marker)
+            except ValueError:
+                # Resolve ambiguity inside the per-release isolation boundary.
+                selected.append(release)
+                continue
+        if len(matches) > 1:
+            raise ValueError("ambiguous destination releases for tag")
+        existing = matches[0] if matches else None
+        title = existing.get("name") if existing else None
+        pending = existing and (
+            (isinstance(title, str) and title.startswith(("[repo-mirror:pending:v1]", "[repo-mirror:pending:v2]")))
+            or release_marker_is_pending(existing.get("body"))
+        )
+        if index == 0 or release.get("draft") is True or existing is None or existing.get("draft") is True or pending or tag in failed_tags:
+            selected.append(release)
+    return selected
 
 
 @timed_repository
@@ -212,25 +282,51 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         exc.close()
         latest = None
 
+    destination_releases = None
+    known_draft_tags = {}
+
+    def candidates_for_tag(tag):
+        return [item for item in get_destination_releases()
+                if item.get("id") not in known_draft_tags or known_draft_tags[item["id"]] == tag]
+
+    def get_destination_releases():
+        nonlocal destination_releases
+        if destination_releases is None:
+            destination_releases = list(dst.pages(target + "/releases"))
+            # Signatures do not expose the tag: test each complete source tag
+            # against each untagged destination draft exactly once per snapshot.
+            for item in destination_releases:
+                if not (item.get("draft") is True and isinstance(item.get("tag_name"), str)
+                        and item["tag_name"].startswith("untagged-")
+                        and type(item.get("id")) is int and item["id"] > 0):
+                    continue
+                authenticated = []
+                for source_release in releases:
+                    source_tag = source_release["tag_name"]
+                    if source_tag == item["tag_name"]:
+                        continue
+                    try:
+                        if find_tag_releases(None, target, source_tag, releases=[item], marker=marker):
+                            authenticated.append(source_tag)
+                    except ValueError:
+                        pass
+                if len(authenticated) == 1:
+                    known_draft_tags[item["id"]] = authenticated[0]
+        return destination_releases
+    if len({r["tag_name"] for r in releases}) != len(releases):
+        raise ValueError("duplicate source release tag")
     if initializing or len(releases) <= 1:
         selected = list(releases)
     else:
-        pending_tags = {
-            r.get("tag_name")
-            for r in dst.pages(target + "/releases")
-            if (
-                isinstance(r.get("name"), str)
-                and r["name"].startswith(("[repo-mirror:pending:v1]", "[repo-mirror:pending:v2]"))
-            )
-            or release_marker_is_pending(r.get("body"))
-        }
         failed_releases = {key.split(":", 1)[0] for key in journal.failures} if journal else set()
-        selected = releases[:1] + [
-            r
-            for r in releases[1:]
-            if r["tag_name"] in pending_tags
-            or (journal and journal.key(source, name, owner, r["tag_name"], "")[:64] in failed_releases)
-        ]
+        failed_tags = {
+            r["tag_name"]
+            for r in releases
+            if journal and journal.key(source, name, owner, r["tag_name"], "")[:64] in failed_releases
+        }
+        selected = select_existing_releases(
+            releases, get_destination_releases(), failed_tags, marker, target, known_draft_tags
+        )
     if latest:
         selected = [latest if r["tag_name"] == latest["tag_name"] else r for r in selected]
         if not any(r["tag_name"] == latest["tag_name"] for r in selected):
@@ -275,6 +371,8 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         )
         try:
             with timed(f"release tag={safe_label(tag)}"):
+                if release.get("draft") is True and tag.startswith("untagged-"):
+                    raise ValueError("source draft has untagged synthetic tag; manual reconciliation required")
                 try:
                     existing = dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))
                 except HTTPError as e:
@@ -282,10 +380,20 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         raise
                     e.close()
                     # The tag endpoint can omit drafts, which still need to be found.
-                    matches = find_tag_releases(dst, target, tag, release.get("name"))
+                    matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker)
                     if len(matches) > 1:
                         raise RuntimeError("multiple destination releases for tag")
                     existing = matches[0] if matches else None
+                if existing and release.get("draft") is True:
+                    # An update can turn an exact-tag release into an untagged
+                    # draft; do not trust the discovery snapshot afterwards.
+                    if type(existing.get("id")) is int and existing["id"] > 0:
+                        known_draft_tags[existing["id"]] = tag
+                    cached = dict(existing, draft=True, tag_name="untagged-updated")
+                    snapshot = get_destination_releases()
+                    if type(existing.get("id")) is int and existing["id"] > 0:
+                        snapshot[:] = [item for item in snapshot if item.get("id") != existing["id"]]
+                    snapshot.append(cached)
                 prefix_v1 = "[repo-mirror:pending:v1]"
                 prefix_v2 = "[repo-mirror:pending:v2]"
                 current_name = existing.get("name") if existing else None
@@ -314,13 +422,20 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
 
                 source_body = release.get("body")
                 if (source_body is not None and not isinstance(source_body, str)) or (
-                    isinstance(source_body, str) and sentinel in source_body
+                    isinstance(source_body, str) and (sentinel in source_body or IDENTITY_SENTINEL in source_body)
                 ):
                     raise ReleaseRecoveryError("marker")
                 source_name = release.get("name")
                 if isinstance(source_name, str) and source_name.startswith((prefix_v1, prefix_v2)):
                     raise ValueError("source release name uses reserved marker")
                 body = existing.get("body") if existing else None
+                if isinstance(body, str) and IDENTITY_SENTINEL in body:
+                    if body.count(IDENTITY_SENTINEL) != 1 or "\n" + IDENTITY_SENTINEL not in body:
+                        raise ReleaseRecoveryError("marker")
+                    body, signature = body.split("\n" + IDENTITY_SENTINEL, 1)
+                    expected = draft_identity_signature(secret, marker, tag, target, existing["id"])
+                    if not hmac.compare_digest(signature, expected):
+                        raise ReleaseRecoveryError("marker")
                 if body is not None and not isinstance(body, str):
                     raise ReleaseRecoveryError("marker")
                 state = None
@@ -415,6 +530,14 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         fields.update(tag_name=tag, name=source_name, body=marked, make_latest="false")
                         try:
                             existing = dst.request("POST", target + "/releases", fields)
+                            if isinstance(existing, dict):
+                                # Track a response-bound identity for the rest of this run.
+                                cached = dict(existing)
+                                if cached.get("draft") is True or fields.get("draft") is True:
+                                    cached.update(draft=True, tag_name="untagged-created")
+                                    if type(existing.get("id")) is int and existing["id"] > 0:
+                                        known_draft_tags[existing["id"]] = tag
+                                get_destination_releases().append(cached)
                         except HTTPError as exc:
                             if getattr(exc, "mirror_operation", None) == ("destination", "API", "POST"):
                                 setattr(exc, "mirror_operation", ("destination", "release", "create"))
@@ -439,7 +562,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 ):
                     # Provisional markers never authorize replacement. Bind only an
                     # unambiguous tag lookup to the immutable destination release ID.
-                    matches = find_tag_releases(dst, target, tag, release.get("name"))
+                    matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker)
                     if (
                         type(existing.get("id")) is not int
                         or existing["id"] <= 0
@@ -1208,13 +1331,21 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                             f.seek(0)
                             if f.read() != content:
                                 raise ReleaseRecoveryError("mismatch")
+                final_body = release.get("body")
+                if release.get("draft") is True:
+                    final_body = (final_body or "") + "\n" + IDENTITY_SENTINEL + draft_identity_signature(
+                        secret, marker, tag, target, existing["id"]
+                    )
+                    if len(final_body) > 125000:
+                        raise ValueError("release body too long for draft identity")
                 dst.request(
                     "PATCH",
                     target + "/releases/" + str(existing["id"]),
                     {
                         "name": release.get("name"),
-                        "body": release.get("body"),
+                        "body": final_body,
                         "make_latest": "false",
+                        **({"tag_name": tag} if existing.get("draft") is True and release.get("draft") is False else {}),
                         **{k: release[k] for k in ("draft", "prerelease") if k in release},
                     },
                 )
