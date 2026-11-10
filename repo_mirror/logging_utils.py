@@ -132,6 +132,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "source clone URL does not match source host",
         "source default branch missing; refusing to prune",
         "multiple destination releases for tag",
+        "ambiguous untagged destination draft; manual reconciliation required",
         "invalid source latest release",
         "release assets response is not an array",
         "source release name uses reserved marker",

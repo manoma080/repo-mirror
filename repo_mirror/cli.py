@@ -165,7 +165,7 @@ def main(argv=None):
         src = github_src if source["type"] == "github" else other_src
         try:
             print(
-                f"\n===== Repository {repo_index}/{len(plan)}: {safe_label(source.get('owner'))}/{safe_label(name)} =====",
+                f"\n\n===== Repository {repo_index}/{len(plan)}: {safe_label(source.get('owner'))}/{safe_label(name)} =====",
                 file=sys.stderr,
                 flush=True,
             )

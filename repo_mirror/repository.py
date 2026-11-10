@@ -395,7 +395,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     for release_index, release in enumerate(selected, 1):
         tag = release["tag_name"]
         print(
-            f"\n===== Release {release_index}/{len(selected)}: {safe_label(tag)} =====",
+            f"\n\n===== Release {release_index}/{len(selected)}: {safe_label(tag)} =====",
             file=sys.stderr,
             flush=True,
         )

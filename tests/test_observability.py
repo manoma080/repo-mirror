@@ -46,6 +46,8 @@ class ObservabilityTests(unittest.TestCase):
                 "===== Summary =====",
             ],
         )
+        self.assertRegex(text, r"[^\n]\n\n\n===== Repository 1/1: alice/demo =====")
+        self.assertRegex(text, r"[^\n]\n\n\n===== Release 1/1: v1 =====")
         self.assertIn("elapsed=", text)
         self.assertNotIn("secret-token", text)
 
