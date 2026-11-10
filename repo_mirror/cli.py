@@ -4,12 +4,16 @@ import argparse
 import json
 import os
 import sys
+import tempfile
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote
 
-from repo_mirror.constants import GITHUB, NAME
+from repo_mirror.adhoc import one_time_sources
+from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
 from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
-from repo_mirror.adhoc import one_time_sources
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_main
 from repo_mirror.repository import mirror_repository
 from repo_mirror.source_filter import filter_plan
@@ -21,6 +25,23 @@ from repo_mirror.sources import (
     source_marker,
     validate_source,
 )
+
+
+class _ThreadStream:
+    """Route worker output to a per-repository temporary file."""
+
+    def __init__(self, fallback):
+        self.fallback = fallback
+        self.local = threading.local()
+
+    def write(self, text):
+        return getattr(self.local, "stream", self.fallback).write(text)
+
+    def flush(self):
+        return getattr(self.local, "stream", self.fallback).flush()
+
+    def __getattr__(self, name):
+        return getattr(self.fallback, name)
 
 
 @timed_main
@@ -134,29 +155,87 @@ def main(argv=None):
         except Exception as exc:
             failures.append((repo_index, error_detail(exc)))
     succeeded = 0
-    for repo_index, source_index, source, name in ready:
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+    stdout_router, stderr_router = _ThreadStream(original_stdout), _ThreadStream(original_stderr)
+
+    def run_repository(item):
+        repo_index, source_index, source, name = item
+        log = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        stdout_router.local.stream = stderr_router.local.stream = log
         src = github_src if source["type"] == "github" else other_src
-        print(
-            f"\n===== Repository {repo_index}/{len(plan)}: {safe_label(source.get('owner'))}/{safe_label(name)} =====",
-            file=sys.stderr,
-            flush=True,
-        )
-        print(
-            f"repository {repo_index}/{len(plan)} started (source {source_index}/{len(sources)})",
-            file=sys.stderr,
-            flush=True,
-        )
         try:
-            if journal is None:
-                mirror_repository(source, name, owner, src, dst, token, account_type)
-            else:
-                mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
-            succeeded += 1
-            print(f"repository {repo_index}/{len(plan)} completed", file=sys.stderr, flush=True)
-        except Exception as exc:
-            detail = error_detail(exc)
-            failures.append((repo_index, detail))
-            print(f"repository {repo_index}/{len(plan)} failed: {detail}", file=sys.stderr, flush=True)
+            print(
+                f"\n===== Repository {repo_index}/{len(plan)}: {safe_label(source.get('owner'))}/{safe_label(name)} =====",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                f"repository {repo_index}/{len(plan)} started (source {source_index}/{len(sources)})",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                if journal is None:
+                    mirror_repository(source, name, owner, src, dst, token, account_type)
+                else:
+                    mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
+                detail = None
+                print(f"repository {repo_index}/{len(plan)} completed", file=sys.stderr, flush=True)
+            except Exception as exc:
+                detail = error_detail(exc)
+                print(f"repository {repo_index}/{len(plan)} failed: {detail}", file=sys.stderr, flush=True)
+        except Exception:
+            try:
+                log.close()
+            except Exception:
+                pass
+            raise
+        finally:
+            del stdout_router.local.stream, stderr_router.local.stream
+        return repo_index, detail, log
+
+    sys.stdout, sys.stderr = stdout_router, stderr_router
+    processing_started = time.monotonic()
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            items = iter(ready)
+            pending = {pool.submit(run_repository, item): item for item in (next(items, None) for _ in range(4)) if item}
+            while pending:
+                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    item = pending.pop(future)
+                    try:
+                        repo_index, detail, log = future.result()
+                    except Exception as exc:
+                        failures.append((item[0], error_detail(exc)))
+                        item = next(items, None)
+                        if item is not None:
+                            pending[pool.submit(run_repository, item)] = item
+                        continue
+                    try:
+                        log.seek(0)
+                        while chunk := log.read(65536):
+                            original_stderr.write(chunk)
+                        original_stderr.flush()
+                    except Exception as exc:
+                        detail = detail or error_detail(exc)
+                    finally:
+                        try:
+                            log.close()
+                        except Exception as exc:
+                            detail = detail or error_detail(exc)
+                    if detail is None:
+                        succeeded += 1
+                    else:
+                        failures.append((repo_index, detail))
+                    item = next(items, None)
+                    if item is not None:
+                        pending[pool.submit(run_repository, item)] = item
+    finally:
+        sys.stdout, sys.stderr = original_stdout, original_stderr
+        counter = REPOSITORY_TIME.get()
+        if counter is not None and ready:
+            counter[0] += time.monotonic() - processing_started
     print("\n===== Summary =====", file=sys.stderr, flush=True)
     print(
         f"summary sources={len(sources)} discovery_failed={discovery_failures} repositories={len(plan)} succeeded={succeeded} failed={len(failures)}",

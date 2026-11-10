@@ -125,7 +125,85 @@ class TransferRetryTests(unittest.TestCase):
             api.download("https://api.github.com/asset", output)
         self.assertEqual(output.getvalue(), b"complete")
 
-    def test_upload_5xx_retries_with_rewound_body(self):
+    def test_direct_upload_429_retries_through_real_opener(self):
+        from email.message import Message
+        from urllib.response import addinfourl
+        from repo_mirror.repository import upload_with_reconciliation
+
+        api = API('token')
+        received = []
+        def respond(handler, request):
+            received.append(request.data.read())
+            headers = Message()
+            headers['Retry-After'] = '0'
+            response = addinfourl(io.BytesIO(b''), headers, request.full_url,
+                                  429 if len(received) == 1 else 200)
+            response.msg = 'response'
+            return response
+
+        with (patch('urllib.request.HTTPSHandler.https_open', respond),
+              patch.object(api, 'pages', return_value=[]), patch('time.sleep')):
+            upload_with_reconciliation(api, 'https://uploads.github.com/asset',
+                                       io.BytesIO(b'data'), 'type', 'assets', 'name')
+        self.assertEqual(received, [b'data', b'data'])
+
+    def test_upload_redirect_back_to_same_url_does_not_mark_or_retry(self):
+        from email.message import Message
+        from urllib.response import addinfourl
+        from repo_mirror.repository import upload_with_reconciliation
+
+        api = API('token')
+        calls = []
+        def respond(handler, request):
+            calls.append(request.full_url)
+            headers = Message()
+            headers['Retry-After'] = '0'
+            if len(calls) == 1:
+                headers['Location'] = request.full_url
+            response = addinfourl(io.BytesIO(b''), headers, request.full_url,
+                                  302 if len(calls) == 1 else 429)
+            setattr(response, 'msg', 'response')
+            return response
+
+        with (patch('urllib.request.HTTPSHandler.https_open', respond),
+              patch.object(api, 'pages', return_value=[]), patch('time.sleep') as sleep,
+              self.assertRaises(HTTPError) as raised):
+            upload_with_reconciliation(api, 'https://uploads.github.com/asset',
+                                       io.BytesIO(b'data'), 'type', 'assets', 'name')
+        self.assertFalse(getattr(raised.exception, 'direct_upload_rejection', False))
+        self.assertEqual(len(calls), 2)
+        sleep.assert_not_called()
+        raised.exception.close()
+
+    def test_upload_429_from_opener_without_response_is_not_marked(self):
+        api = API('token')
+        error = HTTPError('https://uploads.github.com/asset', 429, '', {'Retry-After': '0'}, None)
+        with patch.object(api.opener, 'open', side_effect=error), self.assertRaises(HTTPError) as raised:
+            api.upload('https://uploads.github.com/asset', io.BytesIO(b'data'), 'type')
+        self.assertFalse(getattr(raised.exception, 'direct_upload_rejection', False))
+
+    def test_cooldown_rechecked_after_token_acquisition(self):
+        from repo_mirror import github_api
+        events = []
+        def token():
+            events.append('token')
+            return 'token'
+        api = API(token)
+        def wait(host, budget):
+            events.append('wait')
+        def open_request(request, timeout):
+            events.append('open')
+            response = Mock()
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=False)
+            response.headers = {}
+            response.read.return_value = b''
+            return response
+        with patch.object(github_api, '_wait_for_cooldown', side_effect=wait), patch.object(api.opener, 'open', side_effect=open_request):
+            api.request('GET', 'https://api.github.com/test')
+        self.assertEqual(events, ['wait', 'token', 'wait', 'open'])
+
+    def test_upload_5xx_with_delayed_visibility_never_replays(self):
         from repo_mirror.repository import upload_with_reconciliation
 
         dst = Mock()
@@ -137,10 +215,25 @@ class TransferRetryTests(unittest.TestCase):
                 raise HTTPError(url, 502, "failure", {}, None)
 
         dst.upload.side_effect = upload
-        dst.pages.return_value = []
-        with patch("time.sleep"):
+        dst.pages.side_effect = [[], [{"name": "name", "state": "uploaded", "url": "asset"}]]
+        with patch("time.sleep") as sleep, self.assertRaises(HTTPError):
             upload_with_reconciliation(dst, "url", io.BytesIO(b"data"), "type", "assets", "name")
-        self.assertEqual(received, [b"data", b"data"])
+        self.assertEqual(received, [b"data"])
+        sleep.assert_not_called()
+
+    def test_upload_unmarked_429_and_timeout_never_replay(self):
+        from repo_mirror.repository import upload_with_reconciliation
+
+        for error in (HTTPError("https://redirect.example/asset", 429, "", {}, None),
+                      HTTPError("url", 429, "", {}, None), TimeoutError()):
+            with self.subTest(error=error):
+                dst = Mock()
+                dst.upload.side_effect = error
+                dst.pages.return_value = []
+                with patch("time.sleep") as sleep, self.assertRaises(type(error)):
+                    upload_with_reconciliation(dst, "url", io.BytesIO(b"data"), "type", "assets", "name")
+                self.assertEqual(dst.upload.call_count, 1)
+                sleep.assert_not_called()
 
     def test_upload_422_reconciles_matching_bytes(self):
         from repo_mirror.repository import upload_with_reconciliation
@@ -166,12 +259,21 @@ class TransferRetryTests(unittest.TestCase):
         from repo_mirror.repository import upload_with_reconciliation
 
         dst = Mock()
-        dst.upload.side_effect = [HTTPError("url", 503, "", {}, None), HTTPError("url", 422, "", {}, None)]
+        rejection = HTTPError("url", 429, "", {}, None)
+        rejection.direct_upload_rejection = True
+        received = []
+        def upload(url, data, kind):
+            received.append(data.read())
+            if len(received) == 1:
+                raise rejection
+            raise HTTPError("url", 422, "", {}, None)
+        dst.upload.side_effect = upload
         dst.pages.side_effect = [[], [{"name": "name", "state": "uploaded", "url": "asset"}]]
         dst.download.side_effect = lambda url, output: output.write(b"data")
         with patch("time.sleep"):
             upload_with_reconciliation(dst, "url", io.BytesIO(b"data"), "type", "assets", "name")
         self.assertEqual(dst.upload.call_count, 2)
+        self.assertEqual(received, [b"data", b"data"])
 
     def test_upload_ambiguous_remote_fails_closed(self):
         from repo_mirror.journal import ReleaseRecoveryError
@@ -196,7 +298,11 @@ class TransferRetryTests(unittest.TestCase):
         from repo_mirror.repository import upload_with_reconciliation
 
         dst = Mock()
-        dst.upload.side_effect = lambda *args: (_ for _ in ()).throw(HTTPError("url", 503, "", {}, None))
+        def rejected(*args):
+            error = HTTPError("url", 429, "", {}, None)
+            error.direct_upload_rejection = True
+            raise error
+        dst.upload.side_effect = rejected
         dst.pages.return_value = []
         with patch("time.sleep") as sleep, self.assertRaises(HTTPError):
             upload_with_reconciliation(dst, "url", io.BytesIO(b"data"), "type", "assets", "name")

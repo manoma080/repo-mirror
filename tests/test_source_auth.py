@@ -53,7 +53,9 @@ class SourceAuthTests(unittest.TestCase):
         error = HTTPError("https://evil.example/secret", 403, "secret", {"X-RateLimit-Remaining": "0"}, None)
         self.addCleanup(error.close)
         api.opener.open = Mock(side_effect=error)
-        with self.assertRaises(HTTPError) as caught:
+        from repo_mirror.github_api import _cooldowns
+        self.addCleanup(_cooldowns.clear)
+        with patch("repo_mirror.github_api._MAX_RATE_WAIT", 0), self.assertRaises(HTTPError) as caught:
             api.request("GET", "https://api.github.com/repos/a/b")
         self.assertEqual(
             mirror.error_detail(caught.exception), "HTTP 403 (source API GET; rate limit remaining=0)"
@@ -97,5 +99,6 @@ class SourceAuthTests(unittest.TestCase):
                 patch_everywhere("mirror_repository") as run,
             ):
                 mirror.main(["--config", config.name])
-        self.assertIs(run.call_args_list[0].args[3], gh_client)
-        self.assertIs(run.call_args_list[1].args[3], forge_client)
+        calls = {call.args[1]: call for call in run.call_args_list}
+        self.assertIs(calls["one"].args[3], gh_client)
+        self.assertIs(calls["two"].args[3], forge_client)

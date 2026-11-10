@@ -3,6 +3,7 @@
 import base64
 import http.client
 import ipaddress
+import io
 import json
 import math
 import os
@@ -11,15 +12,89 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPErrorProcessor, HTTPRedirectHandler, Request, build_opener
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, MAX_ASSET_SIZE, NAME
 from repo_mirror.logging_utils import timed, timed_call
+
+_cooldown_lock = threading.Lock()
+_cooldowns = {}
+_MAX_RATE_WAIT = 60
+
+
+def _wait_for_cooldown(host, budget=None):
+    if budget is None:
+        budget = [_MAX_RATE_WAIT]
+    while True:
+        with _cooldown_lock:
+            remaining = _cooldowns.get(host, 0) - time.monotonic()
+        if remaining <= 0:
+            return
+        if remaining > budget[0]:
+            raise RuntimeError("rate limit cooldown exceeds wait limit")
+        budget[0] -= remaining
+        time.sleep(remaining)
+
+
+def _rate_delay(exc, attempt):
+    headers = exc.headers or {}
+    delays = []
+    value = headers.get("Retry-After")
+    if value:
+        try:
+            delay = float(value)
+        except (ValueError, TypeError):
+            try:
+                delay = parsedate_to_datetime(value).timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                delay = 60 * 2**attempt
+        delays.append(delay)
+    if headers.get("X-RateLimit-Remaining") == "0":
+        try:
+            delays.append(float(headers.get("X-RateLimit-Reset")) - time.time())
+        except (ValueError, TypeError, OverflowError):
+            delays.append(60 * 2**attempt)
+    if not delays:
+        delays.append(60 * 2**attempt)
+    if any(math.isnan(delay) for delay in delays):
+        return float("inf")
+    return max(0, *delays)
+
+
+def _is_rate_limited(exc):
+    if exc.code == 429:
+        return True
+    if exc.code != 403:
+        return False
+    headers = exc.headers or {}
+    if headers.get("X-RateLimit-Remaining") == "0" or headers.get("Retry-After"):
+        return True
+    if exc.fp is None:
+        return False
+    original = exc.fp
+    body = exc.read(65536)
+    original.close()
+    exc.fp = io.BytesIO(body)
+    return b"secondary rate limit" in body.lower() or b"abuse detection" in body.lower()
+
+
+def _publish_limit(host, exc, attempt):
+    delay = _rate_delay(exc, attempt)
+    with _cooldown_lock:
+        _cooldowns[host] = max(_cooldowns.get(host, 0), time.monotonic() + delay)
+    return delay
+
+
+def _publish_exhausted_response(host, response):
+    headers = getattr(response, "headers", None)
+    if headers and headers.get("X-RateLimit-Remaining") == "0":
+        _publish_limit(host, response, 0)
 
 
 def transient_transfer_error(exc):
@@ -54,6 +129,21 @@ def transfer_retry_delay(exc, attempt):
     return max(0, delay, 2 ** attempt + random.uniform(0, 1))
 
 
+class UploadErrorProcessor(HTTPErrorProcessor):
+    """Identify a rejection of the original upload, never a redirected hop."""
+
+    def http_response(self, request, response):
+        direct_rejection = getattr(request, "_original_upload", False) and response.code == 429
+        try:
+            return super().http_response(request, response)
+        except HTTPError as exc:
+            if direct_rejection and exc.code == 429 and exc.fp is response:
+                exc.direct_upload_rejection = True
+            raise
+
+    https_response = http_response
+
+
 class SafeRedirect(HTTPRedirectHandler):
     """HTTP redirect handler that re-checks each redirect target before following it."""
 
@@ -86,20 +176,22 @@ class AppTokenProvider:
             account_type,
         )
         self.token, self.expires = None, 0
+        self._lock = threading.Lock()
 
     def __call__(self):
-        if not self.token or time.time() >= self.expires - 300:
-            token, expires = self._mint()
-            if (
-                not isinstance(token, str)
-                or not token.strip()
-                or not isinstance(expires, (int, float))
-                or not math.isfinite(expires)
-                or expires <= time.time() + 300
-            ):
-                raise ValueError("invalid GitHub App token response")
-            self.token, self.expires = token, expires
-        return self.token
+        with self._lock:
+            if not self.token or time.time() >= self.expires - 300:
+                token, expires = self._mint()
+                if (
+                    not isinstance(token, str)
+                    or not token.strip()
+                    or not isinstance(expires, (int, float))
+                    or not math.isfinite(expires)
+                    or expires <= time.time() + 300
+                ):
+                    raise ValueError("invalid GitHub App token response")
+                self.token, self.expires = token, expires
+            return self.token
 
     def _mint(self):
         def encode(data):
@@ -136,10 +228,15 @@ class AppTokenProvider:
         jwt = (message + b"." + encode(result.stdout)).decode()
         opener = build_opener(SafeRedirect())
 
+        budget = [_MAX_RATE_WAIT]
+        host = urlparse(GITHUB).hostname
+
         def request(path, method="GET"):
             # Token mint POSTs create only short-lived credentials. An ambiguous
             # failure can leave an unused token, but never retries other writes.
             for attempt in range(4):
+                _wait_for_cooldown(host, budget)
+                limited = False
                 req = Request(
                     GITHUB + path,
                     method=method,
@@ -153,17 +250,25 @@ class AppTokenProvider:
                 )
                 try:
                     with opener.open(req, timeout=60) as response:
+                        _publish_exhausted_response(host, response)
                         return json.load(response)
                 except HTTPError as exc:
                     setattr(exc, "mirror_operation", ("destination", "app authentication", method))
-                    if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                    limited = _is_rate_limited(exc)
+                    delay = _publish_limit(host, exc, attempt) if limited else None
+                    if (exc.code not in (429, 500, 502, 503, 504) and not limited) or attempt == 3 or (limited and delay > _MAX_RATE_WAIT):
                         raise
                     exc.close()
                 except URLError, TimeoutError, ConnectionError:
                     if attempt == 3:
                         raise
                 print(f"app authentication retry {attempt + 1}/3", file=sys.stderr, flush=True)
-                time.sleep(2**attempt)
+                if not limited:
+                    delay = 2**attempt
+                    if delay > budget[0]:
+                        raise RuntimeError("retry wait limit exceeded")
+                    budget[0] -= delay
+                    time.sleep(delay)
 
         kind = "users" if self.account_type == "personal" else "orgs"
         installation = request(f"/{kind}/{quote(self.owner, safe='')}/installation")
@@ -188,7 +293,7 @@ class API:
     def __init__(self, token=None):
         self._token = token
         self.role = "destination" if token else "source"
-        self.opener = build_opener(SafeRedirect())
+        self.opener = build_opener(SafeRedirect(), UploadErrorProcessor())
 
     @property
     def token(self):
@@ -197,7 +302,7 @@ class API:
     def _request_token(self, method, parsed):
         return self.token if self._token else None
 
-    def _request(self, method, url, body=None, headers=None):
+    def _request(self, method, url, body=None, headers=None, *, upload=False):
         parsed = urlparse(url)
         if parsed.scheme != "https" or parsed.username or parsed.password:
             raise ValueError("API URL must be credential-free HTTPS")
@@ -209,7 +314,10 @@ class API:
                 443,
             ):
                 raise ValueError("refusing to send destination credentials to non-GitHub host")
+        budget = [_MAX_RATE_WAIT]
         for attempt in range(4):
+            _wait_for_cooldown(parsed.hostname, budget)
+            rate_limited = False
             attempt_headers = dict(headers)
             current = self._request_token(method, parsed)
             if current:
@@ -218,9 +326,12 @@ class API:
                 f"network target={self.role} operation=API method={method if method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') else 'request'}"
             ):
                 try:
-                    with self.opener.open(
-                        Request(url, data=body, headers=attempt_headers, method=method), timeout=60
-                    ) as response:
+                    request = Request(url, data=body, headers=attempt_headers, method=method)
+                    if upload:
+                        setattr(request, "_original_upload", True)
+                    _wait_for_cooldown(parsed.hostname, budget)
+                    with self.opener.open(request, timeout=60) as response:
+                        _publish_exhausted_response(parsed.hostname, response)
                         return response.read()
                 except HTTPError as e:
                     setattr(
@@ -232,17 +343,28 @@ class API:
                             method if method in ("GET", "POST", "PUT", "PATCH", "DELETE") else "request",
                         ),
                     )
+                    limited = _is_rate_limited(e)
+                    delay = _publish_limit(parsed.hostname, e, attempt) if limited else None
                     if (
                         method not in ("GET", "PUT", "PATCH", "DELETE")
-                        or e.code not in (429, 500, 502, 503, 504)
+                        or (e.code not in (429, 500, 502, 503, 504) and not (method == "GET" and limited))
                         or attempt == 3
+                        or (limited and delay > _MAX_RATE_WAIT)
                     ):
                         raise
+                    if limited:
+                        rate_limited = True
+                    e.close()
                 except URLError:
                     if method not in ("GET", "PUT", "PATCH", "DELETE") or attempt == 3:
                         raise
             print(f"request retry {attempt + 1}/3", file=sys.stderr, flush=True)
-            time.sleep(2**attempt)
+            if not rate_limited:
+                delay = 2**attempt
+                if delay > budget[0]:
+                    raise RuntimeError("retry wait limit exceeded")
+                budget[0] -= delay
+                time.sleep(delay)
         raise RuntimeError("request retries exhausted")
 
     def request(self, method, url, data=None, **kwargs):
@@ -376,7 +498,7 @@ class API:
         data.seek(position)
         if size > MAX_ASSET_SIZE:
             raise ValueError("asset exceeds GitHub size limit")
-        self._request("POST", url, data, {"Content-Type": content_type, "Content-Length": str(size)})
+        self._request("POST", url, data, {"Content-Type": content_type, "Content-Length": str(size)}, upload=True)
 
 
 _asset_download_once = API._download_once

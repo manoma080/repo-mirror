@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 
 
 class ReleaseRecoveryError(RuntimeError):
@@ -54,7 +55,13 @@ class FailureJournal:
             )
         ):
             raise ValueError("invalid failure journal")
-        self.failures = set(data["failures"])
+        self._lock = threading.RLock()
+        self._failures = set(data["failures"])
+
+    @property
+    def failures(self):
+        with self._lock:
+            return self._failures.copy()
 
     @staticmethod
     def key(source, name, owner, tag, asset):
@@ -65,15 +72,20 @@ class FailureJournal:
         return digest(identity) + ":" + digest(asset)
 
     def retry_order(self, source, name, owner, tag, assets):
+        failures = self.failures
         return sorted(
-            assets, key=lambda asset: self.key(source, name, owner, tag, asset["name"]) not in self.failures
+            assets, key=lambda asset: self.key(source, name, owner, tag, asset["name"]) not in failures
         )
 
     def set(self, key, failed):
+        with self._lock:
+            self._set_locked(key, failed)
+
+    def _set_locked(self, key, failed):
         if failed:
-            self.failures.add(key)
+            self._failures.add(key)
         else:
-            self.failures.discard(key)
+            self._failures.discard(key)
         directory = os.path.dirname(os.path.abspath(self.path))
         fd, tmp = tempfile.mkstemp(prefix=".failures-", dir=directory)
         try:

@@ -1,6 +1,7 @@
 """git_sync: see README for an overview."""
 
 import base64
+import hashlib
 import os
 import re
 import subprocess
@@ -80,6 +81,8 @@ def create_archive(api, owner, mirror_name, account_type, timestamp):
     ):
         raise ValueError("invalid archive identity")
     suffix = "-wipe-" + timestamp
+    if len(mirror_name) + len(suffix) > 100:
+        suffix = "-" + hashlib.sha256(mirror_name.lower().encode()).hexdigest()[:16] + suffix
     archive_name = mirror_name[: 100 - len(suffix)] + suffix
     qowner, qname = quote(owner, safe=""), quote(archive_name, safe="")
     target = f"{GITHUB}/repos/{qowner}/{qname}"
