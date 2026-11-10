@@ -85,7 +85,7 @@ Never put keys or tokens in the repository's files. If GitHub asks you to approv
 - The mirror finds the app's installation for `MIRROR_OWNER` and checks the owner name.
 - It gets a short-lived **installation token** (a temporary login). It renews the token when fewer than five minutes remain, including during long runs.
 - The private key stays inside the mirror process. It is passed to OpenSSL (the encryption tool) through a pipe, never in command arguments, logs or files. OpenSSL must be installed.
-- Up to four repositories are mirrored concurrently. Failure journal updates and token renewal are synchronized within each run; separate runs must not share the same failure file.
+- Up to eight repositories are mirrored concurrently. Failure journal updates and token renewal are synchronized within each run; separate runs must not share the same failure file.
 - API clients in the same process share per-host cooldowns after HTTP 429 or a rate-limited HTTP 403. API retry waits are limited to 60 seconds; longer server-requested delays fail rather than retry early. Ordinary 403s are not retried. Existing PUT, PATCH and DELETE retry behavior remains unchanged; POST is not automatically retried. This coordination does not cover separate runs, Git operations, authentication requests or asset transfers.
 - A transfer already in progress keeps its old token. If it fails, that repository is reported as failed and retried on a later run.
 
