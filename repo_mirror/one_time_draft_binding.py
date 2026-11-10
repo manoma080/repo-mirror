@@ -31,13 +31,12 @@ RELEASE = TARGET + "/releases/437729977"
 TIMESTAMP_HASH = "96f8c48f6d31b0ea87b053aef1a076b1519ed96d177406815e43580cedb90a48"
 
 
-def _stable(value):
-    # Counts can change merely because someone downloaded an asset.
-    if isinstance(value, dict):
-        return {k: _stable(v) for k, v in value.items() if k not in ("download_count", "archive_download_count")}
-    if isinstance(value, (list, tuple)):
-        return [_stable(v) for v in value]
-    return value
+def _source_assets_without_download_counts(items):
+    # Only the source asset's download count is changed by our downloads.
+    if not isinstance(items, list):
+        return items
+    return [{k: v for k, v in asset.items() if k != "download_count"}
+            if isinstance(asset, dict) else asset for asset in items]
 
 
 def _assets(items):
@@ -51,20 +50,26 @@ def _assets(items):
 
 def _read(src, dst):
     repo = dst.request("GET", TARGET)
+    # GitHub issues this repository field per GET; nested names remain evidence.
+    repo = {k: v for k, v in repo.items() if k != "temp_clone_token"}
     source = src.request("GET", SOURCE_API + "/tags/v1.36")
     source_assets = src.request("GET", SOURCE_API + "/141/assets")
+    source = dict(source)
+    if "assets" in source:
+        source["assets"] = _source_assets_without_download_counts(source["assets"])
+    source_assets = _source_assets_without_download_counts(source_assets)
     release = dst.request("GET", RELEASE)
     assets = dst.pages(RELEASE + "/assets")
     releases = list(dst.pages(TARGET + "/releases"))
-    if _stable(_assets(source.get("assets"))) != _stable(_assets(source_assets)):
+    if _assets(source.get("assets")) != _assets(source_assets):
         raise ValueError("source asset lists disagree")
-    if _stable(_assets(release.get("assets"))) != _stable(_assets(assets)):
+    if _assets(release.get("assets")) != _assets(assets):
         raise ValueError("destination asset lists disagree")
     if any(not isinstance(r, dict) for r in releases):
         raise ValueError("invalid release list")
     approved = [r for r in releases if r.get("id") == 437729977]
     drafts = [r for r in releases if r.get("draft") is True]
-    if (len(approved) != 1 or _stable(approved[0]) != _stable(release)
+    if (len(approved) != 1 or approved[0] != release
             or len(drafts) != 1 or drafts[0].get("id") != 437729977
             or any(r.get("tag_name") == "v1.36" for r in releases)):
         raise ValueError("ambiguous destination releases")
@@ -114,7 +119,7 @@ def reconcile(src, dst, secret):
     prospective = [dict(r, body=marked) if r.get('id') == 437729977 else r for r in releases]
     if find_tag_releases(None, TARGET, "v1.36", releases=prospective, marker=SOURCE) != [dict(release, body=marked)]:
         raise ValueError("production selection mismatch")
-    if _stable(_read(src, dst)) != _stable(before):
+    if _read(src, dst) != before:
         raise ValueError("state changed before write")
     if release["body"] == marked:
         return "already bound"
@@ -124,7 +129,7 @@ def reconcile(src, dst, secret):
     immediate_without_updated = dict(immediate)
     expected_immediate.pop("updated_at", None)
     immediate_without_updated.pop("updated_at", None)
-    if _stable(immediate_without_updated) != _stable(expected_immediate):
+    if immediate_without_updated != expected_immediate:
         raise ValueError("immediate readback failed; manual inspection required")
     after = _read(src, dst)
     old_release, new_release = dict(release), dict(after[3])
@@ -132,7 +137,7 @@ def reconcile(src, dst, secret):
     # GitHub updates this field as a consequence of PATCH. All other release
     # fields and all assets must remain unchanged.
     old_release.pop("updated_at", None); new_release.pop("updated_at", None)
-    if _stable(old_release) != _stable(new_release) or _stable(before[:3]) != _stable(after[:3]) or _stable(before[4]) != _stable(after[4]):
+    if old_release != new_release or before[:3] != after[:3] or before[4] != after[4]:
         raise ValueError("post-write verification failed; manual inspection required")
     from repo_mirror.repository import find_tag_releases
     import os
