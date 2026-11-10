@@ -70,6 +70,68 @@ class BindingIntegrationTests(unittest.TestCase):
         self.assertEqual(set(self.dst.patches[0]), {'body'})
         self.assertEqual(self.run_binding(), 'already bound')
         self.assertEqual(len(self.dst.patches), 1)
+    def test_volatile_repository_clone_token_changes_between_reads(self):
+        original = self.dst.request
+        count = 0
+        def request(method, url, data=None):
+            nonlocal count
+            result = original(method, url, data)
+            if url == binding.TARGET:
+                count += 1
+                result['temp_clone_token'] = 'ephemeral-' + str(count)
+            return result
+        self.dst.request = request
+        self.assertEqual(self.run_binding(), 'bound')
+        self.assertEqual(len(self.dst.patches), 1)
+
+    def test_asset_evidence_mutation_between_reads_stops(self):
+        for field, value in [('id', 12345), ('digest', 'sha256:bad'),
+                             ('size', 1), ('name', 'replacement'), ('state', 'starter')]:
+            with self.subTest(field=field):
+                self.setUp()
+                original = self.src.download
+                def download(url, output):
+                    original(url, output)
+                    self.dst.release['assets'][0][field] = value
+                self.src.download = download
+                with self.assertRaises(ValueError):
+                    self.run_binding()
+                self.assertEqual(self.dst.patches, [])
+
+    def test_source_download_count_change_does_not_block(self):
+        original = self.src.download
+        def download(url, output):
+            original(url, output)
+            for asset in self.src.assets:
+                asset['download_count'] = asset.get('download_count', 0) + 1
+        self.src.download = download
+        self.assertEqual(self.run_binding(), 'bound')
+        self.assertEqual(len(self.dst.patches), 1)
+
+    def test_source_download_url_swap_after_validation_never_writes(self):
+        original = self.src.download
+        def download(url, output):
+            original(url, output)
+            self.src.assets[0]['browser_download_url'] = 'https://example.org/replacement'
+        self.src.download = download
+        with self.assertRaisesRegex(ValueError, 'state changed before write'):
+            self.run_binding()
+        self.assertEqual(self.dst.patches, [])
+
+    def test_unrelated_fields_changed_after_validation_never_write(self):
+        for field in ('url', 'unknown_url', 'unknown_at', 'unknown_count', 'temp_clone_token'):
+            with self.subTest(field=field):
+                self.setUp()
+                self.dst.release['metadata'] = {field: 'before'}
+                original = self.src.download
+                def download(url, output):
+                    original(url, output)
+                    self.dst.release['metadata'][field] = 'after'
+                self.src.download = download
+                with self.assertRaisesRegex(ValueError, 'state changed before write'):
+                    self.run_binding()
+                self.assertEqual(self.dst.patches, [])
+
     def test_changed_between_snapshot_and_patch_stops(self):
         self.dst.change_at = 2
         with self.assertRaises(ValueError): self.run_binding()
