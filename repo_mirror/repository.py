@@ -8,13 +8,14 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import UTC, datetime
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
-from repo_mirror.github_api import not_found, same_file
+from repo_mirror.github_api import not_found, same_file, transient_transfer_error, transfer_retry_delay
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker
@@ -28,6 +29,39 @@ IDENTITY_SENTINEL = "[repo-mirror:draft-identity:v1]"
 def draft_identity_signature(secret, source, tag, target, release_id):
     payload = json.dumps([source, tag, target, release_id], ensure_ascii=True, separators=(",", ":")).encode()
     return hmac.new(secret.encode(), b"repo-mirror:draft-identity:v1\0" + payload, hashlib.sha256).hexdigest()
+
+
+def upload_with_reconciliation(dst, upload_url, data, content_type, assets_url, name):
+    """Reconcile ambiguous responses before replay; never remove remote assets."""
+    position = data.tell()
+    for attempt in range(4):
+        data.seek(position)
+        try:
+            dst.upload(upload_url, data, content_type)
+            return
+        except Exception as exc:
+            conflict = isinstance(exc, HTTPError) and exc.code == 422
+            if not conflict and not transient_transfer_error(exc):
+                raise
+            matches = [item for item in dst.pages(assets_url) if item.get("name") == name]
+            if matches:
+                if len(matches) != 1 or matches[0].get("state") != "uploaded" or not matches[0].get("url"):
+                    raise ReleaseRecoveryError("mismatch") from exc
+                with tempfile.TemporaryFile() as remote:
+                    dst.download(matches[0]["url"], remote)
+                    data.seek(position)
+                    if not same_file(data, remote):
+                        raise ReleaseRecoveryError("mismatch") from exc
+                return
+            if conflict or attempt == 3:
+                raise
+            delay = transfer_retry_delay(exc, attempt)
+            if delay is None:
+                raise
+            if isinstance(exc, HTTPError):
+                exc.close()
+            print(f"asset upload retry {attempt + 1}/3", file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 def release_marker_is_pending(body):
@@ -1161,10 +1195,10 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                                 try:
                                     if was_journaled:
                                         retried += 1
-                                    dst.upload(
-                                        upload_url,
-                                        data,
+                                    upload_with_reconciliation(
+                                        dst, upload_url, data,
                                         asset.get("content_type") or "application/octet-stream",
+                                        target + "/releases/" + str(existing["id"]) + "/assets", asset["name"],
                                     )
                                 except Exception as exc:
                                     detail = error_detail(exc)
@@ -1285,7 +1319,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                                     + "?"
                                     + urlencode({"name": stage_name})
                                 )
-                                dst.upload(u, f, "application/json")
+                                upload_with_reconciliation(dst, u, f, "application/json", target + "/releases/" + str(existing["id"]) + "/assets", stage_name)
                             staged_assets = dst.pages(target + "/releases/" + str(existing["id"]) + "/assets")
                             stages = [a for a in staged_assets if a.get("name") == stage_name]
                             if len(stages) != 1 or stages[0].get("state") != "uploaded":
@@ -1318,7 +1352,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                                     + "?"
                                     + urlencode({"name": cache_name})
                                 )
-                                dst.upload(u, f, "application/json")
+                                upload_with_reconciliation(dst, u, f, "application/json", target + "/releases/" + str(existing["id"]) + "/assets", cache_name)
                         verified = [
                             a
                             for a in dst.pages(target + "/releases/" + str(existing["id"]) + "/assets")

@@ -125,6 +125,12 @@ While a release is being copied, its notes get a `[repo-mirror:pending:v3]` mark
 
 A source file in `starter` state is logged and skipped. It does not keep a release pending. If it later becomes a normal uploaded file, it is copied on a later run. Starter files already on the mirror must be cleaned up by hand.
 
+## Asset transfer retries
+
+Asset downloads and uploads retry transient transport errors, HTTP 429 and 5xx up to three times after the first attempt, with exponential backoff and jitter, respecting Retry-After. A Retry-After longer than 60 seconds stops the transfer without sleeping or retrying early. Partial downloads are discarded before retrying. After an ambiguous upload failure and on HTTP 422, the destination asset list is checked: one uploaded asset with matching downloaded bytes counts as success. A starter, duplicate, missing URL or byte mismatch stops recovery; retries never delete or overwrite an asset. Timestamp-manifest transfers use the same policy.
+
+This is best-effort reconciliation, not an exactly-once guarantee. An upload may still be in flight or not yet visible when the list is checked, so a subsequent retry can race it. GitHub documents that a 502 may leave an empty starter asset and that an existing filename can produce 422; it does not guarantee atomic in-flight uniqueness or immediate listing consistency. Inspect and reconcile ambiguous assets manually if necessary. See [GitHub's upload asset documentation](https://docs.github.com/en/rest/releases/assets#upload-a-release-asset).
+
 ## Failed uploads
 
 Failed uploads are saved in `failures.json` on the management branch. The next run checks that file.
