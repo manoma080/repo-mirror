@@ -116,7 +116,7 @@ class ConcurrentMirroringTests(unittest.TestCase):
         assert len(minted) == 1
 
 
-    def test_four_concurrent_repositories_have_grouped_logs_and_keep_failures(self):
+    def test_eight_concurrent_repositories_have_grouped_logs_and_keep_failures(self):
         config = self.tmp_path / "config.json"
         config.write_text(
             json.dumps(
@@ -127,7 +127,7 @@ class ConcurrentMirroringTests(unittest.TestCase):
                             "type": "github",
                             "base_url": "https://github.com",
                             "owner": "alice",
-                            "repos": [f"repo{i}" for i in range(6)],
+                            "repos": [f"repo{i}" for i in range(10)],
                         }
                     ],
                 }
@@ -136,7 +136,7 @@ class ConcurrentMirroringTests(unittest.TestCase):
         lock = threading.Lock()
         active = 0
         peak = 0
-        barrier = threading.Barrier(4, timeout=2)
+        barrier = threading.Barrier(8, timeout=2)
 
         def mirror(source, name, *args, **kwargs):
             nonlocal active, peak
@@ -144,7 +144,7 @@ class ConcurrentMirroringTests(unittest.TestCase):
                 active += 1
                 peak = max(peak, active)
             print(f"{name} begin", file=sys.stderr)
-            if int(name[-1]) < 4:
+            if int(name[-1]) < 8:
                 try:
                     barrier.wait()
                 except threading.BrokenBarrierError:
@@ -163,15 +163,15 @@ class ConcurrentMirroringTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
                 cli.main(["--config", str(config)])
         log = self.stderr.getvalue()
-        assert peak == 4
-        for i in range(6):
+        assert peak == 8
+        for i in range(10):
             section = (
                 log.split(f": alice/repo{i} =====", 1)[1]
                 .split("===== Repository", 1)[0]
                 .split("===== Summary", 1)[0]
             )
             assert f"repo{i} begin" in section and f"repo{i} end" in section
-            assert all(f"repo{j} begin" not in section for j in range(6) if j != i)
+            assert all(f"repo{j} begin" not in section for j in range(10) if j != i)
         assert "unsafe detail" not in log
 
 

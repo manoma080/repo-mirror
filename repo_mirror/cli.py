@@ -197,9 +197,10 @@ def main(argv=None):
     sys.stdout, sys.stderr = stdout_router, stderr_router
     processing_started = time.monotonic()
     try:
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        max_workers = 8
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             items = iter(ready)
-            pending = {pool.submit(run_repository, item): item for item in (next(items, None) for _ in range(4)) if item}
+            pending = {pool.submit(run_repository, item): item for item in (next(items, None) for _ in range(max_workers)) if item}
             while pending:
                 completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in completed:
