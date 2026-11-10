@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
-from repo_mirror.git_sync import create_archive, mirror_git
+from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
 from repo_mirror.github_api import not_found, same_file
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
@@ -165,7 +165,10 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
 
     def archive_factory():
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return create_archive(dst, owner, dest_name, account_type, stamp)
+        archive = create_archive(dst, owner, dest_name, account_type, stamp)
+        archive_path = archive.removeprefix("https://github.com/").removesuffix(".git")
+        archive_target = GITHUB + "/repos/" + archive_path
+        return archive, lambda ref: set_archive_default(dst, archive_target, ref)
 
     with timed("step git mirror"):
         mirror_git(

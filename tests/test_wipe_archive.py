@@ -11,6 +11,38 @@ def create_archive(*args):
 
 
 class ArchiveCreationTests(unittest.TestCase):
+    def test_archive_default_is_patched_and_verified(self):
+        api = Mock()
+        api.request.side_effect = [{"default_branch": "bisect/oot-1"}, {}, {"default_branch": "nx2"}]
+        git_sync.set_archive_default(api, "https://api.github.com/repos/owner/archive", "refs/heads/nx2")
+        self.assertEqual(api.request.call_args_list[1].args, (
+            "PATCH", "https://api.github.com/repos/owner/archive", {"default_branch": "nx2"}
+        ))
+        self.assertEqual(api.request.call_args_list[-1].args[0], "GET")
+
+    def test_archive_default_already_correct_does_not_patch(self):
+        api = Mock()
+        api.request.return_value = {"default_branch": "nx2"}
+        git_sync.set_archive_default(api, "target", "refs/heads/nx2")
+        api.request.assert_called_once_with("GET", "target")
+
+    def test_archive_default_missing_fails_closed(self):
+        for value in (None, "", {}):
+            with self.subTest(value=value):
+                api = Mock()
+                api.request.return_value = {"default_branch": value}
+                with self.assertRaisesRegex(RuntimeError, "missing"):
+                    git_sync.set_archive_default(api, "target", "refs/heads/nx2")
+                api.request.assert_called_once_with("GET", "target")
+        with self.assertRaisesRegex(RuntimeError, "missing"):
+            git_sync.set_archive_default(Mock(), "target", "refs/heads/")
+
+    def test_archive_default_readback_mismatch_fails(self):
+        api = Mock()
+        api.request.side_effect = [{"default_branch": "other"}, {}, {"default_branch": "other"}]
+        with self.assertRaisesRegex(RuntimeError, "verified"):
+            git_sync.set_archive_default(api, "target", "refs/heads/nx2")
+
     def test_creates_private_archive_and_disables_actions_before_return(self):
         api = Mock()
         api.request.side_effect = [
