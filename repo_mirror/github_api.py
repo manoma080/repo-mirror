@@ -6,18 +6,52 @@ import ipaddress
 import json
 import math
 import os
+import random
 import socket
 import ssl
 import subprocess
 import sys
 import time
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, MAX_ASSET_SIZE, NAME
 from repo_mirror.logging_utils import timed, timed_call
+
+
+def transient_transfer_error(exc):
+    if isinstance(exc, socket.gaierror):
+        return exc.errno == socket.EAI_AGAIN
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or 500 <= exc.code <= 599
+    if isinstance(exc, URLError) and isinstance(exc.reason, socket.gaierror):
+        return exc.reason.errno == socket.EAI_AGAIN
+    status = getattr(exc, "mirror_asset_status", None)
+    if status is not None:
+        return status == 429 or 500 <= status <= 599
+    return isinstance(exc, (URLError, TimeoutError, ConnectionError, ssl.SSLEOFError, http.client.IncompleteRead, http.client.RemoteDisconnected))
+
+
+def transfer_retry_delay(exc, attempt):
+    headers = getattr(exc, "headers", None)
+    retry_after = headers.get("Retry-After") if headers else getattr(exc, "mirror_retry_after", None)
+    delay = 0
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except (ValueError, TypeError):
+            try:
+                delay = parsedate_to_datetime(retry_after).timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                pass
+    if delay > 60:
+        return None
+    if not math.isfinite(delay):
+        delay = 0
+    return max(0, delay, 2 ** attempt + random.uniform(0, 1))
 
 
 class SafeRedirect(HTTPRedirectHandler):
@@ -232,6 +266,26 @@ class API:
 
     @timed_call(lambda self, url, output: f"network target={self.role} operation=asset method=GET")
     def download(self, url, output):
+        position = output.tell()
+        for attempt in range(4):
+            output.seek(position)
+            output.truncate()
+            try:
+                return _asset_download_once(self, url, output)
+            except Exception as exc:
+                output.seek(position)
+                output.truncate()
+                if not transient_transfer_error(exc) or attempt == 3:
+                    raise
+                delay = transfer_retry_delay(exc, attempt)
+                if delay is None:
+                    raise
+                if isinstance(exc, HTTPError):
+                    exc.close()
+                print(f"asset download retry {attempt + 1}/3 target={self.role}", file=sys.stderr, flush=True)
+                time.sleep(delay)
+
+    def _download_once(self, url, output):
         if self.token:
             parsed = urlparse(url)
             if (
@@ -305,6 +359,7 @@ class API:
                                 raise exc
                             exc = RuntimeError("asset download failed")
                             setattr(exc, "mirror_asset_status", response.status)
+                            setattr(exc, "mirror_retry_after", response.getheader("Retry-After"))
                             raise exc
                         copy_asset(response, output)
                         return
@@ -322,6 +377,9 @@ class API:
         if size > MAX_ASSET_SIZE:
             raise ValueError("asset exceeds GitHub size limit")
         self._request("POST", url, data, {"Content-Type": content_type, "Content-Length": str(size)})
+
+
+_asset_download_once = API._download_once
 
 
 class SourceAPI(API):
@@ -347,9 +405,15 @@ class SourceAPI(API):
 def copy_asset(response, output):
     """Copy a response body to a file in chunks, stopping if it exceeds the size limit."""
     size = 0
+    getheader = getattr(response, "getheader", None)
+    length = getheader("Content-Length") if callable(getheader) else None
+    encoding = getheader("Transfer-Encoding") if callable(getheader) else None
+    expected = int(length) if isinstance(length, str) and length.isascii() and length.isdigit() and not encoding else None
     while True:
         chunk = response.read(CHUNK_SIZE)
         if not chunk:
+            if expected is not None and size < expected:
+                raise http.client.IncompleteRead(b"", expected - size)
             return size
         size += len(chunk)
         if size > MAX_ASSET_SIZE:
