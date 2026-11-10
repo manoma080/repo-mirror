@@ -47,8 +47,11 @@ def synchronize_snapshots(
             )
         if result.is_wipe:
             with timed("step git wipe-archive"):
-                archive = archive_factory()
+                archive, set_archive_default = archive_factory()
                 archive_snapshot(dest_run, store, archive, observed)
+                set_archive_default(old_ref)
+                if _default_branch(dest_run, archive) != old_ref:
+                    raise RuntimeError("archive default branch could not be verified")
     with timed("step git snapshot-push"):
         if observed and _default_branch(dest_run, destination) != old_ref:
             raise RuntimeError("destination default branch changed; refusing to push")
@@ -103,6 +106,21 @@ def create_archive(api, owner, mirror_name, account_type, timestamp):
     ):
         raise RuntimeError("archive privacy or Actions state could not be verified")
     return f"https://github.com/{qowner}/{qname}.git"
+
+
+def set_archive_default(api, target, ref):
+    """Set and read back an archive's default branch after refs exist."""
+    if not isinstance(ref, str) or not ref.startswith("refs/heads/") or not ref[11:]:
+        raise RuntimeError("archive default branch missing")
+    branch = ref[11:]
+    current = api.request("GET", target)
+    if not isinstance(current, dict) or not isinstance(current.get("default_branch"), str) or not current["default_branch"]:
+        raise RuntimeError("archive default branch missing")
+    if current["default_branch"] != branch:
+        api.request("PATCH", target, {"default_branch": branch})
+        current = api.request("GET", target)
+    if not isinstance(current, dict) or current.get("default_branch") != branch:
+        raise RuntimeError("archive default branch could not be verified")
 
 
 def is_wipe(old_files, new_files, old_commits, reachable_commits):
