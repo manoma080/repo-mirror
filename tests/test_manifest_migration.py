@@ -266,3 +266,155 @@ class HardeningTests(unittest.TestCase):
                 return {'description': source_marker(source, 'proj')}
         result = scan_repository(source, 'proj', 'target', Routes(True), Routes(False), 'secret')
         self.assertEqual(result['failed'], 1)
+
+
+class PreWriteGuardTests(unittest.TestCase):
+    def test_late_changes_prevent_patch(self):
+        from urllib.error import HTTPError
+        from repo_mirror.manifest_migration import scan_repository
+        from repo_mirror.sources import source_marker
+
+        for scenario in ('upstream-resumes', 'upstream-403', 'upstream-redirect', 'release', 'marker', 'source-collision'):
+            with self.subTest(scenario=scenario):
+                unavailable = scenario.startswith('upstream-')
+                name = 'ProsperoEden' if unavailable else 'proj'
+                source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'Swordpdf' if unavailable else 'alice', 'repos': [name]}
+                marker = source_marker(source, name)
+                payload = {'owner': 'repo-mirror:timestamps:v1', 'source': marker, 'tag': 'v1', 'assets': {}}
+                encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
+                payload['signature'] = hmac.new(b'secret', encoded, hashlib.sha256).hexdigest()
+                state = {'downloaded': False}
+                class Source(API):
+                    def request(self, method, url, data=None):
+                        if unavailable:
+                            if state['downloaded'] and scenario == 'upstream-resumes': return {}
+                            code = 403 if state['downloaded'] and scenario == 'upstream-403' else 404
+                            error_url = 'https://other.example/' if state['downloaded'] and scenario == 'upstream-redirect' else url
+                            raise HTTPError(error_url, code, 'error', {}, None)
+                        return {}
+                    def pages(self, url):
+                        if url.endswith('/releases'): return [{'id': 1, 'tag_name': 'v1', 'draft': False}]
+                        return [{'name': 'TIMESTAMPS.txt'}] if state['downloaded'] and scenario == 'source-collision' else []
+                class Destination(API):
+                    def pages(self, url):
+                        if url == 'target/releases':
+                            return [{'id': 3 if state['downloaded'] and scenario == 'release' else 2, 'tag_name': 'v1', 'draft': False}]
+                        return super().pages(url)
+                    def request(self, method, url, data=None):
+                        if method == 'GET': return {'description': 'foreign' if state['downloaded'] and scenario == 'marker' else marker}
+                        return super().request(method, url, data)
+                    def download(self, url, f):
+                        super().download(url, f)
+                        state['downloaded'] = True
+                dst = Destination([{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}], json.dumps(payload).encode())
+                result = scan_repository(source, name, 'target', Source([]), dst, 'secret')
+                self.assertEqual(result['failed'], 1)
+                self.assertEqual(dst.writes, [])
+
+
+class UnavailableSourceTests(unittest.TestCase):
+    def test_authorized_404_signed_manifest_is_renamed(self):
+        from urllib.error import HTTPError
+        from repo_mirror.manifest_migration import scan_repository
+        from repo_mirror.sources import source_marker
+        source = {"type": "github", "base_url": "https://github.com", "owner": "Swordpdf", "repos": ["ProsperoEden"]}
+        marker = source_marker(source, "ProsperoEden")
+        payload = {"owner": "repo-mirror:timestamps:v1", "source": marker, "tag": "v1", "assets": {}}
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()
+        payload["signature"] = hmac.new(b"secret", raw, hashlib.sha256).hexdigest()
+        class Source(API):
+            def request(self, method, url, data=None):
+                raise HTTPError(url, 404, "not found", {}, None)
+            def pages(self, url):
+                raise AssertionError("unavailable source must not be listed")
+        class Destination(API):
+            def pages(self, url):
+                if url == "target/releases":
+                    return [{"id": 2, "tag_name": "v1", "draft": False}]
+                return super().pages(url)
+            def request(self, method, url, data=None):
+                if method == "GET": return {"description": marker}
+                return super().request(method, url, data)
+        dst = Destination([{"id": 42, "name": "TIMESTAMPS.txt", "state": "uploaded", "url": "asset"}], json.dumps(payload).encode())
+        result = scan_repository(source, "ProsperoEden", "target", Source([]), dst, "secret")
+        self.assertEqual(result["renamed"], 1)
+        self.assertEqual(len(dst.writes), 1)
+
+    def test_exception_boundaries_and_validation(self):
+        from urllib.error import HTTPError, URLError
+        from repo_mirror.manifest_migration import scan_repository
+        from repo_mirror.sources import source_marker
+
+        def run(owner, name, *, status=404, asset_names=("TIMESTAMPS.txt",), signed=True, payload_updates=None, release_updates=None, marker_ok=True, base="https://github.com"):
+            source = {"type": "github", "base_url": base, "owner": owner, "repos": [name]}
+            marker = source_marker(source, name)
+            payload = {"owner": "repo-mirror:timestamps:v1", "source": marker, "tag": "v1", "assets": {}}
+            payload.update(payload_updates or {})
+            raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()
+            payload["signature"] = hmac.new(b"secret" if signed else b"wrong", raw, hashlib.sha256).hexdigest()
+            release = {"id": 2, "tag_name": "v1", "draft": False}
+            release.update(release_updates or {})
+            class Source(API):
+                def request(self, method, url, data=None):
+                    if status == "network": raise URLError("network")
+                    if status: raise HTTPError(url, status, "error", {}, None)
+                    return {}
+                def pages(self, url):
+                    if status: raise HTTPError(url, 404, "error", {}, None)
+                    if url.endswith("/releases"): return [{"id": 3, "tag_name": "v1", "draft": False}]
+                    return [{"name": "TIMESTAMPS.txt"}]
+            class Destination(API):
+                def pages(self, url):
+                    if url == "target/releases": return [dict(release)]
+                    return super().pages(url)
+                def request(self, method, url, data=None):
+                    if method == "GET": return {"description": marker if marker_ok else "foreign"}
+                    return super().request(method, url, data)
+            assets = [{"id": i + 42, "name": n, "state": "uploaded", "url": "asset"} for i, n in enumerate(asset_names)]
+            dst = Destination(assets, json.dumps(payload).encode())
+            try:
+                result = scan_repository(source, name, "target", Source([]), dst, "secret")
+            except (HTTPError, URLError, RuntimeError) as exc:
+                if isinstance(exc, HTTPError):
+                    exc.close()
+                result = None
+            return result, dst.writes
+
+        for owner, name in (("Swordpdf", "ProsperoEden"), ("mihawk-99", "PS5_Lichii"), ("mihawk-99", "PS5_Hookshot")):
+            with self.subTest(owner=owner, name=name):
+                result, writes = run(owner, name)
+                self.assertEqual(result["renamed"], 1)
+                self.assertEqual(len(writes), 1)
+        for args in (
+            {"status": 403}, {"status": 500}, {"status": "network"},
+            {"status": 0}, {"base": "https://example.com"},
+            {"signed": False}, {"payload_updates": {"tag": "other"}},
+            {"payload_updates": {"source": "foreign"}}, {"payload_updates": {"pending": True}},
+            {"asset_names": ("TIMESTAMPS.txt", "REPO-MIRROR-MANIFEST.json")},
+            {"asset_names": ("TIMESTAMPS.txt.repo-mirror-staging",)},
+            {"release_updates": {"draft": True}},
+            {"release_updates": {"tag_name": "untagged-v1"}},
+            {"release_updates": {"body": "repo-mirror pending"}}, {"marker_ok": False},
+        ):
+            with self.subTest(args=args):
+                result, writes = run("Swordpdf", "ProsperoEden", **args)
+                self.assertFalse(writes)
+                self.assertTrue(result is None or result["failed"] == 1)
+        result, writes = run("other", "unknown")
+        self.assertIsNone(result)
+        self.assertFalse(writes)
+
+    def test_redirected_404_does_not_enable_exception(self):
+        from urllib.error import HTTPError
+        from repo_mirror.manifest_migration import scan_repository
+        from repo_mirror.sources import source_marker
+        source = {"type": "github", "base_url": "https://github.com", "owner": "Swordpdf", "repos": ["ProsperoEden"]}
+        class Source(API):
+            def request(self, method, url, data=None):
+                raise HTTPError("https://other.example/redirect", 404, "error", {}, None)
+        class Destination(API):
+            def request(self, method, url, data=None):
+                return {"description": source_marker(source, "ProsperoEden")}
+        with self.assertRaises(HTTPError) as caught:
+            scan_repository(source, "ProsperoEden", "target", Source([]), Destination([]), "secret")
+        caught.exception.close()

@@ -13,6 +13,8 @@ LEGACY = 'TIMESTAMPS.txt'
 NEW = 'REPO-MIRROR-MANIFEST.json'
 RESERVED = {LEGACY, NEW, LEGACY + '.repo-mirror-staging', NEW + '.repo-mirror-staging'}
 MAX_MANIFEST_SIZE = 1024 * 1024
+# Explicitly authorized exceptions, not a general unavailable-upstream policy.
+UNAVAILABLE_SOURCES = frozenset({('Swordpdf', 'ProsperoEden'), ('mihawk-99', 'PS5_Lichii'), ('mihawk-99', 'PS5_Hookshot')})
 SAFE_MIGRATION_ERRORS = frozenset({
     'missing secret', 'destination asset not uploaded', 'missing or conflicting manifest',
     'source reserved name', 'invalid manifest identity', 'manifest too large',
@@ -21,6 +23,7 @@ SAFE_MIGRATION_ERRORS = frozenset({
     'ambiguous release identity', 'ambiguous untagged destination draft',
     'draft release requires manual review', 'invalid release body',
     'pending release requires manual review', 'destination repository disappeared', 'release changed',
+    'source availability changed',
 })
 
 
@@ -38,7 +41,7 @@ class _BoundedBuffer(io.BytesIO):
         return super().write(data)
 
 
-def migrate_release(src, dst, source_assets_url, target, release_id, source, tag, secret):
+def migrate_release(src, dst, source_assets_url, target, release_id, source, tag, secret, pre_write=None):
     """Rename an authenticated legacy manifest, or refuse ambiguous state."""
     if not secret:
         raise ValueError('missing secret')
@@ -52,7 +55,7 @@ def migrate_release(src, dst, source_assets_url, target, release_id, source, tag
         if len(matches) != 1 or matches[0].get('name') not in (LEGACY, NEW):
             raise ValueError('missing or conflicting manifest')
         asset = matches[0]
-        if any(a.get('name') in RESERVED for a in src.pages(source_assets_url)):
+        if source_assets_url is not None and any(a.get('name') in RESERVED for a in src.pages(source_assets_url)):
             raise ValueError('source reserved name')
         if type(asset.get('id')) is not int or asset['id'] <= 0 or not isinstance(asset.get('url'), str) or not asset['url']:
             raise ValueError('invalid manifest identity')
@@ -90,6 +93,8 @@ def migrate_release(src, dst, source_assets_url, target, release_id, source, tag
         raise ValueError('manifest changed')
     if asset['name'] == NEW:
         return 'unchanged'
+    if pre_write is not None:
+        pre_write()
     dst.request('PATCH', target + '/releases/assets/' + str(asset['id']), {'name': NEW})
     assets = list(dst.pages(url))
     renamed = [a for a in assets if a.get('name') in RESERVED]
@@ -104,6 +109,7 @@ def migrate_release(src, dst, source_assets_url, target, release_id, source, tag
 def scan_repository(source, name, target, src, dst, secret):
     """Scan every release; never infer ownership from an asset filename alone."""
     from urllib.parse import quote
+    from urllib.error import HTTPError
     from repo_mirror.sources import source_api_base, source_marker, get_existing, check_existing
 
     marker = source_marker(source, name)
@@ -112,7 +118,19 @@ def scan_repository(source, name, target, src, dst, secret):
         return {"renamed": 0, "unchanged": 0, "source_only": 0, "destination_only": 0, "failed": 0, "missing_repository": 1}
     check_existing(repo, marker)
     upstream = source_api_base(source) + "/repos/" + quote(source["owner"], safe="") + "/" + quote(name, safe="")
-    source_releases = list(src.pages(upstream + "/releases"))
+    unavailable = False
+    if (source.get('type') == 'github' and source.get('base_url') == 'https://github.com'
+            and source.get('repos') != 'all' and name in source.get('repos', [])
+            and (source.get('owner'), name) in UNAVAILABLE_SOURCES):
+        try:
+            src.request('GET', upstream)
+        except HTTPError as exc:
+            if exc.code != 404 or exc.url != upstream:
+                raise
+            exc.close()
+            unavailable = True
+            print(f"WARNING: {source['owner']}/{name}: source repository GET returned 404; source assets cannot be verified. User accepted this migration risk; availability may change.")
+    source_releases = [] if unavailable else list(src.pages(upstream + "/releases"))
     dest_releases = list(dst.pages(target + "/releases"))
 
     def index(releases):
@@ -130,14 +148,14 @@ def scan_repository(source, name, target, src, dst, secret):
     if any(r['draft'] and r['tag_name'].startswith('untagged-') for r in dest_releases):
         raise ValueError('ambiguous untagged destination draft')
     result = {"renamed": 0, "unchanged": 0, "source_only": 0, "destination_only": 0, "failed": 0, "missing_repository": 0}
-    for tag in destination_by_tag.keys() - upstream_by_tag.keys():
+    for tag in (() if unavailable else destination_by_tag.keys() - upstream_by_tag.keys()):
         result["destination_only"] += 1
         print(f"destination-only release: {tag!r}")
     result["source_only"] = len(upstream_by_tag.keys() - destination_by_tag.keys())
-    for tag in upstream_by_tag.keys() & destination_by_tag.keys():
-        a, b = upstream_by_tag[tag], destination_by_tag[tag]
+    for tag in (destination_by_tag.keys() if unavailable else upstream_by_tag.keys() & destination_by_tag.keys()):
+        a, b = upstream_by_tag.get(tag), destination_by_tag[tag]
         try:
-            if a["draft"] or b["draft"] or tag.startswith("untagged-"):
+            if (a is not None and a["draft"]) or b["draft"] or tag.startswith("untagged-"):
                 raise ValueError("draft release requires manual review")
             body = b.get("body")
             release_name = b.get("name")
@@ -147,7 +165,9 @@ def scan_repository(source, name, target, src, dst, secret):
                 raise ValueError("invalid release body")
             if body and "repo-mirror" in body.lower() and "pending" in body.lower():
                 raise ValueError("pending release requires manual review")
-            source_assets_url = upstream + "/releases/" + str(a["id"]) + "/assets"
+            source_assets_url = None
+            if a is not None:
+                source_assets_url = upstream + "/releases/" + str(a["id"]) + "/assets"
             assets_url = target + "/releases/" + str(b["id"]) + "/assets"
             assets = list(dst.pages(assets_url))
             reserved = [x for x in assets if x.get("name") in RESERVED]
@@ -159,19 +179,34 @@ def scan_repository(source, name, target, src, dst, secret):
                     raise ValueError('manifest changed')
                 result["unchanged"] += 1
                 continue
-            # Recheck the repository marker and both release snapshots just before
-            # entering the signed-asset validation and rename procedure.
-            current_repo = get_existing(dst, target)
-            if current_repo is None:
-                raise ValueError("destination repository disappeared")
-            check_existing(current_repo, marker)
             def snapshot(release):
                 if release is None:
                     return None
                 return tuple(release.get(k) for k in ("id", "tag_name", "draft", "name", "target_commitish", "published_at", "body"))
-            if snapshot(index(list(src.pages(upstream + "/releases"))).get(tag)) != snapshot(a) or snapshot(index(list(dst.pages(target + "/releases"))).get(tag)) != snapshot(b):
-                raise ValueError("release changed")
-            outcome = migrate_release(src, dst, source_assets_url, target, b["id"], marker, tag, secret)
+
+            def pre_write():
+                # A 404 does not prove deletion; this is an explicitly authorized
+                # exception only while the exact repository URL still returns 404.
+                if unavailable:
+                    try:
+                        src.request('GET', upstream)
+                    except HTTPError as exc:
+                        matches = exc.code == 404 and exc.url == upstream
+                        exc.close()
+                        if not matches:
+                            raise
+                    else:
+                        raise ValueError('source availability changed')
+                elif snapshot(index(list(src.pages(upstream + "/releases"))).get(tag)) != snapshot(a):
+                    raise ValueError("release changed")
+                current_repo = get_existing(dst, target)
+                if current_repo is None:
+                    raise ValueError("destination repository disappeared")
+                check_existing(current_repo, marker)
+                if snapshot(index(list(dst.pages(target + "/releases"))).get(tag)) != snapshot(b):
+                    raise ValueError("release changed")
+
+            outcome = migrate_release(src, dst, source_assets_url, target, b["id"], marker, tag, secret, pre_write=pre_write)
             result[outcome] += 1
         except Exception as exc:
             result["failed"] += 1
