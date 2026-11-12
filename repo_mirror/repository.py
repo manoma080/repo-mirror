@@ -835,13 +835,38 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         # tolerated when they are this mirror's own auxiliary
                         # cache assets; any other extra asset means the source
                         # asset set changed.
-                        extras = (
-                            set(old_by_name)
-                            - {a["name"] for a in assets}
-                            - {"TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging"}
-                        )
-                        if extras:
-                            raise _verify_fail("extra-destination-asset")
+                        extras = set(old_by_name) - {a["name"] for a in assets}
+                        cache_names = {
+                            "TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging",
+                            "REPO-MIRROR-MANIFEST.json", "REPO-MIRROR-MANIFEST.json.repo-mirror-staging",
+                        }
+                        secret = os.environ.get("MIRROR_TIMESTAMP_SECRET", "")
+                        for extra in extras:
+                            item = old_by_name[extra]
+                            if (extra not in cache_names or not secret or item.get("state") != "uploaded"
+                                    or type(item.get("size")) is not int or not 0 <= item["size"] <= 1024 * 1024):
+                                raise _verify_fail("extra-destination-asset")
+                            with tempfile.TemporaryFile() as f:
+                                dst.download(item["url"], f)
+                                if f.tell() != item["size"]:
+                                    raise _verify_fail("extra-destination-asset")
+                                f.seek(0)
+                                try:
+                                    document = json.load(f)
+                                    if not isinstance(document, dict):
+                                        raise ValueError()
+                                    signature = document.pop("signature", None)
+                                    if (document.get("owner") != "repo-mirror:timestamps:v1"
+                                            or document.get("source") != marker or document.get("tag") != tag
+                                            or not isinstance(document.get("assets"), dict)):
+                                        raise ValueError()
+                                    payload = json.dumps(document, sort_keys=True, ensure_ascii=True,
+                                                         separators=(",", ":")).encode()
+                                    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+                                    if not isinstance(signature, str) or not hmac.compare_digest(signature, expected):
+                                        raise ValueError()
+                                except (ValueError, TypeError, UnicodeError):
+                                    raise _verify_fail("extra-destination-asset") from None
                     for asset in assets:
                         previous = old_by_name.get(asset["name"])
                         if previous is None and allow_missing:
@@ -1001,13 +1026,21 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                     raise ReleaseRecoveryError("mismatch")
                 # A source asset with either reserved name always wins; never treat it as
                 # our metadata or attempt to manage the auxiliary names in that release.
-                cache_name = "TIMESTAMPS.txt"
-                stage_name = "TIMESTAMPS.txt.repo-mirror-staging"
+                legacy_name = "TIMESTAMPS.txt"
+                legacy_stage = legacy_name + ".repo-mirror-staging"
+                new_name = "REPO-MIRROR-MANIFEST.json"
+                new_stage = new_name + ".repo-mirror-staging"
+                # Continue an existing legacy transaction under its original names.
+                # Mixed generations are ambiguous and must not be modified.
+                legacy_present = legacy_name in by_name or legacy_stage in by_name
+                new_present = new_name in by_name or new_stage in by_name
+                cache_name, stage_name = (legacy_name, legacy_stage) if legacy_present else (new_name, new_stage)
                 secret = os.environ.get("MIRROR_TIMESTAMP_SECRET", "")
                 cache_enabled = (
                     bool(secret)
                     and not pending
-                    and not any(name in (cache_name, stage_name) for name in all_source_names)
+                    and not (legacy_present and new_present)
+                    and not ({legacy_name, legacy_stage, new_name, new_stage} & set(all_source_names))
                 )
                 cache_owner = {"owner": "repo-mirror:timestamps:v1", "source": marker, "tag": tag}
                 cached = {}

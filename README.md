@@ -153,7 +153,7 @@ A retry checks files that are already uploaded and copies missing ones. Each fil
 
 1. **Published SHA-256 digest** (a fingerprint of the file's bytes). Used when both sites publish a valid digest, they match, and the sizes match. Forgejo often has no digest.
 2. **Checksum file fallback.** If the source has exactly one `SHA256SUMS` or `SHA256SUMS.txt` (up to 1 MiB), its strictly formatted lines are used as digests. Bad lines, duplicate names, unsafe paths or several checksum files turn this off.
-3. **Timestamp and size cache (heuristic).** Used only for files with a usable ID, timestamp and size, and only if a verified `TIMESTAMPS.txt` exists. See below.
+3. **Timestamp and size cache (heuristic).** Used only for files with a usable ID, timestamp and size, and only if a verified `REPO-MIRROR-MANIFEST.json` (or legacy `TIMESTAMPS.txt`) exists. See below.
 4. **Byte comparison.** If the first three steps cannot decide, the file is downloaded and compared byte by byte.
 
 Missing or bad digests are never treated as proof of a match. Equal sizes alone do not prove equal contents.
@@ -162,8 +162,8 @@ Missing or bad digests are never treated as proof of a match. Equal sizes alone 
 
 - **Checksum files are a source claim, not proof.** A malicious source can publish bad files with matching hashes. Verify the source yourself if you do not trust it.
 - **The file-list fingerprint** (used to guard pending releases) only includes stable fields: name, size, asset ID, state, published digest and checksum-file content. It ignores volatile fields such as download counts, timestamps, download URLs, uploader, labels and content type. A content change that keeps all stable fields the same can slip past it. The byte check before replacing a file covers that gap for files already on the mirror.
-- **Timestamp and size cache (`TIMESTAMPS.txt`).** The mirror stores each file's ID, timestamp, size and SHA-256 in a signed file named `TIMESTAMPS.txt`. A file is skipped only if all identity fields match and the mirror's stored hash matches the copy on GitHub. This is a **heuristic**: a source can change a file without changing its timestamp or size, so changes can be missed.
-- If the source already has a `TIMESTAMPS.txt`, or the existing one was not made by this mirror, the cache is turned off for that release. Source files are never reused or deleted for this.
+- **Timestamp and size cache (`REPO-MIRROR-MANIFEST.json`).** The mirror stores each file's ID, timestamp, size and SHA-256 in a signed file named `REPO-MIRROR-MANIFEST.json`. Existing verified `TIMESTAMPS.txt` files continue to be used under their old name; they are not automatically renamed. A file is skipped only if all identity fields match and the mirror's stored hash matches the copy on GitHub. This is a **heuristic**: a source can change a file without changing its timestamp or size, so changes can be missed.
+- If the source has either manifest name or its `.repo-mirror-staging` name, or the existing manifest was not made by this mirror, the cache is turned off for that release. If both old and new names (including staging names) are present, caching is disabled. Source files are never reused or deleted for this.
 - Updates write the new cache file, check it, delete the old one, then rename. This is not one atomic step. If a rename is interrupted, the verified staging file is kept for the next run. A stale or conflicting staging file needs manual cleanup and is never removed automatically.
 
 ## Failures and limits
@@ -195,7 +195,11 @@ The mirror needs a long random secret to sign its markers and cache file.
 
 The mirror stops at startup, before any network or repository work, if the secret is missing or empty. Changing or losing it makes existing markers impossible to verify, and those releases then need manual review.
 
-Signed files that fail verification (old, tampered, or signed with a different key) are treated as unknown. They are not used and not deleted. To restore caching, check the unknown `TIMESTAMPS.txt` and any conflicting staging file by hand, delete them only if they are not source files, and run again. Keep the same secret so an interrupted replacement can be recovered.
+Signed files that fail verification (old, tampered, or signed with a different key) are treated as unknown. They are not used and not deleted. To restore caching, check the unknown manifest (`REPO-MIRROR-MANIFEST.json` or legacy `TIMESTAMPS.txt`) and any conflicting staging file by hand, delete them only if they are not source files, and run again. Keep the same secret so an interrupted replacement can be recovered.
+
+### Migrating old manifest names
+
+Use **Actions → Mirror repositories → Run workflow**, enable `migrate_manifests`, and optionally enter exact source URLs to limit the scope. The migration-only run scans historical releases and renames authenticated, unambiguous legacy manifests; it does not perform the regular mirror. It reports missing sources, unmatched releases, conflicts, and failures for manual review and exits unsuccessfully if scope remains unresolved. Normal and migration workflow runs share a concurrency group, but that does not lock out people or other API clients. GitHub does not provide an atomic conditional rename: avoid external changes to affected releases during migration. A failed or timed-out rename can have succeeded; rerun to verify rather than assuming no change. Sources that are unavailable cannot be safely checked for name collisions and remain unresolved.
 
 ## Run it locally
 

@@ -15,6 +15,11 @@ on:
         required: false
         type: boolean
         default: false
+      migrate_manifests:
+        description: 'Only migrate owned legacy manifests, including historical releases'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,7 +42,7 @@ jobs:
           persist-credentials: false
       - name: Add requested repositories to config.json
         id: commit
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.add_to_config && inputs.source_urls != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.add_to_config && !inputs.migrate_manifests && inputs.source_urls != '' }}
         env:
           REQUESTED_SOURCE_URLS: ${{ inputs.source_urls }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -88,7 +93,17 @@ jobs:
         with:
           ref: ${{ needs.test.outputs.tested-sha }}
           persist-credentials: false
+      - name: Migrate legacy manifests
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.migrate_manifests }}
+        env:
+          DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
+          MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}
+          MIRROR_APP_ID: ${{ secrets.MIRROR_APP_ID }}
+          MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
+        run: python -m repo_mirror.manifest_migration --config config.json
       - name: Mirror
+        if: ${{ !inputs.migrate_manifests }}
         env:
           DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
           MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}
@@ -97,7 +112,7 @@ jobs:
           MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
         run: python mirror.py --config config.json --failures failures.json
       - name: Save failure journal
-        if: ${{ always() }}
+        if: ${{ always() && !inputs.migrate_manifests }}
         env:
           MANAGEMENT_TOKEN: ${{ github.token }}
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
