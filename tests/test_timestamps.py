@@ -69,12 +69,100 @@ class TimestampTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
 
+    def test_bound_recovery_accepts_only_authenticated_manifest_extras(self):
+        from test_stable_manifest import SECRET, bound_body_with_digest
+
+        for name in ("TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging",
+                     "REPO-MIRROR-MANIFEST.json", "REPO-MIRROR-MANIFEST.json.repo-mirror-staging"):
+            for valid in (True, False):
+                with self.subTest(name=name, valid=valid), patch.dict("os.environ", {"MIRROR_TIMESTAMP_SECRET": SECRET}), patch_everywhere("mirror_git"):
+                    src, dst = TimestampSource(), TimestampDestination()
+                    dst.assets = {"changed": b"new", "new": b"n"}
+                    mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+                    manifest = dst.assets.pop("REPO-MIRROR-MANIFEST.json")
+                    # Recreate an interrupted BOUND transaction, then simulate an old digest.
+                    dst.fail = True
+                    dst.assets.pop("new")
+                    with self.assertRaises(RuntimeError):
+                        mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+                    dst.release["body"] = bound_body_with_digest(dst, "a" * 64)
+                    dst.fail = False
+                    dst.assets["new"] = b"n"
+                    dst.assets[name] = manifest if valid else b"foreign"
+                    before = dict(dst.assets)
+                    if valid:
+                        def request(method, url, data=None):
+                            if method == "PATCH" and "/releases/assets/" in url:
+                                dst.assets[data["name"]] = dst.assets.pop(name)
+                                return {}
+                            return Destination.request(dst, method, url, data)
+                        dst.request = request
+                        mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+                        self.assertEqual(dst.release["body"], "notes")
+                        if name.endswith(".repo-mirror-staging"):
+                            before[name.removesuffix(".repo-mirror-staging")] = before.pop(name)
+                    else:
+                        with self.assertRaises(mirror.ReleaseRecoveryError):
+                            mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+                        self.assertIn('[repo-mirror:pending:v3]', dst.release["body"])
+                    self.assertEqual(dst.assets, before)
+                    self.assertEqual(dst.deleted, [])
+
+    def test_source_reserved_names_are_mirrored_without_cache_management(self):
+        for name in ("TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging",
+                     "REPO-MIRROR-MANIFEST.json", "REPO-MIRROR-MANIFEST.json.repo-mirror-staging"):
+            with self.subTest(name=name):
+                class CollisionSource(TimestampSource):
+                    def pages(self, url):
+                        if url.endswith("/releases"):
+                            return super().pages(url)
+                        return [{"id": 1, "name": name, "size": 1, "updated_at": self.timestamp,
+                                 "browser_download_url": "https://github.com/new"}]
+
+                src, dst = CollisionSource(), TimestampDestination()
+                dst.assets = {name: b"n"}
+                with patch_everywhere("mirror_git"):
+                    mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+                self.assertEqual(dst.assets, {name: b"n"})
+                self.assertEqual(dst.deleted, [])
+
+    def test_new_cache_uses_manifest_json_name(self):
+        src, dst = TimestampSource(), TimestampDestination()
+        dst.assets.update(changed=b"new", new=b"n")
+        with patch_everywhere("mirror_git"):
+            mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+        self.assertIn("REPO-MIRROR-MANIFEST.json", dst.assets)
+        self.assertNotIn("TIMESTAMPS.txt", dst.assets)
+
+    def test_existing_legacy_manifest_remains_usable(self):
+        src, dst = TimestampSource(), TimestampDestination()
+        dst.assets.update(changed=b"new", new=b"n")
+        with patch_everywhere("mirror_git"):
+            mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+            dst.assets["TIMESTAMPS.txt"] = dst.assets.pop("REPO-MIRROR-MANIFEST.json")
+            src.downloads.clear()
+            mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+        self.assertIn("TIMESTAMPS.txt", dst.assets)
+        self.assertNotIn("REPO-MIRROR-MANIFEST.json", dst.assets)
+        self.assertNotIn("https://github.com/changed", src.downloads)
+
+    def test_mixed_manifest_generations_are_not_modified(self):
+        src, dst = TimestampSource(), TimestampDestination()
+        dst.assets.update(changed=b"new", new=b"n")
+        with patch_everywhere("mirror_git"):
+            mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+            dst.assets["TIMESTAMPS.txt"] = b"foreign"
+            snapshot = dict(dst.assets)
+            mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+        self.assertEqual(dst.assets, snapshot)
+        self.assertEqual(dst.deleted, [])
+
     def test_writes_owned_manifest_and_uses_verified_cache(self):
         src, dst = TimestampSource(), TimestampDestination()
         dst.assets["changed"] = b"new"
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-            data = json.loads(dst.assets["TIMESTAMPS.txt"])
+            data = json.loads(dst.assets["REPO-MIRROR-MANIFEST.json"])
             self.assertEqual(data["owner"], "repo-mirror:timestamps:v1")
             self.assertEqual(data["assets"]["changed"]["sha256"], hashlib.sha256(b"new").hexdigest())
             src.downloads.clear()
@@ -87,7 +175,7 @@ class TimestampTests(unittest.TestCase):
         with patch.dict("os.environ", {"MIRROR_TIMESTAMP_SECRET": ""}), patch_everywhere("mirror_git"):
             with self.assertRaisesRegex(mirror.ReleaseRecoveryError, "MIRROR_TIMESTAMP_SECRET"):
                 mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-        self.assertNotIn("TIMESTAMPS.txt", dst.assets)
+        self.assertNotIn("REPO-MIRROR-MANIFEST.json", dst.assets)
         self.assertEqual(src.downloads, [])
         self.assertEqual(dst.deleted, [])
 
@@ -96,13 +184,13 @@ class TimestampTests(unittest.TestCase):
         dst.assets.update(changed=b"new", new=b"n")
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-            data = json.loads(dst.assets["TIMESTAMPS.txt"])
+            data = json.loads(dst.assets["REPO-MIRROR-MANIFEST.json"])
             data["assets"]["changed"]["timestamp"] = "forged"
             forged = json.dumps(data).encode()
-            dst.assets["TIMESTAMPS.txt"] = forged
+            dst.assets["REPO-MIRROR-MANIFEST.json"] = forged
             src.downloads.clear()
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-        self.assertEqual(dst.assets["TIMESTAMPS.txt"], forged)
+        self.assertEqual(dst.assets["REPO-MIRROR-MANIFEST.json"], forged)
         self.assertIn("https://github.com/changed", src.downloads)
         self.assertEqual(dst.deleted, [])
 
@@ -113,7 +201,7 @@ class TimestampTests(unittest.TestCase):
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-        self.assertNotIn("TIMESTAMPS.txt", dst.assets)
+        self.assertNotIn("REPO-MIRROR-MANIFEST.json", dst.assets)
         self.assertEqual(src.downloads.count("https://github.com/changed"), 2)
 
     def test_destination_digest_change_invalidates_cache(self):
@@ -144,13 +232,13 @@ class TimestampTests(unittest.TestCase):
             if method == "DELETE" and "/releases/assets/" in url:
                 names = list(dst.assets)
                 name = names[int(url.rsplit("/", 1)[-1]) - 1]
-                self.assertEqual(name, "TIMESTAMPS.txt")
-                self.assertIn("TIMESTAMPS.txt.repo-mirror-staging", dst.assets)
+                self.assertEqual(name, "REPO-MIRROR-MANIFEST.json")
+                self.assertIn("REPO-MIRROR-MANIFEST.json.repo-mirror-staging", dst.assets)
                 events.append("delete")
                 del dst.assets[name]
                 return {}
             if method == "PATCH" and "/releases/assets/" in url:
-                name = "TIMESTAMPS.txt.repo-mirror-staging"
+                name = "REPO-MIRROR-MANIFEST.json.repo-mirror-staging"
                 dst.assets[data["name"]] = dst.assets.pop(name)
                 events.append("rename")
                 return {}
@@ -163,7 +251,7 @@ class TimestampTests(unittest.TestCase):
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
         self.assertEqual(events, ["delete", "rename"])
         self.assertEqual(
-            json.loads(dst.assets["TIMESTAMPS.txt"])["assets"]["changed"]["timestamp"], src.timestamp
+            json.loads(dst.assets["REPO-MIRROR-MANIFEST.json"])["assets"]["changed"]["timestamp"], src.timestamp
         )
 
     def test_interrupted_rename_recovers_verified_staging(self):
@@ -173,15 +261,15 @@ class TimestampTests(unittest.TestCase):
 
         def request(method, url, data=None):
             if method == "DELETE" and "/releases/assets/" in url:
-                self.assertIn("TIMESTAMPS.txt.repo-mirror-staging", dst.assets)
-                self.assertIn("TIMESTAMPS.txt", dst.assets)
-                del dst.assets["TIMESTAMPS.txt"]
+                self.assertIn("REPO-MIRROR-MANIFEST.json.repo-mirror-staging", dst.assets)
+                self.assertIn("REPO-MIRROR-MANIFEST.json", dst.assets)
+                del dst.assets["REPO-MIRROR-MANIFEST.json"]
                 return {}
             if method == "PATCH" and "/releases/assets/" in url:
                 if not interrupted[0]:
                     interrupted[0] = True
                     raise RuntimeError("interrupted rename")
-                dst.assets[data["name"]] = dst.assets.pop("TIMESTAMPS.txt.repo-mirror-staging")
+                dst.assets[data["name"]] = dst.assets.pop("REPO-MIRROR-MANIFEST.json.repo-mirror-staging")
                 return {}
             return Destination.request(dst, method, url, data)
 
@@ -191,10 +279,10 @@ class TimestampTests(unittest.TestCase):
             src.timestamp = "2026-01-01T00:00:00Z"
             with self.assertRaisesRegex(RuntimeError, "interrupted rename"):
                 mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-            self.assertIn("TIMESTAMPS.txt.repo-mirror-staging", dst.assets)
+            self.assertIn("REPO-MIRROR-MANIFEST.json.repo-mirror-staging", dst.assets)
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-        self.assertIn("TIMESTAMPS.txt", dst.assets)
-        self.assertNotIn("TIMESTAMPS.txt.repo-mirror-staging", dst.assets)
+        self.assertIn("REPO-MIRROR-MANIFEST.json", dst.assets)
+        self.assertNotIn("REPO-MIRROR-MANIFEST.json.repo-mirror-staging", dst.assets)
 
     def test_foreign_manifest_is_not_replaced(self):
         src, dst = TimestampSource(), TimestampDestination()
