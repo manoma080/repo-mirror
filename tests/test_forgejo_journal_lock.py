@@ -16,6 +16,14 @@ def _hold_lock(path, ready, release):
         release.wait(10)
 
 
+def _hold_destination(home, identity, ready, release):
+    with patch('pwd.getpwuid') as getpwuid:
+        getpwuid.return_value.pw_dir = home
+        with forgejo_sync.destination_locks(3300, 'Local', [identity]):
+            ready.put('entered')
+            release.wait(10)
+
+
 def _run_main(argv, ready):
     with patch.dict(os.environ, {'GITHUB_TOKEN': 'github'}), \
          patch.object(forgejo_sync, '_sync_requested', side_effect=lambda *args: ready.put('entered') or 0):
@@ -40,26 +48,87 @@ class JournalLockTests(unittest.TestCase):
         self.addCleanup(getpwuid.stop)
         getpwuid.start().return_value.pw_dir = home.name
 
-    def test_destination_lock_rejects_directory_symlink_and_hardlink(self):
+    def test_case_alias_waits_and_crash_releases_destination_lock(self):
+        with tempfile.TemporaryDirectory() as home:
+            ctx = multiprocessing.get_context('fork')
+            first_ready, second_ready = ctx.Queue(), ctx.Queue()
+            first_release, release = ctx.Event(), ctx.Event()
+            first = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', first_ready, first_release))
+            second = ctx.Process(target=_hold_destination, args=(home, 'MANOMA080/MIRROR-TEST', second_ready, release))
+            first.start()
+            try:
+                self.assertEqual(first_ready.get(timeout=5), 'entered')
+                second.start()
+                with self.assertRaises(queue.Empty):
+                    second_ready.get(timeout=0.3)
+                first.terminate()
+                first.join(5)
+                self.assertEqual(second_ready.get(timeout=5), 'entered')
+            finally:
+                release.set()
+                first.join(5)
+                if second.pid:
+                    second.join(5)
+                    if second.is_alive():
+                        second.terminate()
+                        second.join()
+
+    def test_replacing_lock_directory_does_not_split_destination_lock(self):
+        with tempfile.TemporaryDirectory() as home:
+            ctx = multiprocessing.get_context('fork')
+            first_ready, second_ready = ctx.Queue(), ctx.Queue()
+            release = ctx.Event()
+            first = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', first_ready, release))
+            second = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', second_ready, release))
+            first.start()
+            try:
+                self.assertEqual(first_ready.get(timeout=5), 'entered')
+                lockdir = os.path.join(home, '.repo-mirror-forgejo-locks')
+                if os.path.isdir(lockdir):
+                    os.rename(lockdir, lockdir + '.old')
+                    os.mkdir(lockdir, 0o700)
+                second.start()
+                with self.assertRaises(queue.Empty):
+                    second_ready.get(timeout=0.4)
+                release.set()
+                self.assertEqual(second_ready.get(timeout=5), 'entered')
+            finally:
+                release.set()
+                first.join(5)
+                if second.pid:
+                    second.join(5)
+                    if second.is_alive():
+                        second.terminate()
+                        second.join()
+
+    def test_destination_lock_ignores_untrusted_filesystem_namespace(self):
         with tempfile.TemporaryDirectory() as home, patch('pwd.getpwuid') as getpwuid:
             getpwuid.return_value.pw_dir = home
             lockdir = os.path.join(home, '.repo-mirror-forgejo-locks')
             os.symlink(home, lockdir)
-            with self.assertRaises(OSError):
-                with forgejo_sync.destination_locks(3300, 'local', ['manoma080/mirror-test']):
-                    pass
-            os.unlink(lockdir)
-            os.mkdir(lockdir, 0o700)
-            import hashlib
-            name = hashlib.sha256(b'http://127.0.0.1:3300/local/mirror-test').hexdigest()
-            other = os.path.join(home, 'other')
-            with open(other, 'w'):
-                pass
-            os.chmod(other, 0o600)
-            os.link(other, os.path.join(lockdir, name))
-            with self.assertRaises(ValueError):
-                with forgejo_sync.destination_locks(3300, 'LOCAL', ['manoma080/MIRROR-TEST']):
-                    pass
+            with forgejo_sync.destination_locks(3300, 'local', ['manoma080/mirror-test']):
+                self.assertTrue(os.path.islink(lockdir))
+
+    def test_forked_child_does_not_extend_parent_lock(self):
+        ctx = multiprocessing.get_context('fork')
+        release = ctx.Event()
+        with tempfile.TemporaryDirectory() as home:
+            with forgejo_sync.destination_locks(3300, 'local', ['manoma080/mirror-test']):
+                child = ctx.Process(target=release.wait, args=(10,))
+                child.start()
+            ready = ctx.Queue()
+            contender = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', ready, release))
+            contender.start()
+            try:
+                self.assertEqual(ready.get(timeout=3), 'entered')
+            finally:
+                release.set()
+                child.join(5)
+                contender.join(5)
+                for proc in (child, contender):
+                    if proc.is_alive():
+                        proc.terminate()
+                        proc.join()
 
     def test_same_destination_different_journals_serialize(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -100,6 +169,37 @@ class JournalLockTests(unittest.TestCase):
                         if second.is_alive():
                             second.terminate()
                             second.join()
+    def test_distinct_destinations_share_journal_directory_concurrently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            urls = ['https://github.com/manoma080/mirror-one', 'https://github.com/manoma080/mirror-two']
+            for name, contents in [('config', json.dumps(urls)), ('token', 'token'), ('secret', 'synthetic-recovery-fixture-value-32-bytes')]:
+                path = os.path.join(directory, name)
+                with open(path, 'w') as stream:
+                    stream.write(contents)
+                os.chmod(path, 0o600)
+            base = ['--config', os.path.join(directory, 'config'), '--token-file', os.path.join(directory, 'token'),
+                    '--timestamp-secret-file', os.path.join(directory, 'secret'), '--journal-dir', directory,
+                    '--owner', 'local', '--use-github-token']
+            ctx = multiprocessing.get_context('fork')
+            first_ready, second_ready, release = ctx.Queue(), ctx.Queue(), ctx.Event()
+            first = ctx.Process(target=_run_blocking_main, args=(base + ['--source', urls[0]], first_ready, release))
+            second = ctx.Process(target=_run_main, args=(base + ['--source', urls[1]], second_ready))
+            with tempfile.TemporaryDirectory() as lock_home, patch('pwd.getpwuid') as getpwuid:
+                getpwuid.return_value.pw_dir = lock_home
+                first.start()
+                try:
+                    self.assertEqual(first_ready.get(timeout=5), 'entered')
+                    second.start()
+                    self.assertEqual(second_ready.get(timeout=3), 'entered')
+                finally:
+                    release.set()
+                    first.join(5)
+                    if second.pid:
+                        second.join(5)
+                        if second.is_alive():
+                            second.terminate()
+                            second.join()
+
     def test_main_waits_for_existing_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             url = 'https://github.com/manoma080/mirror-test'

@@ -1,5 +1,7 @@
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -74,6 +76,32 @@ class ReleaseBodyV3Tests(unittest.TestCase):
             with self.assertRaisesRegex(mirror.ReleaseRecoveryError, "changed"):
                 mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
             self.assertEqual(dst.deleted, deleted_before)
+
+    def test_verification_diagnostic_omits_untrusted_release_tag(self):
+        secret = "release-tag-secret"
+        tag = "v1\n" + secret
+
+        class ChangingSource(Source):
+            changed = False
+
+            def pages(self, url):
+                result = super().pages(url)
+                if url.endswith("/releases"):
+                    result[0]["tag_name"] = tag
+                elif self.changed:
+                    result[0]["size"] = 4
+                return result
+
+        src, dst = ChangingSource(), Destination()
+        stderr = io.StringIO()
+        with patch_everywhere("mirror_git"), redirect_stderr(stderr):
+            with self.assertRaises(RuntimeError):
+                mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+            src.changed = True
+            with self.assertRaisesRegex(mirror.ReleaseRecoveryError, "changed"):
+                mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+        self.assertIn("verify-destination failed reason=extra-destination-asset", stderr.getvalue())
+        self.assertNotIn(secret, stderr.getvalue())
 
     def test_long_title_survives_interruption_and_restart(self):
         title = "PS5X360 " + "long release title " * 10

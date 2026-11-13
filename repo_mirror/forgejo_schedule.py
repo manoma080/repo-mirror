@@ -2,8 +2,11 @@
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
+import signal
+import time
 import stat
 import subprocess
 import sys
@@ -28,6 +31,9 @@ def main(argv=None):
     parser.add_argument('--owner', required=True)
     parser.add_argument('--organization', action='store_true')
     parser.add_argument('--port', type=int, default=3300)
+    parser.add_argument('--jobs', type=int, default=4, help='maximum concurrent syncs (default: 4)')
+    parser.add_argument('--repository-timeout', type=float, default=3600, metavar='SECONDS',
+                        help='maximum runtime per repository in seconds (default: 3600)')
     parser.add_argument('--lock', required=True)
     parser.add_argument('--helper', default=str(DEFAULT_HELPER))
     parser.add_argument('--helper-python', default=sys.executable)
@@ -42,8 +48,10 @@ def main(argv=None):
             any(not isinstance(s, str) or not SOURCE.fullmatch(s) or s.endswith('.git') for s in sources) or
             len({s.lower() for s in sources}) != len(sources)):
             raise ValueError('invalid source manifest')
-        if not re.fullmatch(r'[0-9]+', args.installation) or not 1 <= args.port <= 65535:
+        if not re.fullmatch(r'[0-9]+', args.installation) or not 1 <= args.port <= 65535 or not 1 <= args.jobs <= 64:
             raise ValueError('invalid installation or port')
+        if not math.isfinite(args.repository_timeout) or args.repository_timeout <= 0:
+            raise ValueError('invalid repository timeout')
         if bool(args.app_id) != bool(args.private_key_file):
             raise ValueError('incomplete app credentials')
         secret_fd = os.open(args.timestamp_secret_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
@@ -79,23 +87,67 @@ def main(argv=None):
                 snapshot = Path(directory) / 'sources.json'
                 snapshot.write_text(json.dumps(sources), encoding='utf-8')
                 failures = 0
-                for source in sources:
-                    command = [args.sync_python, '-m', 'repo_mirror.forgejo_sync', '--config', str(snapshot),
-                               '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port),
-                               '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
-                    if args.app_id:
-                        command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
-                    else:
-                        command += ['--use-github-token']
-                        command = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--'] + command
-                    if args.organization:
-                        command.append('--organization')
-                    command += ['--source', source]
-                    reason = 'helper or sync process failed; check helper configuration and credentials'
-                    try:
-                        with tempfile.TemporaryFile() as diagnostics:
-                            result = subprocess.run(command, cwd=ROOT, stdout=subprocess.DEVNULL,
-                                                    stderr=diagnostics, check=False, pass_fds=(lock.fileno(),))
+                pending = iter(enumerate(sources, 1))
+                active = {}
+                def terminate(signum, frame):
+                    raise KeyboardInterrupt
+                previous_term = signal.signal(signal.SIGTERM, terminate)
+                try:
+                    exhausted = False
+                    while active or not exhausted:
+                        while len(active) < args.jobs and not exhausted:
+                            try:
+                                index, source = next(pending)
+                            except StopIteration:
+                                exhausted = True
+                                break
+                            command = [args.sync_python, '-m', 'repo_mirror.forgejo_sync', '--config', str(snapshot),
+                                       '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port),
+                                       '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
+                            if args.app_id:
+                                command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
+                            else:
+                                command += ['--use-github-token']
+                                command = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--'] + command
+                            if args.organization:
+                                command.append('--organization')
+                            command += ['--source', source]
+                            diagnostics = tempfile.TemporaryFile()
+                            try:
+                                process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL,
+                                                           stderr=diagnostics, pass_fds=(lock.fileno(),), start_new_session=True)
+                            except OSError:
+                                diagnostics.close()
+                                failures += 1
+                                print(f'Repository {index}: FAILED: unable to start helper; check executable and permissions', flush=True)
+                            else:
+                                active[process] = [index, diagnostics, time.monotonic() + args.repository_timeout, None]
+                        for process, (index, diagnostics, deadline, kill_deadline) in list(active.items()):
+                            status = process.poll()
+                            now = time.monotonic()
+                            if kill_deadline is not None:
+                                if now < kill_deadline:
+                                    continue
+                                try:
+                                    os.killpg(process.pid, signal.SIGKILL)
+                                except ProcessLookupError:
+                                    pass
+                                process.wait()
+                                diagnostics.close()
+                                del active[process]
+                                failures += 1
+                                print(f'Repository {index}: FAILED: repository timed out', flush=True)
+                                continue
+                            if status is None and now >= deadline:
+                                try:
+                                    os.killpg(process.pid, signal.SIGTERM)
+                                except ProcessLookupError:
+                                    pass
+                                active[process][3] = now + 2
+                                continue
+                            if status is None:
+                                continue
+                            reason = 'helper or sync process failed; check helper configuration and credentials'
                             diagnostics.seek(0)
                             for line in diagnostics:
                                 prefix = b'FORGEJO_FAILURE: '
@@ -104,14 +156,39 @@ def main(argv=None):
                                     if candidate in SAFE_REASONS:
                                         reason = candidate
                                         break
-                        ok = result.returncode == 0
-                    except OSError:
-                        ok = False
-                        reason = 'unable to start helper; check executable and permissions'
-                    failures += not ok
-                    print(f'{source.rsplit("/", 1)[-1]}: {"OK" if ok else "FAILED: " + reason}', flush=True)
+                            diagnostics.close()
+                            del active[process]
+                            ok = status == 0
+                            failures += not ok
+                            print(f'Repository {index}: {"OK" if ok else "FAILED: " + reason}', flush=True)
+                        if active:
+                            time.sleep(0.05)
+                finally:
+                    signal.signal(signal.SIGTERM, previous_term)
+                    for process in active:
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    deadline = time.monotonic() + 2
+                    for process, (_, diagnostics, _, _) in active.items():
+                        try:
+                            process.wait(timeout=max(0, deadline - time.monotonic()))
+                        except subprocess.TimeoutExpired:
+                            pass
+                        finally:
+                            # The group may still contain grandchildren after its leader exits.
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            process.wait()
+                            diagnostics.close()
                 print(f'Batch: {len(sources) - failures} succeeded, {failures} failed', flush=True)
                 return 1 if failures else 0
+    except KeyboardInterrupt:
+        print('Batch interrupted; active processes stopped', file=sys.stderr)
+        return 130
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         print('Batch configuration or lock error', file=sys.stderr)
         return 2

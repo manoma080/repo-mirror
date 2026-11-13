@@ -142,6 +142,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "destination asset digest mismatch",
         "release asset uploads failed",
         "source starter asset skipped; release remains incomplete",
+        "Forgejo empty source body cannot be safely mirrored; inspect any pending release and reconcile manually before retrying",
         "GH_TOKEN and valid DESTINATION_OWNER are required",
         "config must be an object",
         "destination_account_type must be personal or organization",
@@ -217,7 +218,7 @@ def error_detail(exc):
         if type(status) is int and 100 <= status <= 599:
             return f"HTTP {status} (source asset GET)"
     release_errors = getattr(exc, "release_errors", None)
-    if type(exc) is RuntimeError and type(release_errors) is list and release_errors:
+    if isinstance(exc, RuntimeError) and type(release_errors) in (list, tuple) and release_errors:
         return f"{len(release_errors)} releases failed; first: {error_detail(release_errors[0])}"
     if len(exc.args) == 1 and type(exc.args[0]) is str and exc.args[0] in SAFE_ERROR_MESSAGES:
         return exc.args[0]

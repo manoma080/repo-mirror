@@ -11,6 +11,123 @@ SCRIPT = ROOT / 'repo_mirror' / 'forgejo_schedule.py'
 
 
 class ScheduleTest(unittest.TestCase):
+    def test_four_children_overlap_and_pool_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'key'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps([f'https://github.com/manoma080/mirror-{i}' for i in range(8)]))
+            helper = tmp / 'helper.py'
+            helper.write_text('''import fcntl, os, pathlib, sys, time
+p = pathlib.Path(os.environ["STATE"])
+with open(p / "guard", "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    name = sys.argv[-1].split("-")[-1]
+    (p / (name + ".started")).touch()
+    (p / (name + ".active")).touch()
+    if len(list(p.glob("*.active"))) > 4: (p / "overlimit").touch()
+deadline = time.monotonic() + 5
+while len(list(p.glob("*.started"))) < 4 and time.monotonic() < deadline:
+    time.sleep(.01)
+if len(list(p.glob("*.started"))) < 4: sys.exit(3)
+time.sleep(.1)
+with open(p / "guard", "w") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    (p / (name + ".active")).unlink()
+''')
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--jobs', '4'], env={**os.environ, 'STATE': str(tmp)}, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(len(list(tmp.glob('*.started'))), 8)
+            self.assertFalse((tmp / 'overlimit').exists())
+
+    def test_timeout_kills_process_group_and_continues(self):
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'key'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']))
+            helper = tmp / 'helper.py'
+            helper.write_text('''import os, pathlib, signal, subprocess, sys, time
+if sys.argv[-1].endswith('-a'):
+    p = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])
+    pathlib.Path(os.environ['PIDFILE']).write_text(str(p.pid))
+    print('PRIVATE_SECRET', file=sys.stderr, flush=True)
+    time.sleep(60)
+else:
+    time.sleep(.15)
+''')
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--jobs', '1', '--repository-timeout', '.5'], env={**os.environ, 'PIDFILE': str(tmp / 'pid')}, capture_output=True, text=True, timeout=8)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('1 succeeded, 1 failed', result.stdout)
+            self.assertIn('timed out', result.stdout)
+            self.assertNotIn('PRIVATE_SECRET', result.stdout + result.stderr)
+            pid = int((tmp / 'pid').read_text())
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    state = Path(f'/proc/{pid}/stat').read_text().split()[2]
+                except FileNotFoundError:
+                    break
+                if state == 'Z':
+                    break
+                time.sleep(.02)
+            else:
+                self.fail('grandchild is still running')
+
+    def test_sigterm_stops_running_children_and_releases_lock(self):
+        import fcntl
+        import signal
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'key'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            helper = tmp / 'helper.py'
+            helper.write_text('import os,pathlib,subprocess,sys,time\np = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"])\ntime.sleep(.2)\npathlib.Path(os.environ["MARK"]).write_text(str(os.getpid())+" "+str(p.pid))\ntime.sleep(60)\n')
+            lock = tmp / 'lock'
+            child = subprocess.Popen([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--helper', str(helper)], env={**os.environ, 'MARK': str(tmp / 'mark')}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 10
+                while not (tmp / 'mark').exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue((tmp / 'mark').exists())
+                pid, grandchild = map(int, (tmp / 'mark').read_text().split())
+                child.send_signal(signal.SIGTERM)
+                child.communicate(timeout=10)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    try:
+                        state = Path(f'/proc/{grandchild}/stat').read_text().split()[2]
+                    except FileNotFoundError:
+                        break
+                    if state == 'Z':
+                        break
+                    time.sleep(.02)
+                else:
+                    self.fail('grandchild survived cancellation')
+                with lock.open('r+') as held:
+                    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate()
+
     def test_short_secret_is_rejected_before_child(self):
         from unittest.mock import patch
         from repo_mirror import forgejo_schedule
@@ -25,7 +142,7 @@ class ScheduleTest(unittest.TestCase):
             journals.mkdir(mode=0o700)
             args = ['run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice',
                     '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
-            with patch('repo_mirror.forgejo_schedule.subprocess.run') as run:
+            with patch('repo_mirror.forgejo_schedule.subprocess.Popen') as run:
                 self.assertEqual(forgejo_schedule.main(args), 2)
                 run.assert_not_called()
 
@@ -43,7 +160,7 @@ class ScheduleTest(unittest.TestCase):
             journals.mkdir(mode=0o700)
             args = ['run', '--manifest', str(manifest), '--token-file', 'x', '--owner', 'alice',
                     '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
-            with patch('repo_mirror.forgejo_schedule.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            with patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=lambda *a, **kw: __import__('unittest.mock', fromlist=['Mock']).Mock(poll=lambda: 0)) as run:
                 self.assertEqual(forgejo_schedule.main(args), 0)
                 self.assertEqual(forgejo_schedule.main(args), 0)
             self.assertEqual(run.call_count, 4)
@@ -71,7 +188,7 @@ class ScheduleTest(unittest.TestCase):
             os.link(secret, hardlink)
             args = ['run', '--manifest', str(manifest), '--token-file', str(hardlink), '--owner', 'alice',
                     '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
-            with patch('repo_mirror.forgejo_schedule.subprocess.run') as run:
+            with patch('repo_mirror.forgejo_schedule.subprocess.Popen') as run:
                 self.assertEqual(forgejo_schedule.main(args), 2)  # hardlink to credential
                 args[args.index('--token-file') + 1] = 'unused'
                 secret.chmod(0o644)
@@ -106,7 +223,7 @@ class ScheduleTest(unittest.TestCase):
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
-            with patch('repo_mirror.forgejo_schedule.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            with patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=lambda *a, **kw: __import__('unittest.mock', fromlist=['Mock']).Mock(poll=lambda: 0)) as run:
                 result = forgejo_schedule.main(['run', '--manifest', str(manifest), '--token-file', 'x',
                     '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--app-id', '123', '--private-key-file', '/key'])
             self.assertEqual(result, 0)
@@ -132,7 +249,7 @@ class ScheduleTest(unittest.TestCase):
             helper.write_text('import os,sys\nwith open(os.environ["CALLS"], "a") as f: f.write(sys.argv[-1]+"\\n")\nprint("SECRET_FROM_CHILD")\n')
             result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', str(tmp / 'token'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--helper-python', sys.executable], env={**os.environ, 'CALLS': str(calls)}, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(calls.read_text().splitlines(), sources)
+            self.assertCountEqual(calls.read_text().splitlines(), sources)
             self.assertNotIn('SECRET_FROM_CHILD', result.stdout + result.stderr)
 
     def test_rejects_invalid_manifest_before_helper(self):
