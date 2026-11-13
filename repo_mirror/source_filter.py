@@ -11,16 +11,17 @@ def entry_urls(source, name):
     """Return the set of URLs that select one planned repository."""
     url = f"{source['base_url'].rstrip('/')}/{source['owner']}/{name}"
     urls = {url}
-    if source.get("type") == "github" and source["base_url"].rstrip("/") == "https://api.github.com":
+    if source.get("type") == "github" and source["base_url"].rstrip("/").lower() == "https://api.github.com":
         urls.add(f"https://github.com/{source['owner']}/{name}")
     return urls
 
 
-def filter_plan(plan, source_urls):
+def filter_plan(plan, source_urls, *, case_insensitive=False):
     """Return selected (source_index, source, name) entries in plan order.
 
     ``source_urls`` is a comma-separated string; None or whitespace selects all.
-    URLs must match the configured base URL, owner and discovered name exactly.
+    URLs must match the configured base URL, owner and discovered name exactly,
+    unless case_insensitive is enabled for workflow input matching.
     Errors deliberately do not echo input, which may contain credentials.
     """
     plan = list(plan)
@@ -49,6 +50,8 @@ def filter_plan(plan, source_urls):
             valid = False
         if not valid:
             raise ValueError("invalid source repository URL")
+        if case_insensitive:
+            url = url.lower()
         if url in requested:
             raise ValueError("duplicate source repository URL")
         requested.add(url)
@@ -57,6 +60,8 @@ def filter_plan(plan, source_urls):
     for entry in plan:
         _, source, name = entry
         urls = entry_urls(source, name)
+        if case_insensitive:
+            urls = {url.lower() for url in urls}
         if len(urls & requested) > 1:
             raise ValueError("duplicate source repository URL")
         for candidate in urls & requested:

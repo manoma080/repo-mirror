@@ -10,7 +10,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote
 
-from repo_mirror.adhoc import one_time_sources
+from repo_mirror.adhoc import add_to_config, one_time_sources
 from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
 from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
@@ -76,6 +76,13 @@ def main(argv=None):
     sources = config.get("sources")
     if not isinstance(sources, list):
         raise ValueError("sources must be a list")
+    selected_urls = os.environ.get("MIRROR_SOURCE_URLS")
+    custom = os.environ.get("MIRROR_DESTINATION_NAME", "")
+    visibility = os.environ.get("MIRROR_VISIBILITY") or "unchanged"
+    if selected_urls and selected_urls.strip():
+        add_to_config(config, selected_urls, custom, None if visibility == "unchanged" else visibility)
+    elif custom or visibility not in ("private", "unchanged"):
+        raise ValueError("destination settings require source URLs")
     for source in sources:
         validate_source(source)
     github_src, other_src, dst = SourceAPI(token), API(), API(token)
@@ -99,6 +106,7 @@ def main(argv=None):
             discovery_failures += 1
             if source["repos"] == "all":
                 uncertain_prefixes.append(source.get("prefix", "mirror-" + source["owner"] + "-").lower())
+                uncertain_names.update(destination_name(source, name).lower() for name in source.get("destinations", {}))
             else:
                 uncertain_names.update(destination_name(source, name).lower() for name in source["repos"])
             print(
@@ -122,7 +130,7 @@ def main(argv=None):
     if selected_urls and selected_urls.strip() and discovery_failures:
         raise RuntimeError("filtered run requires successful discovery of every source")
     # URLs not in config.json become one-time sources: mirrored now, never saved.
-    for source in one_time_sources(selected_urls, plan):
+    for source in one_time_sources(selected_urls, plan, sources):
         sources.append(source)
         name = source["repos"][0]
         target = destination_name(source, name).lower()
@@ -130,7 +138,7 @@ def main(argv=None):
             raise ValueError("duplicate destination repository")
         seen.add(target)
         plan.append((len(sources), source, name))
-    plan = filter_plan(plan, selected_urls)
+    plan = filter_plan(plan, selected_urls, case_insensitive=True)
     failures = []
     ready = []
     for repo_index, (source_index, source, name) in enumerate(plan, 1):
