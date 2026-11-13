@@ -58,7 +58,7 @@ class FailureJournalTest(unittest.TestCase):
 
             def pages(self, url):
                 if url.endswith("/releases"):
-                    return [{"id": 1, "tag_name": "v1", "name": "one"}]
+                    return [{"id": 1, "tag_name": "v1", "name": "one", "body": ""}]
                 return [{"name": "file", "size": 3, "browser_download_url": "https://github.com/a"}]
 
             def download(self, url, output):

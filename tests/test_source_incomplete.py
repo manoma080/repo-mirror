@@ -27,7 +27,7 @@ class SourceIncompleteTests(unittest.TestCase):
 
             def pages(self, url):
                 if url.endswith("/releases"):
-                    return [{"id": 1, "tag_name": "v1"}]
+                    return [{"id": 1, "tag_name": "v1", "body": ""}]
                 return [
                     {
                         "name": "SHA256SUMS",

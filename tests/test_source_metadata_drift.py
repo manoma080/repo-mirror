@@ -121,7 +121,7 @@ class SourceMetadataDriftTests(unittest.TestCase):
                 src.release.pop(field, None)
             dst = GitHubShapedDestination('team/project', 'token', client=api)
             mirror_releases(SOURCE, 'repo', 'team', src, dst, UP, dst.target, 'marker', initializing=False)
-            self.assertIsNone(api.release['body'])
+            self.assertEqual(api.release['body'], '')
 
     def test_malformed_authoritative_fields_fail_before_writes(self):
         cases = [('id', True), ('tag_name', []), ('draft', None), ('prerelease', 1),

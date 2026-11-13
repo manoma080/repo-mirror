@@ -14,7 +14,7 @@ SOURCE = {"type": "github", "base_url": "https://github.com", "owner": "alice"}
 
 class Source:
     def __init__(self):
-        self.releases = [{"id": n + 1, "tag_name": str(n), "name": "current"} for n in range(12)]
+        self.releases = [{"id": n + 1, "tag_name": str(n), "name": "current", "body": ""} for n in range(12)]
 
     def request(self, *args):
         if args[1].endswith("/releases/latest"):

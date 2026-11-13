@@ -34,7 +34,7 @@ class NewBehaviorTests(unittest.TestCase):
             def pages(self, url):
                 if url.endswith("/assets"):
                     raise AssertionError("Forgejo ignores asset pagination")
-                return [{"id": 1, "tag_name": "v1"}]
+                return [{"id": 1, "tag_name": "v1", "body": ""}]
 
         class Dst:
             def request(self, method, url, *args):

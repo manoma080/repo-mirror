@@ -127,7 +127,7 @@ class ReleasePolicyTests(unittest.TestCase):
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
-                return [{"id": n + 1, "tag_name": str(n)} for n in range(12)] if url.endswith("/releases") else []
+                return [{"id": n + 1, "tag_name": str(n), "body": ""} for n in range(12)] if url.endswith("/releases") else []
 
         class Destination:
             def __init__(self):
