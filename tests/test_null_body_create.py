@@ -32,6 +32,7 @@ class NullBodyCreateTests(unittest.TestCase):
             def __init__(self):
                 self.payload = None
                 self.patches = []
+                self.release = {"id": 2, "tag_name": "v1", "draft": False}
 
             def request(self, method, url, data=None):
                 if url.endswith("/repos/dest/mirror-alice-demo"):
@@ -42,7 +43,11 @@ class NullBodyCreateTests(unittest.TestCase):
                     self.payload = data
                     return {"id": 2}
                 if method == "PATCH" and url.endswith("/releases/2"):
+                    assert data is not None
                     self.patches.append(data)
+                    self.release.update(data)
+                if method == "GET" and url.endswith("/releases/2"):
+                    return self.release.copy()
                 return {}
 
             def pages(self, url):
@@ -52,4 +57,4 @@ class NullBodyCreateTests(unittest.TestCase):
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(source, "demo", "dest", Src(), dst, "token")
         self.assertIn("WAITING_SOURCE", dst.payload["body"])
-        self.assertIsNone(dst.patches[-1]["body"])
+        self.assertEqual(dst.patches[-1]["body"], "")

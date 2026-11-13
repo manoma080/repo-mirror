@@ -47,6 +47,11 @@ class Destination:
             if tag not in self.releases:
                 raise HTTPError(url, 404, "", {}, io.BytesIO())
             return self.releases[tag].copy()
+        if method == "GET" and "/releases/" in url:
+            for release in self.releases.values():
+                if url.endswith("/" + str(release["id"])):
+                    return release.copy()
+            raise HTTPError(url, 404, "", {}, io.BytesIO())
         if method == "POST" and url.endswith("/releases"):
             self.posts.append(data.copy())
             release = dict(data, id=len(self.releases) + 1)

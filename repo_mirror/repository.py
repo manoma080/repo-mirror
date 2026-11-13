@@ -1743,7 +1743,11 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     for key in metadata_keys
                 ):
                     raise ValueError("source release changed during sync")
+                # GitHub ignores a null body in PATCH; explicitly clear the
+                # recovery marker. Forgejo's adapter maps empty to one space.
                 final_body = release.get("body")
+                if final_body is None:
+                    final_body = ""
 
                 if release.get("draft") is True:
                     final_body = logical_release_body(final_body) + "\n" + IDENTITY_SENTINEL + draft_identity_signature(
@@ -1767,6 +1771,19 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     dst.publish_authenticated_draft(existing["id"], old_tag, final_fields)
                 else:
                     dst.request("PATCH", target + "/releases/" + str(existing["id"]), final_fields)
+                # GitHub may accept a clearing PATCH without persisting it. Verify
+                # the exact published release before reporting success or clearing
+                # the failure journal; drafts retain a signed identity marker.
+                if (not getattr(dst, "supports_target_commitish", False)
+                        and source_body is None and release.get("draft") is not True):
+                    verified_release = dst.request("GET", target + "/releases/" + str(existing["id"]))
+                    if (not isinstance(verified_release, dict)
+                            or type(verified_release.get("id")) is not int
+                            or verified_release["id"] != existing["id"]
+                            or verified_release.get("tag_name") != tag
+                            or verified_release.get("draft") is not False
+                            or verified_release.get("body") != ""):
+                        raise ReleaseRecoveryError("mismatch")
                 if latest and tag == latest["tag_name"]:
                     latest_id = existing["id"]
                     latest_read_only = False

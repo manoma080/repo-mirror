@@ -164,7 +164,7 @@ class EngineTests(unittest.TestCase):
             def pages(self, url):
                 self.visited.append(url)
                 if url.endswith("/releases"):
-                    return [{"id": 4, "tag_name": "v1", "assets": []}]
+                    return [{"id": 4, "tag_name": "v1", "body": "", "assets": []}]
                 if url.endswith("/releases/4/assets"):
                     return [{"name": "file", "size": 1, "browser_download_url": "https://src.example/file"}]
                 if url.endswith("/releases/9/assets") and self.uploaded:
