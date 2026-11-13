@@ -1,15 +1,26 @@
 """Explicit, synchronous GitHub mirror to local Forgejo runner."""
 import argparse
+import fcntl
 import json
+from contextlib import contextmanager
 import os
+import pwd
 import re
 import stat
 import sys
 import urllib.error
 import http.client
+import hashlib
 
 from repo_mirror.forgejo_git import APIError, ForgejoDestination, LocalForgejoAPI, sync_refs, snapshot_refs
-from repo_mirror.forgejo_releases import ForgejoReleases, GitHubReleases, SyncConflict, sync_releases
+from repo_mirror.forgejo_releases import SyncConflict
+from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
+from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
+from repo_mirror.github_api import SourceAPI
+from repo_mirror.journal import FailureJournal
+from repo_mirror.repository import (mirror_releases, validate_source_release_listing,
+                                    fetch_source_latest, validate_source_latest)
+from repo_mirror.sources import source_marker
 from repo_mirror.github_api import AppTokenProvider
 
 CONFLICT_REASONS = frozenset({
@@ -23,6 +34,7 @@ CONFLICT_REASONS = frozenset({
     'release verification failed', 'source asset download failed',
     'destination asset download failed', 'response exceeds size limit',
     'invalid release listing', 'release pagination limit exceeded', 'invalid asset listing',
+    'Forgejo latest release cannot be selected', 'unsupported latest operation',
     'unsafe Forgejo asset URL', 'asset upload failed; reconcile destination before retry',
 })
 GIT_REASONS = frozenset({
@@ -34,6 +46,7 @@ GIT_REASONS = frozenset({
     'source default branch changed during sync', 'source refs changed during sync',
     'Forgejo refs changed during sync', 'Forgejo ref readback did not match source snapshot',
     'Forgejo default branch readback did not match',
+    'Forgejo repository identity or initialization state changed',
 })
 CONFIG_REASONS = frozenset({
     'invalid source URL', 'config must be a JSON array of source URLs',
@@ -82,18 +95,94 @@ def parse_source(value):
     return '/'.join(match.groups())
 
 
-def read_private_key(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+def read_secure_file(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError('private key file must be owner-only and owned by current user')
         with os.fdopen(fd, encoding='utf-8') as stream:
             fd = -1
-            return stream.read()
+            return stream.read(), (info.st_dev, info.st_ino)
     finally:
         if fd != -1:
             os.close(fd)
+
+
+def read_private_key(path):
+    return read_secure_file(path)[0]
+
+
+@contextmanager
+def journal_lock(path):
+    # Lock the directory inode itself: no replaceable lock file, symlink or
+    # credential hard-link can split the lock or cause a credential write.
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError('invalid journal directory')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        # Anchor journal operations to the locked inode even if its path moves.
+        yield f'/proc/self/fd/{fd}'
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def destination_locks(port, owner, requested):
+    """Serialize cooperating local runners; external Forgejo clients do not lock.
+
+    Lock the account home first so replacing the private lock directory cannot
+    split cooperating runners. This deliberately serializes all local syncs for
+    the account, including those targeting different repositories.
+    """
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    directory_fd = None
+    files = []
+    try:
+        info = os.fstat(home_fd)
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise ValueError('invalid lock home')
+        fcntl.flock(home_fd, fcntl.LOCK_EX)
+        current = os.stat(home, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError('lock home replaced')
+        dirname = '.repo-mirror-forgejo-locks'
+        try:
+            os.mkdir(dirname, 0o700, dir_fd=home_fd)
+        except FileExistsError:
+            pass
+        directory_fd = os.open(dirname, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=home_fd)
+        directory_info = os.fstat(directory_fd)
+        if directory_info.st_uid != os.getuid() or directory_info.st_mode & 0o077:
+            raise ValueError('invalid destination lock directory')
+        names = sorted({hashlib.sha256(
+            f'http://127.0.0.1:{port}/{owner.lower()}/{identity.split("/")[1].lower()}'.encode()
+        ).hexdigest() for identity in requested})
+        for name in names:
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                         0o600, dir_fd=directory_fd)
+            files.append(fd)
+            lock_info = os.fstat(fd)
+            if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid()
+                    or lock_info.st_mode & 0o077 or lock_info.st_nlink != 1):
+                raise ValueError('invalid destination lock file')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino, current.st_nlink) != (lock_info.st_dev, lock_info.st_ino, 1):
+                raise ValueError('destination lock file replaced')
+        current = os.stat(dirname, dir_fd=home_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (directory_info.st_dev, directory_info.st_ino):
+            raise ValueError('destination lock directory replaced')
+        yield
+    finally:
+        for fd in reversed(files):
+            os.close(fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+        os.close(home_fd)
 
 
 def main(argv=None):
@@ -101,6 +190,8 @@ def main(argv=None):
     parser.add_argument('--config', required=True, help='JSON array of permitted GitHub mirror URLs')
     parser.add_argument('--source', action='append', required=True, help='exact URL from config; repeat for each source')
     parser.add_argument('--token-file', required=True, help='owner-only Forgejo token file')
+    parser.add_argument('--timestamp-secret-file', required=True, help='stable owner-only local signing secret file')
+    parser.add_argument('--journal-dir', required=True, help='persistent owner-only journal directory')
     parser.add_argument('--owner', required=True, help='local Forgejo account')
     parser.add_argument('--organization', action='store_true')
     parser.add_argument('--port', type=int, default=3300)
@@ -121,8 +212,23 @@ def main(argv=None):
             raise ValueError('duplicate requested source')
         if any(s not in configured for s in args.source):
             raise ValueError('requested source not exactly configured')
+        secret, secret_id = read_secure_file(args.timestamp_secret_file)
+        secret = secret.strip()
+        if not secret or any(c in secret for c in ('\n', '\r', '\x00')):
+            raise ValueError('invalid signing secret')
+        if len(secret.encode('utf-8')) < 32:
+            raise ValueError('recovery secret too short')
+        local_token, local_id = read_secure_file(args.token_file)
+        local_token = local_token.strip()
+        if local_id == secret_id:
+            raise ValueError('recovery secret must be separate')
+        if not local_token or '\n' in local_token or '\r' in local_token:
+            raise ValueError('invalid Forgejo token')
         if args.app_id and args.private_key_file and not args.use_github_token:
-            token = AppTokenProvider(args.app_id, read_private_key(args.private_key_file), 'manoma080')
+            key, key_id = read_secure_file(args.private_key_file)
+            if key_id == secret_id:
+                raise ValueError('recovery secret must be separate')
+            token = AppTokenProvider(args.app_id, key, 'manoma080')
         elif args.use_github_token and not args.app_id and not args.private_key_file:
             token = os.environ.get('GITHUB_TOKEN')
             if not token or '\n' in token or '\r' in token:
@@ -131,25 +237,78 @@ def main(argv=None):
             raise ValueError('invalid source authentication configuration')
         if not 1 <= args.port <= 65535:
             raise ValueError('invalid port')
+        info = os.stat(args.journal_dir, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError('invalid journal directory')
         api = LocalForgejoAPI(f'http://127.0.0.1:{args.port}', args.token_file)
-        local_token = api.token()
+        # Pin the checked credential; re-opening its path could race with replacement.
+        api.token = lambda: local_token
         dest = ForgejoDestination(api, args.owner, organization=args.organization)
     except (OSError, ValueError, TypeError) as exc:
         print(f'FORGEJO_FAILURE: {safe_reason(exc, configuration=True)}', file=sys.stderr)
         return 2
+    try:
+        # This is separate from the scheduler's batch lock. Direct runs may
+        # run between scheduled children, but never concurrently with one.
+        with destination_locks(args.port, args.owner, requested):
+            with journal_lock(args.journal_dir) as journal_dir:
+                return _sync_requested(args, requested, dest, token, local_token, secret, journal_dir)
+    except (OSError, ValueError) as exc:
+        print(f'FORGEJO_FAILURE: {safe_reason(exc, configuration=True)}', file=sys.stderr)
+        return 2
+
+
+def _sync_requested(args, requested, dest, token, local_token, secret, journal_dir):
     failures = []
     for identity in requested:
         name = identity.split('/')[1]
         try:
-            count = sync_refs(dest, name, identity, source_token=token)
-            before = snapshot_refs(dest, name, identity, source_token=token)
-            sync_releases(GitHubReleases(identity, token), ForgejoReleases(f'{args.owner}/{name}', local_token, args.port))
-            after = snapshot_refs(dest, name, identity, source_token=token)
+            journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{identity.lower()}'.encode()).hexdigest()
+            journal = FailureJournal(os.path.join(journal_dir, journal_id + '.json'))
+            src = ForgejoSourceAdapter(identity, token, api=SourceAPI(token))
+            upstream = f'https://api.github.com/repos/{identity}'
+            source_releases = src.pages(upstream + '/releases')
+            validate_source_release_listing(source_releases)
+            validate_source_latest(fetch_source_latest(src, upstream), source_releases)
+            # This preflight cannot prevent the source changing immediately
+            # afterwards; mirror_releases fetches and checks it again.
+            initializing = dest.begin_initialization(name, identity)
+            expected = dest.run_pin
+            def guard():
+                if expected is not None:
+                    dest.revalidate(name, identity, expected)
+            guard()
+            sync_refs(dest, name, identity, source_token=token, expected=expected)
+            guard()
+            before = snapshot_refs(dest, name, identity, source_token=token, expected=expected)
+            guard()
+            source = {'type': 'github', 'base_url': 'https://github.com', 'owner': identity.split('/')[0]}
+            adapter = ForgejoDestinationAdapter(f'{args.owner}/{name}', local_token, args.port, guard=guard)
+            previous_secret = os.environ.get('MIRROR_TIMESTAMP_SECRET')
+            os.environ['MIRROR_TIMESTAMP_SECRET'] = secret
+            def validate_snapshot(releases, latest):
+                validate_source_release_listing(releases)
+                validate_source_latest(latest, releases)
+
+            try:
+                mirror_releases(source, name, args.owner, src, adapter, upstream, adapter.target,
+                                source_marker(source, name), initializing=initializing, journal=journal,
+                                validate_snapshot=validate_snapshot)
+            finally:
+                if previous_secret is None:
+                    os.environ.pop('MIRROR_TIMESTAMP_SECRET', None)
+                else:
+                    os.environ['MIRROR_TIMESTAMP_SECRET'] = previous_secret
+            guard()
+            after = snapshot_refs(dest, name, identity, source_token=token, expected=expected)
+            guard()
             if after[0] != before[0] or after[1] != before[1]:
                 raise RuntimeError('source refs changed during sync')
             if after[2] != before[2]:
                 raise RuntimeError('Forgejo refs changed during sync')
-            print(f'{identity}: OK ({count} refs updated)', flush=True)
+            if initializing:
+                dest.complete_initialization(name, identity, expected=expected)
+            print(f'{identity}: OK (Git refs synchronized)', flush=True)
         except Exception as exc:
             failures.append(identity)
             print(f'{identity}: FAILED', file=sys.stderr, flush=True)

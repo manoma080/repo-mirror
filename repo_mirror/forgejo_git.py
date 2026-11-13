@@ -1,6 +1,8 @@
 """Provision private local Forgejo mirrors and copy Git branches and tags safely."""
 
 import http.client
+import hashlib
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -9,6 +11,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from repo_mirror.git_sync import synchronize_snapshots
+from repo_mirror.snapshot_push import _default_branch, _refs
 
 
 class APIError(RuntimeError):
@@ -104,6 +109,7 @@ class ForgejoDestination:
         self.api = api
         self.owner = _name(owner)
         self.organization = organization
+        self.run_pin = None
 
     def ensure_repository(self, name, source):
         name = _name(name)
@@ -116,34 +122,90 @@ class ForgejoDestination:
             if exc.status != 404:
                 raise
             endpoint = f"/api/v1/orgs/{self.owner}/repos" if self.organization else "/api/v1/user/repos"
-            self.api.request(
+            created = self.api.request(
                 "POST",
                 endpoint,
                 {
                     "name": name,
                     "private": True,
                     "auto_init": False,
-                    "description": marker,
+                    "description": marker + " [repo-mirror:initializing:v1]",
                     "has_actions": False,
                 },
             )
+            self._verify(created, name, marker, actions=False)
+            created_id = created['id']
             repo = self.api.request("GET", path)
+            if repo.get('id') != created_id:
+                raise RuntimeError('Forgejo repository replaced during creation')
         self._verify(repo, name, marker, actions=False)
+        expected_id = repo['id']
+        expected_description = repo['description']
         if repo.get("has_actions") is not False:
             self.api.request("PATCH", path, {"has_actions": False})
             repo = self.api.request("GET", path)
         self._verify(repo, name, marker, actions=True)
+        if repo['id'] != expected_id or repo['description'] != expected_description:
+            raise RuntimeError('Forgejo repository replaced or initialization state changed')
         return repo
 
     def _verify(self, repo, name, marker, *, actions):
         if (
             not isinstance(repo, dict)
+            or type(repo.get('id')) is not int or repo['id'] <= 0
             or repo.get("full_name", "").lower() != f"{self.owner}/{name}".lower()
             or repo.get("private") is not True
-            or repo.get("description") != marker
+            or repo.get("description") not in (marker, marker + " [repo-mirror:initializing:v1]", marker + " [repo-mirror:initialized:v1]")
             or (actions and repo.get("has_actions") is not False)
         ):
             raise RuntimeError("Forgejo repository identity, provenance, privacy or Actions not verified")
+
+    def _read_pinned(self, name, marker, expected_id, description):
+        # Forgejo offers no conditional write tied to repository ID; replacement
+        # between this GET and the following Git/API write remains non-atomic.
+        repo = self.api.request("GET", f"/api/v1/repos/{self.owner}/{_name(name)}")
+        self._verify(repo, name, marker, actions=True)
+        if repo['id'] != expected_id or repo['description'] != description:
+            raise RuntimeError("Forgejo repository identity or initialization state changed")
+        return repo
+
+    def begin_initialization(self, name, source):
+        """Conservatively migrate legacy mirrors through a full-history pass."""
+        self.run_pin = None
+        repo = self.ensure_repository(name, source)
+        owner, source_name = _source(source)
+        marker = f"repo-mirror-source: github.com/{owner}/{source_name}"
+        if repo["description"] == marker:
+            expected_id = repo['id']
+            self._read_pinned(name, marker, expected_id, marker)
+            self.api.request("PATCH", f"/api/v1/repos/{self.owner}/{_name(name)}",
+                             {"description": marker + " [repo-mirror:initializing:v1]"})
+            repo = self._read_pinned(name, marker, expected_id, marker + " [repo-mirror:initializing:v1]")
+        self.run_pin = (repo['id'], repo['description'])
+        return repo["description"] == marker + " [repo-mirror:initializing:v1]"
+
+    def revalidate(self, name, source, expected):
+        owner, source_name = _source(source)
+        marker = f"repo-mirror-source: github.com/{owner}/{source_name}"
+        return self._read_pinned(name, marker, *expected)
+
+    def complete_initialization(self, name, source, *, expected=None):
+        name = _name(name)
+        owner, source_name = _source(source)
+        marker = f"repo-mirror-source: github.com/{owner}/{source_name}"
+        path = f"/api/v1/repos/{self.owner}/{name}"
+        repo = (self.revalidate(name, source, expected) if expected is not None
+                else self.api.request("GET", path))
+        self._verify(repo, name, marker, actions=True)
+        expected_id = repo['id']
+        initializing = marker + " [repo-mirror:initializing:v1]"
+        if repo["description"] != initializing:
+            raise RuntimeError("Forgejo repository identity, provenance, privacy or Actions not verified")
+        self._read_pinned(name, marker, expected_id, initializing)
+        self.api.request("PATCH", path, {"description": marker + " [repo-mirror:initialized:v1]"})
+        self._read_pinned(name, marker, expected_id, marker + " [repo-mirror:initialized:v1]")
+        if expected is not None:
+            self.run_pin = (expected_id, marker + " [repo-mirror:initialized:v1]")
 
 
 def plan_updates(desired, observed, is_ancestor):
@@ -159,12 +221,8 @@ def plan_updates(desired, observed, is_ancestor):
     return updates
 
 
-def sync_refs(destination, name, source, *, source_token=None):
-    """Copy source heads/tags to a verified destination; never prune or rewrite history.
-
-    Returns the number of refs changed. Uses atomic compare-and-swap pushes and
-    reads back all requested refs; server must support atomic push.
-    """
+def sync_refs(destination, name, source, *, source_token=None, expected=None):
+    """Reconcile heads and tags using the shared archive-before-wipe policy."""
     owner, repo = _source(source)
     name = _name(name)
     _name(destination.owner)
@@ -186,8 +244,25 @@ def sync_refs(destination, name, source, *, source_token=None):
         if not isinstance(token, str) or not token or "\n" in token or "\r" in token:
             raise RuntimeError("GITHUB_TOKEN required for source clone")
         return token
-    destination.ensure_repository(name, source)
-    local_token = destination.api.token()
+    info = (destination.revalidate(name, source, expected) if expected is not None
+            else destination.ensure_repository(name, source))
+    pins = {}
+    def pin(repo_name, info):
+        repo_id = info.get('id') if isinstance(info, dict) else None
+        if type(repo_id) is not int or repo_id <= 0:
+            raise RuntimeError('Forgejo repository ID not verified')
+        pins[repo_name] = (repo_id, info['description'])
+
+    def revalidate(repo_name):
+        marker_owner, marker_repo = _source(source)
+        marker = f'repo-mirror-source: github.com/{marker_owner}/{marker_repo}'
+        current = destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{repo_name}')
+        destination._verify(current, repo_name, marker, actions=True)
+        if (current.get('id'), current.get('description')) != pins[repo_name]:
+            raise RuntimeError('Forgejo repository identity or initialization state changed')
+        return current
+
+    pin(name, info)
     source_url = f"https://github.com/{owner}/{repo}.git"
     destination_url = f"{destination.api.base_url.rstrip('/')}/{destination.owner}/{name}.git"
     with tempfile.TemporaryDirectory(prefix="repo-mirror-forgejo-") as tmp:
@@ -226,31 +301,41 @@ def sync_refs(destination, name, source, *, source_token=None):
                 raise RuntimeError("Git operation failed; details suppressed to protect credentials")
             return result
 
-        git(["clone", "--bare", "--", source_url, store], github_token())
-        output = git(
-            ["-C", store, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/tags"]
-        ).stdout
+        source_snapshot = None
 
-        def parse(data):
-            result = {}
-            for line in data.decode("ascii").splitlines():
-                oid, ref = line.split()
-                if (
-                    not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)
-                    or not ref.startswith(("refs/heads/", "refs/tags/"))
-                    or ref in result
-                ):
-                    raise RuntimeError("invalid Git ref listing")
-                result[ref] = oid
-            return result
+        def source_run(args):
+            nonlocal source_snapshot
+            output = git(args, github_token()).stdout
+            if source_snapshot is None and 'ls-remote' in args and '--refs' in args and source_url in args:
+                source_snapshot = _refs(lambda unused: output, source_url)
+            if ("rev-parse" in args and head and args[-1].endswith("/" + head[0])
+                    and output.strip().decode("ascii") != head[1]):
+                raise RuntimeError("source default branch changed during snapshot")
+            return output
 
-        desired = parse(output)
+        archive_targets = {}
+
+        def dest_run(args):
+            if "push" in args:
+                if source_head() != head:
+                    raise RuntimeError("source default branch changed during sync")
+                if source_snapshot is None or _refs(source_run, source_url) != source_snapshot:
+                    raise RuntimeError('source refs changed during sync')
+                revalidate(name)
+                for url, archive_name in archive_targets.items():
+                    if url in args:
+                        revalidate(archive_name)
+            return git(args, destination.api.token(), "oauth2").stdout
+
+        git(["init", "--bare", store])
 
         def source_head():
-            data = git(["ls-remote", "--symref", "--", source_url, "HEAD"], github_token()).stdout
+            data = source_run(["ls-remote", "--symref", "--", source_url, "HEAD"])
+            if not data:
+                return None
             try:
                 lines = data.decode("ascii").splitlines()
-                refs = [line.removeprefix("ref: ").split("\t") for line in lines if line.startswith("ref: ")]
+                refs = [line[5:].split("\t") for line in lines if line.startswith("ref: ")]
                 oids = [line.split("\t") for line in lines if not line.startswith("ref: ")]
                 if (len(refs) != 1 or len(oids) != 1 or len(refs[0]) != 2 or len(oids[0]) != 2
                         or refs[0][1] != "HEAD" or oids[0][1] != "HEAD"
@@ -262,86 +347,70 @@ def sync_refs(destination, name, source, *, source_token=None):
                 raise RuntimeError("source default branch not verified") from None
 
         head = source_head()
-        if desired.get(head[0]) != head[1]:
-            raise RuntimeError("source default branch changed during sync")
+        info = revalidate(name)
 
-        def remote_refs():
-            return parse(
-                git(
-                    ["ls-remote", "--refs", "--", destination_url, "refs/heads/*", "refs/tags/*"],
-                    local_token,
-                    "oauth2",
-                ).stdout
-            )
-
-        observed = remote_refs()
-        if any(
-            ref.startswith("refs/heads/") and ref in desired and desired[ref] != oid
-            for ref, oid in observed.items()
-        ):
-            git(
-                [
-                    "-C",
-                    store,
-                    "fetch",
-                    "--no-tags",
-                    "--",
-                    destination_url,
-                    "+refs/heads/*:refs/mirror-destination/*",
-                ],
-                local_token,
-                "oauth2",
-            )
-
-        def ancestor(old, new):
-            return (
-                git(["-C", store, "merge-base", "--is-ancestor", old, new], allow_failure=True).returncode
-                == 0
-            )
-
-        updates = plan_updates(desired, observed, ancestor)
-        if updates:
-            destination.ensure_repository(name, source)
-            leases = [f"--force-with-lease={ref}:{old or ''}" for ref, _, old in updates]
-            refspecs = [f"{oid}:{ref}" for ref, oid, _ in updates]
-            git(
-                ["-C", store, "push", "--atomic", *leases, "--", destination_url, *refspecs],
-                local_token,
-                "oauth2",
-            )
-            after = remote_refs()
-            if any(after.get(ref) != oid for ref, oid, _ in updates):
-                raise RuntimeError("Forgejo ref readback did not match requested update")
-        if source_head() != head:
-            raise RuntimeError("source default branch changed during sync")
-        repo_info = destination.ensure_repository(name, source)
-        path = f"/api/v1/repos/{destination.owner}/{name}"
-        branch = head[0][len("refs/heads/"):]
-        if repo_info.get("default_branch") != branch:
-            # Recheck immediately before the non-conditional Forgejo API update.
+        def set_default(repo_name, ref, *, initial_refs=None):
+            if not isinstance(ref, str) or not ref.startswith("refs/heads/") or not ref[11:]:
+                raise RuntimeError("invalid default branch")
             if source_head() != head:
                 raise RuntimeError("source default branch changed during sync")
-            destination.api.request("PATCH", path, {"default_branch": branch})
-        verified = destination.api.request("GET", path)
-        marker = f"repo-mirror-source: github.com/{owner}/{repo}"
-        destination._verify(verified, name, marker, actions=True)
-        if verified.get("default_branch") != branch:
-            raise RuntimeError("Forgejo default branch readback did not match")
+            repo_path = f"/api/v1/repos/{destination.owner}/{repo_name}"
+            if source_snapshot is None or _refs(source_run, source_url) != source_snapshot:
+                raise RuntimeError('source refs changed during sync')
+            revalidate(name)
+            current = revalidate(repo_name)
+            branch = ref[11:]
+            if current.get("default_branch") != branch:
+                destination.api.request("PATCH", repo_path, {"default_branch": branch})
+            verified = revalidate(repo_name)
+            if verified.get("default_branch") != branch:
+                raise RuntimeError("Forgejo default branch readback did not match")
+            url = f"{destination.api.base_url.rstrip('/')}/{destination.owner}/{repo_name}.git"
+            if _default_branch(dest_run, url) != ref:
+                raise RuntimeError("Forgejo Git HEAD did not match default branch")
+
+        def archive_factory():
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            suffix = "-wipe-" + timestamp
+            if len(name) + len(suffix) > 100:
+                suffix = "-" + hashlib.sha256(name.lower().encode()).hexdigest()[:16] + suffix
+            archive_name = name[:100 - len(suffix)] + suffix
+            revalidate(name)
+            if source_snapshot is None or _refs(source_run, source_url) != source_snapshot:
+                raise RuntimeError('source refs changed during sync')
+            pin(archive_name, destination.ensure_repository(archive_name, source))
+            archive_url = f"{destination.api.base_url.rstrip('/')}/{destination.owner}/{archive_name}.git"
+            archive_targets[archive_url] = archive_name
+            return archive_url, lambda ref: set_default(archive_name, ref)
+
+        result = synchronize_snapshots(
+            source_run, dest_run, store, source_url, destination_url,
+            head[0][11:] if head else None, info.get("default_branch"), archive_factory,
+            lambda ref, **kwargs: set_default(name, ref, **kwargs),
+        )
+        if not result:
+            if head is not None:
+                raise RuntimeError("source refs changed during sync")
+            revalidate(name)
+            if source_head() is not None or _refs(source_run, source_url) != source_snapshot:
+                raise RuntimeError("source refs changed during sync")
+            if _refs(dest_run, destination_url):
+                raise RuntimeError("Forgejo ref readback did not match source snapshot")
+            revalidate(name)
+            return 0
         if source_head() != head:
             raise RuntimeError("source default branch changed during sync")
-        source_refs = parse(git(
-            ["ls-remote", "--refs", "--", source_url, "refs/heads/*", "refs/tags/*"],
-            github_token(),
-        ).stdout)
-        if source_refs != desired:
-            raise RuntimeError("source refs changed during sync")
-        final_refs = remote_refs()
-        if any(final_refs.get(ref) != oid for ref, oid in desired.items()):
+        revalidate(name)
+        source_refs = _refs(source_run, source_url)
+        if (source_refs != source_snapshot or source_refs.get(head[0]) != head[1]
+                or _refs(dest_run, destination_url) != source_refs):
             raise RuntimeError("Forgejo ref readback did not match source snapshot")
-        return len(updates)
+        revalidate(name)
+        return result
 
 
-def snapshot_refs(destination, name, source, *, source_token):
+
+def snapshot_refs(destination, name, source, *, source_token, expected=None):
     owner, repo = _source(source)
     name = _name(name)
     _name(destination.owner)
@@ -352,6 +421,8 @@ def snapshot_refs(destination, name, source, *, source_token):
         raise ValueError('invalid Forgejo Git origin')
     source_url = f'https://github.com/{owner}/{repo}.git'
     dest_url = f'{destination.api.base_url.rstrip("/")}/{destination.owner}/{name}.git'
+    if expected is not None:
+        destination.revalidate(name, source, expected)
     with tempfile.TemporaryDirectory(prefix='repo-mirror-forgejo-') as tmp:
         askpass = Path(tmp) / 'askpass'
         askpass.write_text('#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "$MIRROR_USER";; *) printf "%s\\n" "$MIRROR_TOKEN";; esac\n')
@@ -375,6 +446,8 @@ def snapshot_refs(destination, name, source, *, source_token):
         def head():
             try:
                 lines = git(['ls-remote', '--symref', '--', source_url, 'HEAD'], source_token, 'x-access-token').decode('ascii').splitlines()
+                if not lines:
+                    return None
                 refs = [line.removeprefix('ref: ').split('\t') for line in lines if line.startswith('ref: ')]
                 oids = [line.split('\t') for line in lines if not line.startswith('ref: ')]
                 if (len(refs) != 1 or len(oids) != 1 or len(refs[0]) != 2 or len(oids[0]) != 2
@@ -403,12 +476,18 @@ def snapshot_refs(destination, name, source, *, source_token):
         source_head = head()
         source_refs = listing(source_url, source_token, 'x-access-token')
         destination_refs = listing(dest_url, destination.api.token(), 'oauth2')
-        if head() != source_head or source_refs.get(source_head[0]) != source_head[1]:
+        if head() != source_head:
             raise RuntimeError('source default branch changed during sync')
-        info = destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{name}')
+        if listing(source_url, source_token, 'x-access-token') != source_refs:
+            raise RuntimeError('source refs changed during sync')
+        if ((source_head is None and source_refs) or
+                (source_head is not None and source_refs.get(source_head[0]) != source_head[1])):
+            raise RuntimeError('source default branch not verified')
+        info = (destination.revalidate(name, source, expected) if expected is not None
+                else destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{name}'))
         destination._verify(info, name, f'repo-mirror-source: github.com/{owner}/{repo}', actions=True)
-        if info.get('default_branch') != source_head[0][len('refs/heads/'):]:
+        if source_head is not None and info.get('default_branch') != source_head[0][len('refs/heads/'):]:
             raise RuntimeError('Forgejo default branch readback did not match')
-        if any(destination_refs.get(ref) != oid for ref, oid in source_refs.items()):
+        if destination_refs != source_refs:
             raise RuntimeError('Forgejo ref readback did not match source snapshot')
         return source_head, source_refs, destination_refs

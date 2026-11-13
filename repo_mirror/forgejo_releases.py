@@ -1,14 +1,11 @@
-"""Conservative GitHub-to-local-Forgejo release copying.
+"""GitHub and local Forgejo release transport clients."""
 
-No asset is overwritten or removed. Conflicts and ambiguous drafts stop the sync.
-Clients may be injected into sync_releases for tests or alternate transports.
-"""
-
-import hashlib
+import http.client
 import json
+import re
 import secrets
-import tempfile
-from urllib.parse import quote, urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from repo_mirror.forgejo_local import source_identity
@@ -16,7 +13,6 @@ from repo_mirror.github_api import SourceAPI
 
 MAX_BYTES = 8 * 1024 * 1024  # maximum JSON response, not asset size
 CHUNK_SIZE = 1024 * 1024
-_FIELDS = ('tag_name', 'name', 'body', 'draft', 'prerelease', 'target_commitish')
 
 
 class SyncConflict(RuntimeError):
@@ -29,49 +25,7 @@ def _id(value):
     return str(value)
 
 
-def _assets(items, source=False):
-    out = {}
-    for item in items:
-        name = item.get('name')
-        if not isinstance(name, str) or not name or name in out:
-            raise SyncConflict('ambiguous asset names')
-        if source and item.get('state') != 'uploaded':
-            raise SyncConflict('source asset not uploaded')
-        size = item.get('size')
-        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
-            raise SyncConflict('invalid or unsupported asset size')
-        _id(item.get('id'))
-        out[name] = item
-    return out
-
-
-def _asset_snapshot(assets, fields):
-    return {name: tuple(asset.get(k) for k in fields) for name, asset in assets.items()}
-
-
-def _checked(stream, asset):
-    stream.seek(0)
-    digest = hashlib.sha256()
-    size = 0
-    while True:
-        chunk = stream.read(CHUNK_SIZE)
-        if not chunk:
-            break
-        size += len(chunk)
-        if size > asset['size']:
-            raise SyncConflict('asset size mismatch')
-        digest.update(chunk)
-    if size != asset['size']:
-        raise SyncConflict('asset size mismatch')
-    value = digest.hexdigest()
-    expected = asset.get('digest')
-    if expected is not None and expected != 'sha256:' + value:
-        raise SyncConflict('source asset digest mismatch')
-    stream.seek(0)
-    return value
-
-
-def _download(response, asset, output):
+def _download(response, asset, output, *, retry_truncated=False):
     if getattr(response, 'status', 200) != 200:
         raise SyncConflict('asset download failed')
     length = response.headers.get('Content-Length')
@@ -91,116 +45,9 @@ def _download(response, asset, output):
             raise SyncConflict('asset size mismatch')
         output.write(chunk)
     if total != asset['size']:
+        if retry_truncated:
+            raise http.client.IncompleteRead(b'', asset['size'] - total)
         raise SyncConflict('asset size mismatch')
-
-
-def _release_map(items):
-    result = {}
-    for item in items:
-        tag = item.get('tag_name')
-        if not isinstance(tag, str) or not tag or tag.startswith('untagged-') or tag in result:
-            raise SyncConflict('ambiguous release tag')
-        _id(item.get('id'))
-        result[tag] = item
-    return result
-
-
-def _destination_metadata_matches(source, target):
-    # Forgejo may store an empty release name as the tag; preserve all other checks.
-    return all(target.get(k) == source[k] or (
-        k == 'name' and source[k] == '' and target.get(k) == source['tag_name']
-    ) for k in _FIELDS)
-
-
-def sync_releases(source, destination):
-    """Copy all releases; raise on conflicts, interrupted operations or failed verification.
-
-    Release and asset data are read again after copying. Existing release metadata is
-    never changed; mismatches require operator reconciliation. Run without other
-    writers: Forgejo does not provide conditional release/asset creation here.
-    Assets are read and compared by content even without a published digest, but
-    same-size source mutations without a digest can race the final metadata check.
-    """
-    src = _release_map(source.list_releases())
-    src = {tag: dict(release) for tag, release in src.items()}
-    dst = _release_map(destination.list_releases())
-    target_ids = {}
-    source_assets = {}
-    target_assets = {}
-    source_fields = ('name', 'id', 'size', 'state', 'digest')
-    target_fields = ('name', 'id', 'size')
-    for tag, release in src.items():
-        release = dict(release)
-        if any(field not in release for field in _FIELDS):
-            raise SyncConflict('incomplete release metadata')
-        target = dst.get(tag)
-        if target is not None:
-            if release['draft'] or target.get('draft'):
-                raise SyncConflict('existing draft identity requires reconciliation')
-            if not _destination_metadata_matches(release, target):
-                raise SyncConflict('release metadata collision')
-        else:
-            target = destination.create_release({k: release[k] for k in _FIELDS})
-            _id(target.get('id'))
-        target_ids[tag] = target['id']
-        before = _assets(source.list_assets(release), source=True)
-        source_assets[tag] = _asset_snapshot(before, source_fields)
-        target_assets[tag] = {}
-        existing = _assets(destination.list_assets(target))
-        for name, asset in before.items():
-            # TemporaryFile uses TMPDIR and is unlinked on close, including failures.
-            with tempfile.TemporaryFile() as data:
-                source.download(asset, data)
-                digest = _checked(data, asset)
-                current = existing.get(name)
-                if current is None:
-                    existing = _assets(destination.list_assets(target))
-                    current = existing.get(name)
-                if current is None:
-                    destination.upload(target, name, data, asset['size'])
-                    existing = _assets(destination.list_assets(target))
-                    current = existing.get(name)
-                    if current is None:
-                        raise SyncConflict('uploaded asset not visible')
-                with tempfile.TemporaryFile() as downloaded:
-                    destination.download(current, downloaded)
-                    if _checked(downloaded, current) != digest:
-                        raise SyncConflict('asset collision or upload corruption')
-                target_assets[tag][name] = tuple(current.get(k) for k in target_fields)
-        after = _assets(source.list_assets(release), source=True)
-        if source_assets[tag] != _asset_snapshot(after, source_fields):
-            raise SyncConflict('source assets changed during sync')
-        final_source = _release_map(source.list_releases()).get(tag)
-        if final_source is None or final_source.get('id') != release['id'] or any(
-            final_source.get(k) != release[k] for k in _FIELDS
-        ):
-            raise SyncConflict('source release changed during sync')
-        verified = _release_map(destination.list_releases()).get(tag)
-        if verified is None or verified.get('id') != target['id'] or not _destination_metadata_matches(release, verified):
-            raise SyncConflict('release verification failed')
-
-    final_src = _release_map(source.list_releases())
-    if set(final_src) != set(src) or any(
-        final_src[tag].get('id') != release['id'] or
-        any(final_src[tag].get(k) != release[k] for k in _FIELDS)
-        for tag, release in src.items()
-    ):
-        raise SyncConflict('source releases changed during sync')
-    final_dst = _release_map(destination.list_releases())
-    if any(
-        tag not in final_dst or final_dst[tag].get('id') != target_ids[tag] or
-        not _destination_metadata_matches(release, final_dst[tag])
-        for tag, release in src.items()
-    ):
-        raise SyncConflict('release verification failed')
-    for tag, release in src.items():
-        current = _assets(source.list_assets(final_src[tag]), source=True)
-        if _asset_snapshot(current, source_fields) != source_assets[tag]:
-            raise SyncConflict('source assets changed during sync')
-        current = _assets(destination.list_assets(final_dst[tag]))
-        snapshot = _asset_snapshot(current, target_fields)
-        if any(snapshot.get(name) != value for name, value in target_assets[tag].items()):
-            raise SyncConflict('destination asset verification failed')
 
 
 class GitHubReleases:
@@ -216,18 +63,21 @@ class GitHubReleases:
         return self.api.pages(self.base + '/releases/' + _id(release.get('id')) + '/assets')
 
     def download(self, asset, output):
+        try:
+            self._download_once(asset, output)
+        except SyncConflict:
+            raise
+        except Exception:
+            raise SyncConflict('source asset download failed') from None
+
+    def _download_once(self, asset, output, *, retry_truncated=False):
         url = self.base + '/releases/assets/' + _id(asset.get('id'))
         token = self.api._request_token('GET', urlsplit(url))
         headers = {'Accept': 'application/octet-stream', 'User-Agent': 'repo-mirror'}
         if token:
             headers['Authorization'] = 'Bearer ' + token
-        try:
-            with self.api.opener.open(Request(url, headers=headers), timeout=60) as response:
-                _download(response, asset, output)
-        except SyncConflict:
-            raise
-        except Exception:
-            raise SyncConflict('source asset download failed') from None
+        with self.api.opener.open(Request(url, headers=headers), timeout=60) as response:
+            _download(response, asset, output, retry_truncated=retry_truncated)
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -242,8 +92,10 @@ class ForgejoReleases:
             raise ValueError('invalid local port')
         self.origin = f'http://127.0.0.1:{port}'
         self.base = f'/api/v1/repos/{owner}/{repo}'
+        self.download_prefix = f'/{owner}/{repo}/releases/download/'
         self.token = token
         self.opener = build_opener(ProxyHandler({}), _NoRedirect())
+        self._listed_assets = {}
 
     def _request(self, method, path, body=None, content_type=None):
         headers = {'Authorization': 'token ' + self.token, 'User-Agent': 'repo-mirror'}
@@ -280,18 +132,54 @@ class ForgejoReleases:
 
     def list_assets(self, release):
         # Forgejo 17 ListReleaseAttachments ignores pagination and returns all assets.
-        result = self._json('GET', self.base + '/releases/' + _id(release.get('id')) + '/assets')
+        rid = _id(release.get('id'))
+        result = self._json('GET', self.base + '/releases/' + rid + '/assets')
         if not isinstance(result, list):
             raise SyncConflict('invalid asset listing')
+        for item in result:
+            if not isinstance(item, dict):
+                raise SyncConflict('invalid asset listing')
+            aid = _id(item.get('id'))
+            if aid in self._listed_assets and self._listed_assets[aid][0] != rid:
+                raise SyncConflict('ambiguous asset ID')
+            self._listed_assets[aid] = (rid, dict(item))
         return result
 
     def create_release(self, release):
         return self._json('POST', self.base + '/releases', release)
 
     def download(self, asset, output):
+        aid = _id(asset.get('id'))
+        listed = self._listed_assets.get(aid)
+        if listed is None or listed[1] != asset:
+            raise SyncConflict('unknown asset identity')
+        release = self._json('GET', self.base + '/releases/' + listed[0])
+        if not isinstance(release, dict) or _id(release.get('id')) != listed[0]:
+            raise SyncConflict('release identity changed')
+        tag = release.get('tag_name')
+        # Forgejo 17 GetReleaseAttachments builds this path using Go
+        # url.PathEscape on the *whole* tag and asset name (including slashes).
+        # Bind the decoded tag to the release whose listing supplied this asset.
         url = asset.get('browser_download_url', '')
-        parsed = urlsplit(url)
-        if parsed.scheme != 'http' or parsed.hostname not in ('localhost', '127.0.0.1') or parsed.port != int(self.origin.rsplit(':', 1)[1]) or parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.path.startswith('/'):
+        try:
+            parsed = urlsplit(url)
+            path = parsed.path
+            parts = path[len(self.download_prefix):].split('/') if path.startswith(self.download_prefix) else []
+            decoded = [unquote(part, errors='strict') for part in parts]
+            safe = (isinstance(url, str) and not any(ord(c) < 32 or ord(c) == 127 for c in url) and
+                    isinstance(tag, str) and tag and
+                    all(part and part not in ('.', '..') for part in tag.split('/')) and
+                    not any(c in tag for c in '\\%') and not any(ord(c) < 32 or ord(c) == 127 for c in tag) and
+                    parsed.scheme in ('http', 'https') and parsed.hostname and parsed.port != 0 and
+                    parsed.username is None and parsed.password is None and not parsed.query and not parsed.fragment and
+                    len(decoded) == 2 and decoded[0] == tag and
+                    decoded[1] == asset.get('name') and decoded[1] not in ('', '.', '..') and
+                    not any(c in decoded[1] for c in '/\\%') and
+                    not any(ord(c) < 32 or ord(c) == 127 for c in decoded[1]) and
+                    not re.search(r'%(?![0-9a-fA-F]{2})', path))
+        except (TypeError, ValueError, UnicodeError):
+            safe = False
+        if not safe:
             raise SyncConflict('unsafe Forgejo asset URL')
         headers = {'Authorization': 'token ' + self.token, 'User-Agent': 'repo-mirror'}
         try:
@@ -302,9 +190,11 @@ class ForgejoReleases:
         except Exception:
             raise SyncConflict('destination asset download failed') from None
 
-    def upload(self, release, name, data, size):
+    def upload(self, release, name, data, size, content_type='application/octet-stream'):
+        if not isinstance(content_type, str) or not re.fullmatch(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+", content_type):
+            raise ValueError('invalid asset content type')
         boundary = 'mirror' + secrets.token_hex(16)
-        prefix = f'--{boundary}\r\nContent-Disposition: form-data; name="attachment"; filename="asset"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode()
+        prefix = f'--{boundary}\r\nContent-Disposition: form-data; name="attachment"; filename="asset"\r\nContent-Type: {content_type}\r\n\r\n'.encode()
         suffix = f'\r\n--{boundary}--\r\n'.encode()
         def chunks():
             yield prefix
@@ -326,6 +216,8 @@ class ForgejoReleases:
                 raise SyncConflict('response exceeds size limit')
             return json.loads(result)
         except SyncConflict:
+            raise
+        except (HTTPError, URLError, OSError, http.client.HTTPException):
             raise
         except Exception:
             # An interrupted POST may have created an asset. Never delete or retry it.

@@ -23,6 +23,8 @@ def main(argv=None):
     parser.add_argument('action', choices=['run'])
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--token-file', required=True)
+    parser.add_argument('--timestamp-secret-file', required=True)
+    parser.add_argument('--journal-dir', required=True)
     parser.add_argument('--owner', required=True)
     parser.add_argument('--organization', action='store_true')
     parser.add_argument('--port', type=int, default=3300)
@@ -44,6 +46,25 @@ def main(argv=None):
             raise ValueError('invalid installation or port')
         if bool(args.app_id) != bool(args.private_key_file):
             raise ValueError('incomplete app credentials')
+        secret_fd = os.open(args.timestamp_secret_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            secret_info = os.fstat(secret_fd)
+            if not stat.S_ISREG(secret_info.st_mode) or secret_info.st_uid != os.getuid() or secret_info.st_mode & 0o077:
+                raise ValueError('invalid recovery secret file')
+            # Sync strips surrounding whitespace before using the UTF-8 secret.
+            # Count the actual value, not a trailing newline from provisioning.
+            if len(os.read(secret_fd, 4096).strip()) < 32:
+                raise ValueError('recovery secret too short')
+            for other in (args.manifest, args.token_file, args.private_key_file):
+                if other and os.path.exists(other):
+                    info = os.stat(other)
+                    if (info.st_dev, info.st_ino) == (secret_info.st_dev, secret_info.st_ino):
+                        raise ValueError('recovery secret must be separate')
+        finally:
+            os.close(secret_fd)
+        journal_info = os.stat(args.journal_dir, follow_symlinks=False)
+        if not stat.S_ISDIR(journal_info.st_mode) or journal_info.st_uid != os.getuid() or journal_info.st_mode & 0o077:
+            raise ValueError('invalid journal directory')
         fd = os.open(args.lock, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'r+') as lock:
             info = os.fstat(lock.fileno())
@@ -60,7 +81,8 @@ def main(argv=None):
                 failures = 0
                 for source in sources:
                     command = [args.sync_python, '-m', 'repo_mirror.forgejo_sync', '--config', str(snapshot),
-                               '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port)]
+                               '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port),
+                               '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
                     if args.app_id:
                         command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
                     else:

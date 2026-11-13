@@ -11,16 +11,104 @@ SCRIPT = ROOT / 'repo_mirror' / 'forgejo_schedule.py'
 
 
 class ScheduleTest(unittest.TestCase):
-    def test_app_mode_passes_refreshable_credentials_to_child_without_helper(self):
+    def test_short_secret_is_rejected_before_child(self):
         from unittest.mock import patch
         from repo_mirror import forgejo_schedule
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            secret = tmp / 'key'
+            secret.write_text('x' * 31)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            args = ['run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice',
+                    '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+            with patch('repo_mirror.forgejo_schedule.subprocess.run') as run:
+                self.assertEqual(forgejo_schedule.main(args), 2)
+                run.assert_not_called()
+
+    def test_recovery_paths_are_passed_unchanged_to_each_child(self):
+        from unittest.mock import patch
+        from repo_mirror import forgejo_schedule
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']))
+            secret = tmp / 'recovery-key'
+            secret.write_text('test-recovery-value-' * 2)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            args = ['run', '--manifest', str(manifest), '--token-file', 'x', '--owner', 'alice',
+                    '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+            with patch('repo_mirror.forgejo_schedule.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                self.assertEqual(forgejo_schedule.main(args), 0)
+                self.assertEqual(forgejo_schedule.main(args), 0)
+            self.assertEqual(run.call_count, 4)
+            for call in run.call_args_list:
+                command = call.args[0]
+                self.assertEqual(command[command.index('--timestamp-secret-file') + 1], str(secret))
+                self.assertEqual(command[command.index('--journal-dir') + 1], str(journals))
+                self.assertNotIn('test-recovery-value', command)
+
+    def test_rejects_unsafe_recovery_paths_without_starting_child(self):
+        from unittest.mock import patch
+        from repo_mirror import forgejo_schedule
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            secret = tmp / 'key'
+            secret.write_text('do-not-log-this-value-' * 2)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            link = tmp / 'link'
+            link.symlink_to(secret)
+            hardlink = tmp / 'hardlink'
+            os.link(secret, hardlink)
+            args = ['run', '--manifest', str(manifest), '--token-file', str(hardlink), '--owner', 'alice',
+                    '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+            with patch('repo_mirror.forgejo_schedule.subprocess.run') as run:
+                self.assertEqual(forgejo_schedule.main(args), 2)  # hardlink to credential
+                args[args.index('--token-file') + 1] = 'unused'
+                secret.chmod(0o644)
+                self.assertEqual(forgejo_schedule.main(args), 2)
+                secret.chmod(0o600)
+                args[args.index('--timestamp-secret-file') + 1] = str(link)
+                self.assertEqual(forgejo_schedule.main(args), 2)
+                args[args.index('--timestamp-secret-file') + 1] = str(secret)
+                journals.chmod(0o755)
+                self.assertEqual(forgejo_schedule.main(args), 2)
+                run.assert_not_called()
+
+    def test_scheduler_templates_supply_recovery_paths(self):
+        for name in ('forgejo-mirror.service.template', 'forgejo-mirror.cron.template'):
+            template = (ROOT / 'scheduler' / name).read_text()
+            self.assertIn('--timestamp-secret-file @TIMESTAMP_SECRET_FILE@', template)
+            self.assertIn('--journal-dir @JOURNAL_DIR@', template)
+            self.assertIn('@CHECKOUT@/forgejo-nintendo-sources.json', template)
+            self.assertIn('--token-file @TOKEN_FILE@', template)
+            self.assertIn('--lock @LOCK_FILE@', template)
+            self.assertNotIn('repo-mirror-forgejo-feature', template)
+
+    def test_app_mode_passes_refreshable_credentials_to_child_without_helper(self):
+        from unittest.mock import patch
+        from repo_mirror import forgejo_schedule
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'recovery-key'
+            secret.write_text('test-key-' * 4)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
             with patch('repo_mirror.forgejo_schedule.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
                 result = forgejo_schedule.main(['run', '--manifest', str(manifest), '--token-file', 'x',
-                    '--owner', 'alice', '--lock', str(tmp / 'lock'), '--app-id', '123', '--private-key-file', '/key'])
+                    '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--app-id', '123', '--private-key-file', '/key'])
             self.assertEqual(result, 0)
             command = run.call_args.args[0]
             self.assertEqual(command[0], sys.executable)
@@ -31,13 +119,18 @@ class ScheduleTest(unittest.TestCase):
     def test_run_refreshes_per_source_and_suppresses_child_output(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
+            secret = tmp / 'recovery-key'
+            secret.write_text('test-key-' * 4)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
             sources = ['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(sources))
             calls = tmp / 'calls'
             helper = tmp / 'helper.py'
             helper.write_text('import os,sys\nwith open(os.environ["CALLS"], "a") as f: f.write(sys.argv[-1]+"\\n")\nprint("SECRET_FROM_CHILD")\n')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', str(tmp / 'token'), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--helper-python', sys.executable], env={**os.environ, 'CALLS': str(calls)}, capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', str(tmp / 'token'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--helper-python', sys.executable], env={**os.environ, 'CALLS': str(calls)}, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(calls.read_text().splitlines(), sources)
             self.assertNotIn('SECRET_FROM_CHILD', result.stdout + result.stderr)
@@ -45,9 +138,14 @@ class ScheduleTest(unittest.TestCase):
     def test_rejects_invalid_manifest_before_helper(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
+            secret = tmp / 'recovery-key'
+            secret.write_text('test-key-' * 4)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/MIRROR-a']))
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice', '--lock', str(tmp / 'lock')], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock')], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2)
             self.assertFalse((tmp / 'lock').exists())
 
@@ -55,23 +153,33 @@ class ScheduleTest(unittest.TestCase):
         import fcntl
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
+            secret = tmp / 'recovery-key'
+            secret.write_text('test-key-' * 4)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
             lock = tmp / 'lock'
             lock.touch(mode=0o600)
             with lock.open('r+') as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
-                result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice', '--lock', str(lock)], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 75)
 
     def test_failure_does_not_stop_later_repositories(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
+            secret = tmp / 'recovery-key'
+            secret.write_text('test-key-' * 4)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']))
             helper = tmp / 'helper.py'
             helper.write_text('import sys\nprint("secret", file=sys.stderr)\nsys.exit(1 if sys.argv[-1].endswith("-a") else 0)\n')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 1)
             self.assertIn('1 succeeded, 1 failed', result.stdout)
             self.assertNotIn('secret', result.stdout + result.stderr)
@@ -79,11 +187,16 @@ class ScheduleTest(unittest.TestCase):
     def test_failure_reports_only_allowlisted_child_diagnostic(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
+            secret = tmp / 'recovery-key'
+            secret.write_text('test-key-' * 4)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text('import sys\nprint("FORGEJO_FAILURE: release metadata collision", file=sys.stderr)\nprint("FORGEJO_FAILURE: release metadata collision secret", file=sys.stderr)\nprint("secret https://example/token", file=sys.stderr)\nsys.exit(1)\n')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 1)
             self.assertIn('release metadata collision', result.stdout + result.stderr)
             self.assertNotIn('secret', result.stdout + result.stderr)

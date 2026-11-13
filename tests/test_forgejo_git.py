@@ -4,6 +4,60 @@ from repo_mirror.forgejo_git import APIError, ForgejoDestination
 
 
 class ProvisionTests(unittest.TestCase):
+    def test_replacement_during_actions_patch_is_rejected(self):
+        class API:
+            gets = 0
+            def request(self, method, path, payload=None):
+                if method == 'GET': self.gets += 1
+                return {'id': 1 if self.gets == 1 else 2, 'full_name': 'mirror/project',
+                        'private': True, 'has_actions': self.gets == 1,
+                        'description': 'repo-mirror-source: github.com/manoma080/project'}
+        with self.assertRaises(RuntimeError):
+            ForgejoDestination(API(), 'mirror').ensure_repository('project', 'manoma080/project')
+
+    def test_initialization_transition_rejects_replacement_after_patch(self):
+        marker = 'repo-mirror-source: github.com/manoma080/project'
+        for operation, initial in (('begin_initialization', marker),
+                                   ('complete_initialization', marker + ' [repo-mirror:initializing:v1]')):
+            with self.subTest(operation=operation):
+                class API:
+                    def __init__(self):
+                        self.repo = {'id': 1, 'full_name': 'mirror/project', 'private': True,
+                                     'has_actions': False, 'description': initial}
+                    def request(self, method, path, payload=None):
+                        if method == 'PATCH':
+                            self.repo = dict(self.repo)
+                            self.repo['id'] = 2
+                            self.repo.update(payload or {})
+                        return dict(self.repo)
+                with self.assertRaises(RuntimeError):
+                    getattr(ForgejoDestination(API(), 'mirror'), operation)('project', 'manoma080/project')
+
+    def test_completion_does_not_create_missing_repository(self):
+        class API:
+            def request(self, method, path, payload=None):
+                if method != 'GET':
+                    raise AssertionError('completion must not create or modify a missing repository')
+                raise APIError(404)
+        with self.assertRaises(APIError):
+            ForgejoDestination(API(), 'mirror').complete_initialization('project', 'manoma080/project')
+
+    def test_legacy_mirror_is_migrated_conservatively_and_completion_is_verified(self):
+        marker = 'repo-mirror-source: github.com/manoma080/project'
+        class API:
+            def __init__(self):
+                self.repo = {'id': 1, 'full_name': 'mirror/project', 'private': True,
+                             'has_actions': False, 'description': marker}
+            def request(self, method, path, payload=None):
+                if method == 'PATCH': self.repo.update(payload)
+                return dict(self.repo)
+        api = API()
+        dest = ForgejoDestination(api, 'mirror')
+        self.assertTrue(dest.begin_initialization('project', 'manoma080/project'))
+        self.assertTrue(dest.begin_initialization('project', 'manoma080/project'))
+        dest.complete_initialization('project', 'manoma080/project')
+        self.assertFalse(dest.begin_initialization('project', 'manoma080/project'))
+
     def test_create_private_repository_with_provenance_and_actions_disabled(self):
         class API:
             def __init__(self):
@@ -11,7 +65,7 @@ class ProvisionTests(unittest.TestCase):
 
             def request(self, method, path, payload=None):
                 if method == "POST":
-                    self.repo = dict(payload, full_name="mirror/project", has_actions=False)
+                    self.repo = dict(payload, id=1, full_name="mirror/project", has_actions=False)
                     return self.repo
                 if self.repo is None:
                     raise APIError(404)
@@ -21,7 +75,7 @@ class ProvisionTests(unittest.TestCase):
         result = ForgejoDestination(api, "mirror").ensure_repository("project", "manoma080/project")
         self.assertTrue(result["private"])
         self.assertFalse(result["has_actions"])
-        self.assertEqual(result["description"], "repo-mirror-source: github.com/manoma080/project")
+        self.assertEqual(result["description"], "repo-mirror-source: github.com/manoma080/project [repo-mirror:initializing:v1]")
 
 
 class SyncPlanTests(unittest.TestCase):
@@ -62,7 +116,7 @@ class DefaultBranchTests(unittest.TestCase):
                 self.calls.append((method, path, payload))
                 if method == 'PATCH':
                     self.branch = payload['default_branch']
-                return {'full_name': 'mirror/project', 'private': True,
+                return {'id': 1, 'full_name': 'mirror/project', 'private': True,
                         'description': 'repo-mirror-source: github.com/manoma080/project',
                         'has_actions': False, 'default_branch': self.branch}
         api = API()
@@ -71,13 +125,13 @@ class DefaultBranchTests(unittest.TestCase):
         def run(args, **kwargs):
             nonlocal remote_reads
             output = b''
-            if 'for-each-ref' in args:
-                output = f'{oid} refs/heads/main\n'.encode()
+            if 'rev-parse' in args:
+                output = f'{oid}\n'.encode()
             elif '--symref' in args:
                 output = f'ref: refs/heads/main\tHEAD\n{oid}\tHEAD\n'.encode()
             elif 'ls-remote' in args:
                 remote_reads += 1
-                if remote_reads > 1:
+                if any('github.com/' in arg for arg in args) or remote_reads > 2:
                     output = f'{oid}\trefs/heads/main\n'.encode()
             return subprocess.CompletedProcess(args, 0, output, b'')
         with patch('repo_mirror.forgejo_git.subprocess.run', side_effect=run), patch.dict('os.environ', {'GITHUB_TOKEN': 'secret'}):
@@ -112,7 +166,7 @@ class DefaultBranchTests(unittest.TestCase):
                                 self.branch = payload['default_branch']
                         else:
                             self.gets += 1
-                        return {'full_name': 'mirror/other' if scenario == 'wrong_repo' and self.gets > 1 else 'mirror/project',
+                        return {'id': 1, 'full_name': 'mirror/other' if scenario == 'wrong_repo' and self.gets > 1 else 'mirror/project',
                                 'private': True, 'has_actions': False,
                                 'description': 'repo-mirror-source: github.com/manoma080/project',
                                 'default_branch': self.branch}
@@ -121,18 +175,18 @@ class DefaultBranchTests(unittest.TestCase):
                 def run(args, **kwargs):
                     nonlocal head_reads
                     output = b''
-                    if 'for-each-ref' in args:
-                        output = f'{oid} refs/heads/main\n'.encode()
+                    if 'rev-parse' in args:
+                        output = f'{oid}\n'.encode()
                     elif '--symref' in args:
                         head_reads += 1
                         branch = 'other' if scenario == 'changed' and head_reads > 1 else 'main'
                         output = b'' if scenario == 'invalid_head' else f'ref: refs/heads/{branch}\tHEAD\n{oid}\tHEAD\n'.encode()
-                    elif 'ls-remote' in args:
+                    elif 'ls-remote' in args and (any('github.com/' in arg for arg in args) or api.gets > 2):
                         output = f'{oid}\trefs/heads/main\n'.encode()
                     return subprocess.CompletedProcess(args, 0, output, b'')
                 with patch('repo_mirror.forgejo_git.subprocess.run', side_effect=run), patch.dict('os.environ', {'GITHUB_TOKEN': 'secret'}):
                     if scenario == 'same':
-                        self.assertEqual(sync_refs(ForgejoDestination(api, 'mirror'), 'project', 'manoma080/project'), 0)
+                        self.assertTrue(sync_refs(ForgejoDestination(api, 'mirror'), 'project', 'manoma080/project'))
                         self.assertEqual(api.patches, 0)
                     else:
                         with self.assertRaises(RuntimeError):
@@ -160,7 +214,7 @@ class FinalRefConsistencyTests(unittest.TestCase):
                     def request(self, method, path, payload=None):
                         if method == 'PATCH':
                             self.branch = payload['default_branch']
-                        return {'full_name': 'mirror/project', 'private': True,
+                        return {'id': 1, 'full_name': 'mirror/project', 'private': True,
                                 'description': 'repo-mirror-source: github.com/manoma080/project',
                                 'has_actions': False, 'default_branch': self.branch}
                 api = API()
@@ -184,23 +238,19 @@ class FinalRefConsistencyTests(unittest.TestCase):
                     return ''.join(f'{oid}\t{ref}\n' for ref, oid in refs.items()).encode()
                 def run(args, **kwargs):
                     output = b''
-                    if 'for-each-ref' in args:
-                        output = listing(snapshot)
+                    if 'rev-parse' in args:
+                        output = (snapshot[next(ref for ref in snapshot if args[-1].endswith('/' + ref))] + '\n').encode()
                     elif '--symref' in args:
                         output = f'ref: refs/heads/main\tHEAD\n{a}\tHEAD\n'.encode()
                     elif 'ls-remote' in args:
                         is_source = any('github.com/' in arg for arg in args)
-                        output = listing(source_final if is_source else
-                                         destination_final if api.branch == 'main' else snapshot)
+                        output = listing((snapshot if api.branch != 'main' else source_final) if is_source else
+                                         destination_final if api.branch == 'main' else {})
                     return subprocess.CompletedProcess(args, 0, output, b'')
                 with patch('repo_mirror.forgejo_git.subprocess.run', side_effect=run):
-                    if scenario == 'destination_extra':
-                        self.assertEqual(sync_refs(ForgejoDestination(api, 'mirror'), 'project',
-                                                   'manoma080/project', source_token='secret'), 0)
-                    else:
-                        with self.assertRaises(RuntimeError):
-                            sync_refs(ForgejoDestination(api, 'mirror'), 'project',
-                                      'manoma080/project', source_token='secret')
+                    with self.assertRaises(RuntimeError):
+                        sync_refs(ForgejoDestination(api, 'mirror'), 'project',
+                                  'manoma080/project', source_token='secret')
 
 
 class TransportTests(unittest.TestCase):
@@ -217,7 +267,7 @@ class TransportTests(unittest.TestCase):
                 return "forge-secret"
 
             def request(self, method, path, payload=None):
-                return {"full_name": "mirror/project", "private": True,
+                return {"id": 1, "full_name": "mirror/project", "private": True,
                         "description": "repo-mirror-source: github.com/manoma080/project",
                         "has_actions": False, "default_branch": "main"}
 
@@ -231,11 +281,11 @@ class TransportTests(unittest.TestCase):
         def run(args, **kwargs):
             calls.append((args, kwargs["env"].copy()))
             output = b""
-            if "for-each-ref" in args:
-                output = f"{oid} refs/heads/main\n".encode()
+            if "rev-parse" in args:
+                output = f"{oid}\n".encode()
             if "--symref" in args:
                 output = f"ref: refs/heads/main\tHEAD\n{oid}\tHEAD\n".encode()
-            elif "ls-remote" in args and len([c for c, _ in calls if "ls-remote" in c and "--symref" not in c]) > 1:
+            elif "ls-remote" in args and (any("github.com/" in arg for arg in args) or any("push" in c for c, _ in calls)):
                 output = f"{oid}\trefs/heads/main\n".encode()
             return subprocess.CompletedProcess(args, 0, output, b"")
 
@@ -248,13 +298,13 @@ class TransportTests(unittest.TestCase):
         with patch("repo_mirror.forgejo_git.subprocess.run", side_effect=run):
             sync_refs(Destination(), "project", "manoma080/project", source_token=provider)
         source_tokens = [env['MIRROR_TOKEN'] for args, env in calls
-                         if any('github.com/' in arg for arg in args)]
+                         if env.get('MIRROR_USER') == 'x-access-token' and env.get('MIRROR_TOKEN')]
         self.assertEqual(source_tokens, issued)
         self.assertGreater(len(set(source_tokens)), 1)
         self.assertTrue(any("push" in args for args, _ in calls))
         self.assertTrue(all("secret" not in " ".join(args) for args, _ in calls))
         self.assertTrue(
-            all(env.get("MIRROR_TOKEN") != "github-secret" for args, env in calls if "push" in args)
+            all(env.get("MIRROR_TOKEN") == "forge-secret" for args, env in calls if "push" in args)
         )
 
 
