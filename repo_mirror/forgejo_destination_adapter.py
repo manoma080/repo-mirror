@@ -12,6 +12,13 @@ from repo_mirror.forgejo_releases import ForgejoReleases, SyncConflict, _id
 
 class ForgejoDestinationAdapter:
     supports_target_commitish = True
+
+    def validate_release_source(self, release):
+        # Forgejo's release PATCH cannot reliably clear a nonempty body. Never
+        # start (or resume) a transaction that would need that operation.
+        if not (release.get('body') or ''):
+            raise SyncConflict('Forgejo empty source body cannot be safely mirrored; inspect any pending release and reconcile manually before retrying')
+
     def __init__(self, owner_repo, token, port=3300, *, client=None, guard=None):
         owner, repo = source_identity(owner_repo)
         if owner in ('.', '..') or repo in ('.', '..'):
@@ -150,6 +157,9 @@ class ForgejoDestinationAdapter:
                 if key not in current:
                     raise SyncConflict('release metadata not persisted: ' + key)
                 actual = current[key]
+                # Forgejo may represent an empty or null title as the release tag.
+                if key == 'name' and expected in ('', None) and actual == current['tag_name']:
+                    continue
                 if type(actual) is not type(expected) or actual != expected:
                     raise SyncConflict('release metadata not persisted: ' + key)
             return current

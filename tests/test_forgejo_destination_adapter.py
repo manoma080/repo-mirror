@@ -104,10 +104,54 @@ class ForgejoDestinationAdapterTests(unittest.TestCase):
                 result['name'] = result['tag_name']
             return result
         client._json = normalize
-        with self.assertRaises(SyncConflict):
-            adapter.request('PATCH', adapter.target + '/releases/7', {'name': ''})
+        result = adapter.request('PATCH', adapter.target + '/releases/7', {'name': ''})
+        self.assertEqual(result['name'], 'v1')
         with self.assertRaises(SyncConflict):
             adapter.request('PATCH', adapter.target + '/releases/7', {'tag_name': 'v2'})
+
+    def test_create_empty_or_null_name_returns_forgejo_tag_title(self):
+        for name in ('', None):
+            with self.subTest(name=name):
+                adapter, client = make_adapter()
+                original = client._json
+                def forgejo(method, path, body=None):
+                    result = original(method, path, body)
+                    if method == 'POST':
+                        client.release['name'] = client.release['tag_name']
+                        return dict(client.release)
+                    return result
+                client._json = forgejo
+                result = adapter.request('POST', adapter.target + '/releases',
+                                         {'tag_name': 'v1', 'name': name})
+                self.assertEqual((result['id'], result['tag_name'], result['name']), (7, 'v1', 'v1'))
+                self.assertEqual(client.calls[-1][2]['name'], name)
+
+    def test_null_name_patch_accepts_pinned_tag_as_title(self):
+        adapter, client = make_adapter()
+        client.release['name'] = 'v1'
+        original = client._json
+        def forgejo(method, path, body=None):
+            if method == 'PATCH' and body.get('name', 'missing') is None:
+                client.calls.append((method, path, body))
+                return dict(client.release)
+            return original(method, path, body)
+        client._json = forgejo
+        result = adapter.request('PATCH', adapter.target + '/releases/7', {'name': None})
+        self.assertEqual((result['id'], result['tag_name'], result['name']), (7, 'v1', 'v1'))
+
+    def test_patch_rejects_other_title_mismatches_and_uncleared_body(self):
+        from repo_mirror.forgejo_releases import SyncConflict
+        for field, expected, actual in (
+            ('name', '', 'other'), ('name', '', None), ('name', None, 'other'),
+            ('name', 'other', 'v1'), ('body', '', 'v1'), ('body', '', None),
+        ):
+            with self.subTest(field=field, expected=expected, actual=actual):
+                adapter, client = make_adapter()
+                def request(method, path, body=None):
+                    return {'id': 7, 'tag_name': 'v1', field: actual}
+                client._json = request
+                with self.assertRaisesRegex(SyncConflict, 'release metadata not persisted: ' + field):
+                    adapter.request('PATCH', adapter.target + '/releases/7', {field: expected})
 
     def test_patch_checks_only_requested_fields(self):
         adapter, client = make_adapter()

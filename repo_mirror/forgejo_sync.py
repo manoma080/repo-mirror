@@ -4,7 +4,9 @@ import fcntl
 import json
 from contextlib import contextmanager
 import os
-import pwd
+import errno
+import socket
+import time
 import re
 import stat
 import sys
@@ -18,7 +20,7 @@ from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
 from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from repo_mirror.github_api import SourceAPI
 from repo_mirror.journal import FailureJournal
-from repo_mirror.repository import (mirror_releases, validate_source_release_listing,
+from repo_mirror.repository import (ReleaseAggregateError, mirror_releases, validate_source_release_listing,
                                     fetch_source_latest, validate_source_latest)
 from repo_mirror.sources import source_marker
 from repo_mirror.github_api import AppTokenProvider
@@ -36,6 +38,7 @@ CONFLICT_REASONS = frozenset({
     'invalid release listing', 'release pagination limit exceeded', 'invalid asset listing',
     'Forgejo latest release cannot be selected', 'unsupported latest operation',
     'unsafe Forgejo asset URL', 'asset upload failed; reconcile destination before retry',
+    'Forgejo empty source body cannot be safely mirrored; inspect any pending release and reconcile manually before retrying',
 })
 GIT_REASONS = frozenset({
     'Forgejo repository identity, provenance, privacy or Actions not verified',
@@ -66,6 +69,15 @@ SAFE_REASONS = CONFLICT_REASONS | GIT_REASONS | CONFIG_REASONS | frozenset({
 
 
 def safe_reason(exc, *, configuration=False):
+    if type(exc) is ReleaseAggregateError:
+        # Classify only homogeneous, explicitly recognized conflict failures;
+        # never promote an arbitrary message or hide mixed failures.
+        errors = exc.release_errors
+        if errors and all(type(error) is SyncConflict and len(error.args) == 1
+                          and type(error.args[0]) is str and error.args[0] in CONFLICT_REASONS
+                          and error.args[0] == errors[0].args[0] for error in errors):
+            return errors[0].args[0]
+        return 'unexpected sync failure'
     message = str(exc)
     if isinstance(exc, SyncConflict) and message in CONFLICT_REASONS:
         return message
@@ -114,7 +126,7 @@ def read_private_key(path):
 
 
 @contextmanager
-def journal_lock(path):
+def journal_lock(path, *, shared=False):
     # Lock the directory inode itself: no replaceable lock file, symlink or
     # credential hard-link can split the lock or cause a credential write.
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -122,67 +134,60 @@ def journal_lock(path):
         info = os.fstat(fd)
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ValueError('invalid journal directory')
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
         # Anchor journal operations to the locked inode even if its path moves.
         yield f'/proc/self/fd/{fd}'
     finally:
         os.close(fd)
 
 
+# Abstract socket names live in the Linux network namespace, not the filesystem.
+# Close inherited descriptors after fork: a child must not extend the parent's lock.
+_destination_sockets = set()
+
+
+def _close_destination_sockets_in_child():
+    for sock in _destination_sockets:
+        sock.close()
+    _destination_sockets.clear()
+
+
+os.register_at_fork(after_in_child=_close_destination_sockets_in_child)
+
+
 @contextmanager
 def destination_locks(port, owner, requested):
-    """Serialize cooperating local runners; external Forgejo clients do not lock.
+    """Serialize cooperating runners per target in the same network namespace.
 
-    Lock the account home first so replacing the private lock directory cannot
-    split cooperating runners. This deliberately serializes all local syncs for
-    the account, including those targeting different repositories.
+    Linux abstract UNIX addresses cannot be renamed or unlinked. They disappear
+    automatically on close or process death. External clients do not cooperate.
     """
-    home = pwd.getpwuid(os.getuid()).pw_dir
-    home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    directory_fd = None
-    files = []
+    names = sorted({hashlib.sha256(
+        f'http://127.0.0.1:{port}/{owner.lower()}/{identity.split("/")[1].lower()}'.encode()
+    ).hexdigest() for identity in requested})
+    sockets = []
     try:
-        info = os.fstat(home_fd)
-        if info.st_uid != os.getuid() or info.st_mode & 0o022:
-            raise ValueError('invalid lock home')
-        fcntl.flock(home_fd, fcntl.LOCK_EX)
-        current = os.stat(home, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
-            raise ValueError('lock home replaced')
-        dirname = '.repo-mirror-forgejo-locks'
-        try:
-            os.mkdir(dirname, 0o700, dir_fd=home_fd)
-        except FileExistsError:
-            pass
-        directory_fd = os.open(dirname, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=home_fd)
-        directory_info = os.fstat(directory_fd)
-        if directory_info.st_uid != os.getuid() or directory_info.st_mode & 0o077:
-            raise ValueError('invalid destination lock directory')
-        names = sorted({hashlib.sha256(
-            f'http://127.0.0.1:{port}/{owner.lower()}/{identity.split("/")[1].lower()}'.encode()
-        ).hexdigest() for identity in requested})
         for name in names:
-            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
-                         0o600, dir_fd=directory_fd)
-            files.append(fd)
-            lock_info = os.fstat(fd)
-            if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid()
-                    or lock_info.st_mode & 0o077 or lock_info.st_nlink != 1):
-                raise ValueError('invalid destination lock file')
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if (current.st_dev, current.st_ino, current.st_nlink) != (lock_info.st_dev, lock_info.st_ino, 1):
-                raise ValueError('destination lock file replaced')
-        current = os.stat(dirname, dir_fd=home_fd, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (directory_info.st_dev, directory_info.st_ino):
-            raise ValueError('destination lock directory replaced')
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sockets.append(sock)
+            _destination_sockets.add(sock)
+            address = f'\0repo-mirror-forgejo-{os.getuid()}-{name}'
+            deadline = time.monotonic() + 3600
+            while True:
+                try:
+                    sock.bind(address)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EADDRINUSE:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('destination lock timeout') from None
+                    time.sleep(0.05)
         yield
     finally:
-        for fd in reversed(files):
-            os.close(fd)
-        if directory_fd is not None:
-            os.close(directory_fd)
-        os.close(home_fd)
+        for sock in reversed(sockets):
+            _destination_sockets.discard(sock)
+            sock.close()
 
 
 def main(argv=None):
@@ -248,11 +253,16 @@ def main(argv=None):
         print(f'FORGEJO_FAILURE: {safe_reason(exc, configuration=True)}', file=sys.stderr)
         return 2
     try:
-        # This is separate from the scheduler's batch lock. Direct runs may
-        # run between scheduled children, but never concurrently with one.
-        with destination_locks(args.port, args.owner, requested):
-            with journal_lock(args.journal_dir) as journal_dir:
-                return _sync_requested(args, requested, dest, token, local_token, secret, journal_dir)
+        # A journal name encodes the source, instance and owner, so every run
+        # sharing a journal also shares the corresponding destination lock.
+        # The shared directory lock remains compatible with legacy exclusive
+        # journal users and pins the directory inode across renames.
+        result = 0
+        for identity in requested:
+            with destination_locks(args.port, args.owner, [identity]):
+                with journal_lock(args.journal_dir, shared=True) as journal_dir:
+                    result |= _sync_requested(args, [identity], dest, token, local_token, secret, journal_dir)
+        return result
     except (OSError, ValueError) as exc:
         print(f'FORGEJO_FAILURE: {safe_reason(exc, configuration=True)}', file=sys.stderr)
         return 2

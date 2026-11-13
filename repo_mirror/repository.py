@@ -14,6 +14,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
+from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
 from repo_mirror.github_api import not_found, same_file, transient_transfer_error, transfer_retry_delay
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
@@ -370,6 +371,14 @@ def validate_source_latest(latest, releases):
         raise ValueError("source latest release not eligible in listing")
 
 
+class ReleaseAggregateError(RuntimeError):
+    """Failures collected while processing distinct source releases."""
+
+    def __init__(self, errors):
+        super().__init__(f"{len(errors)} releases failed")
+        self.release_errors = tuple(errors)
+
+
 def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, initializing, journal=None,
                     validate_snapshot=None):
     """Apply the release policy independently of repository and Git setup."""
@@ -482,6 +491,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         try:
             with timed(f"release tag={safe_label(tag)}"):
                 validate_source_draft_tag(release)
+                validate_release_source = getattr(dst, "validate_release_source", None)
+                if callable(validate_release_source):
+                    validate_release_source(release)
                 try:
                     existing = dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))
                 except HTTPError as e:
@@ -888,7 +900,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     )
 
                 def _verify_fail(reason):
-                    print(f"verify-destination failed reason={reason} tag={tag}", file=sys.stderr, flush=True)
+                    print(f"verify-destination failed reason={reason}", file=sys.stderr, flush=True)
                     return ReleaseRecoveryError("changed")
 
                 def verify_destination_matches_source(assets, strict_names, allow_missing=False):
@@ -1151,6 +1163,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         cache_enabled = False
                 records = {}
                 fresh_hashes = {}
+                shortcut_hashes = {}
 
                 def identity(asset):
                     stamp = asset.get("updated_at") or asset.get("created_at")
@@ -1192,8 +1205,38 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         target_hash = previous.get("digest") if previous else None
                         ident = identity(asset) if cache_enabled else None
                         entry = cached.get(asset["name"]) if ident else None
+                        # Only the concrete authenticated GitHub adapter may attest
+                        # to the digest in the listing; a checksum-file fallback or
+                        # an arbitrary adapter cannot opt into this shortcut.
+                        trusted_listing = type(src) is ForgejoSourceAdapter
+                        published = asset.get("digest")
                         if (
-                            type(asset.get("size")) is int
+                            trusted_listing
+                            and isinstance(published, str)
+                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", published)
+                            and type(asset.get("size")) is int and asset["size"] >= 0
+                            and previous is not None and previous.get("state") == "uploaded"
+                            and type(previous.get("id")) is int and previous["id"] > 0
+                            and type(previous.get("size")) is int
+                            and previous["size"] == asset["size"]
+                        ):
+                            with tempfile.TemporaryFile() as dest_data:
+                                dst.download(previous["url"], dest_data)
+                                if dest_data.tell() == asset["size"]:
+                                    dest_data.seek(0)
+                                    actual = hashlib.sha256()
+                                    for chunk in iter(lambda: dest_data.read(CHUNK_SIZE), b""):
+                                        actual.update(chunk)
+                                    if actual.hexdigest() == published[7:].lower():
+                                        shortcut_hashes[asset["name"]] = (previous["id"], actual.hexdigest())
+                                        if ident:
+                                            records[asset["name"]] = dict(ident, sha256=actual.hexdigest())
+                                        print("asset unchanged reason=authenticated-source-digest", file=sys.stderr, flush=True)
+                                        skipped += 1
+                                        continue
+                        if (
+                            not trusted_listing
+                            and type(asset.get("size")) is int
                             and asset["size"] >= 0
                             and previous is not None
                             and type(previous.get("size")) is int
@@ -1215,7 +1258,8 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             skipped += 1
                             continue
                         if (
-                            isinstance(entry, dict)
+                            not trusted_listing
+                            and isinstance(entry, dict)
                             and all(entry.get(k) == v for k, v in ident.items())
                             and isinstance(entry.get("sha256"), str)
                             and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])
@@ -1242,7 +1286,11 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         )
                         with tempfile.TemporaryFile() as data:
                             src.download(asset["browser_download_url"], data)
-                            if not isinstance(asset.get("size"), int) or data.tell() != asset["size"]:
+                            if (
+                                not isinstance(asset.get("size"), int)
+                                or (trusted_listing and (type(asset.get("size")) is not int or asset["size"] < 0))
+                                or data.tell() != asset["size"]
+                            ):
                                 raise RuntimeError("source asset size mismatch")
                             if isinstance(source_hash, str) and re.fullmatch(
                                 r"sha256:[0-9a-fA-F]{64}", source_hash
@@ -1365,6 +1413,28 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     )
                 ):
                     raise ReleaseRecoveryError("mismatch")
+                for asset_name, (pinned_id, expected_hash) in shortcut_hashes.items():
+                    dest_asset = actual[asset_name]
+                    if (
+                        type(dest_asset.get("id")) is not int or dest_asset["id"] != pinned_id
+                        or type(dest_asset.get("size")) is not int
+                        or dest_asset["size"] != expected[asset_name]
+                    ):
+                        raise ReleaseRecoveryError("mismatch")
+                    with tempfile.TemporaryFile() as f:
+                        dst.download(dest_asset["url"], f)
+                        if f.tell() != expected[asset_name]:
+                            raise RuntimeError("destination asset digest mismatch")
+                        f.seek(0)
+                        h = hashlib.sha256()
+                        for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
+                            h.update(chunk)
+                        if h.hexdigest() != expected_hash:
+                            raise RuntimeError("destination asset digest mismatch")
+                if shortcut_hashes:
+                    _, checked_digest, _, _ = fetch_source_assets()
+                    if checked_digest != digest:
+                        raise ReleaseRecoveryError("changed")
                 for asset_name, expected_hash in fresh_hashes.items():
                     dest_asset = actual[asset_name]
                     dh = dest_asset.get("digest")
@@ -1387,7 +1457,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 ):
                     # Verify every recorded destination byte string, including uploads.
                     for asset_name, record in records.items():
-                        if asset_name in fresh_hashes:
+                        if asset_name in fresh_hashes or asset_name in shortcut_hashes:
                             continue
                         dest_asset = actual[asset_name]
                         dh = dest_asset.get("digest")
@@ -1512,8 +1582,6 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
     if release_errors:
         if len(release_errors) == 1:
             raise release_errors[0]
-        summary = RuntimeError(f"{len(release_errors)} releases failed")
-        summary.release_errors = list(release_errors)  # read by error_detail for the log line
-        raise summary from release_errors[0]
+        raise ReleaseAggregateError(release_errors) from release_errors[0]
     if latest_id is not None:
         dst.request("PATCH", target + "/releases/" + str(latest_id), {"make_latest": "true"})
