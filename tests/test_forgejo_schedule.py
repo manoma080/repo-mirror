@@ -108,27 +108,31 @@ class ScheduleTest(unittest.TestCase):
 
     def test_inventory_manifest_has_exactly_selected_destinations(self):
         expected = [
-            'https://github.com/manoma080/mirror-Oliv3rmoon-Belladonna',
-            'https://github.com/manoma080/mirror-Oliv3rmoon-Nightshade',
             'https://github.com/manoma080/mirror-heydemoura-EglantinePS5',
             'https://github.com/manoma080/mirror-Swordpdf-ProsperoEden',
             'https://github.com/manoma080/mirror-JMUtechnologies-ps5-linux-playtendoh-workbench',
-            'https://github.com/manoma080/mirror-elripalda-Porpoise-Dolphin-Emulator-for-PS5',
             'https://github.com/manoma080/mirror-premohq-PlayTendoh',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_RetroArch',
             'https://github.com/manoma080/mirror-mihawk-99-PS5_Lichii',
             'https://github.com/manoma080/mirror-mihawk-99-PS5_Hookshot',
             'https://github.com/manoma080/mirror-SamoZ256-hydra',
-            'https://github.com/manoma080/mirror-aleksejsgx-RetroSync',
             'https://github.com/manoma080/mirror-seedds-nxnative',
             'https://github.com/manoma080/mirror-Gezine-CivSwitch',
             'https://github.com/manoma080/mirror-scarletnx-ScarletNX',
             'https://github.com/manoma080/mirror-Cor3Duo-kirikae',
-            'https://github.com/manoma080/mirror-phantomptr-ps5upload',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_Vulkan',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_Mesa',
-            'https://github.com/manoma080/mirror-JMUtechnologies-ecam-workbench',
         ]
         actual = json.loads((ROOT / 'forgejo-nintendo-sources.json').read_text())
         self.assertEqual(actual, expected)
-        self.assertEqual(len(actual), 20)
+        self.assertEqual(len(actual), 11)
+        self.assertEqual(len({url.lower() for url in actual}), 11)
+        skipped = {
+            'https://github.com/manoma080/mirror-phantomptr-ps5upload',
+            'https://github.com/manoma080/mirror-Oliv3rmoon-Nightshade',
+            'https://github.com/manoma080/mirror-Oliv3rmoon-Belladonna',
+            'https://github.com/manoma080/mirror-aleksejsgx-RetroSync',
+            'https://github.com/manoma080/mirror-elripalda-Porpoise-Dolphin-Emulator-for-PS5',
+            'https://github.com/manoma080/mirror-mihawk-99-PS5_RetroArch',
+            'https://github.com/manoma080/mirror-mihawk-99-PS5_Vulkan',
+            'https://github.com/manoma080/mirror-mihawk-99-PS5_Mesa',
+            'https://github.com/manoma080/mirror-JMUtechnologies-ecam-workbench',
+        }
+        self.assertTrue(skipped.isdisjoint(actual))

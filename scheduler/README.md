@@ -1,6 +1,6 @@
 # Forgejo host schedule (not installed or enabled)
 
-`forgejo-nintendo-sources.json` contains 20 GitHub mirror URLs; these GitHub repositories are the sources for Forgejo. The scope extends the original 16-entry selection by four sources. Review every manifest entry and its destination mapping before use.
+`forgejo-nintendo-sources.json` contains 11 GitHub mirror URLs; these GitHub repositories are the sources for Forgejo. Nine user-skipped repositories are excluded from this Forgejo batch. Review every manifest entry and its destination mapping before use.
 
 The runner validates and snapshots the full manifest and holds an owner-only nonblocking flock for the entire batch. It starts a separate sync process per source. Both templates select refreshable GitHub App credentials: the sync process obtains installation tokens through the app provider as needed, rather than relying on a single helper-minted token for the whole repository. A failed source does not stop subsequent sources; final exit status is 1 if any fail, 2 for configuration/lock errors, or 75 if another batch holds the lock. Child output is suppressed; logs contain source names, counts, and only allowlisted failure reasons. Detailed diagnostics require a separate controlled investigation. Do not run other sync processes without the same lock or other writers against these destinations.
 
