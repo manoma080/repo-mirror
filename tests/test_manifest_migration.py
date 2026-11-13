@@ -26,6 +26,76 @@ class API:
 
 
 class MigrationTests(unittest.TestCase):
+    def test_forgejo_assets_are_fetched_once_per_check_without_pagination(self):
+        payload = {'owner': 'repo-mirror:timestamps:v1', 'source': 'source', 'tag': 'v1', 'assets': {}}
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
+        payload['signature'] = hmac.new(b'secret', raw, hashlib.sha256).hexdigest()
+        class Forgejo(API):
+            def pages(self, url):
+                raise AssertionError('Forgejo repeats identical pages forever')
+            def request(self, method, url, data=None):
+                self.calls = getattr(self, 'calls', 0) + 1
+                return [{'name': 'file.zip'}]
+        src = Forgejo([])
+        dst = API([{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}], json.dumps(payload).encode())
+        self.assertEqual(migrate_release(src, dst, 'source-assets', 'destination', 5, 'source', 'v1', 'secret', source_type='forgejo'), 'renamed')
+        self.assertGreaterEqual(src.calls, 3)
+        self.assertEqual(len(dst.writes), 1)
+
+    def test_github_collision_on_second_page_blocks_write(self):
+        from repo_mirror.github_api import API as RealAPI
+        class GitHub(RealAPI):
+            def request(self, method, url, data=None, **kwargs):
+                if url.endswith('&page=1'): return [{'name': 'file.zip'}]
+                if url.endswith('&page=2'): return [{'name': 'TIMESTAMPS.txt'}]
+                return []
+        dst = API([{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}])
+        with self.assertRaisesRegex(ValueError, 'source reserved name'):
+            migrate_release(GitHub(), dst, 'source-assets', 'destination', 5, 'source', 'v1', 'secret')
+        self.assertFalse(dst.writes)
+
+    def test_forgejo_invalid_assets_and_late_collision_block_write(self):
+        payload = {'owner': 'repo-mirror:timestamps:v1', 'source': 'source', 'tag': 'v1', 'assets': {}}
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
+        payload['signature'] = hmac.new(b'secret', raw, hashlib.sha256).hexdigest()
+        for response in ({}, None, [None], [{'name': 'TIMESTAMPS.txt'}]):
+            with self.subTest(response=response):
+                class Forgejo:
+                    def request(self, method, url): return response
+                dst = API([{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}], json.dumps(payload).encode())
+                with self.assertRaises(ValueError):
+                    migrate_release(Forgejo(), dst, 'source-assets', 'destination', 5, 'source', 'v1', 'secret', source_type='forgejo')
+                self.assertFalse(dst.writes)
+        class ChangingForgejo:
+            def __init__(self): self.calls = 0
+            def request(self, method, url):
+                self.calls += 1
+                return [] if self.calls == 1 else [{'name': 'TIMESTAMPS.txt'}]
+        dst = API([{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}], json.dumps(payload).encode())
+        with self.assertRaisesRegex(ValueError, 'source reserved name'):
+            migrate_release(ChangingForgejo(), dst, 'source-assets', 'destination', 5, 'source', 'v1', 'secret', source_type='forgejo')
+        self.assertFalse(dst.writes)
+
+    def test_invalid_source_asset_names_block_rename(self):
+        payload = {'owner': 'repo-mirror:timestamps:v1', 'source': 'source', 'tag': 'v1', 'assets': {}}
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
+        payload['signature'] = hmac.new(b'secret', raw, hashlib.sha256).hexdigest()
+        for provider in ('github', 'forgejo'):
+            for invalid in ({}, {'name': None}, {'name': ''}, {'name': 123}, {'name': []}):
+                for invalid_check in (1, 3):
+                    with self.subTest(provider=provider, asset=invalid, check=invalid_check):
+                        class Source:
+                            calls = 0
+                            def fetch(self):
+                                self.calls += 1
+                                return [invalid] if self.calls == invalid_check else [{'name': 'file.zip'}]
+                            def pages(self, url): return self.fetch()
+                            def request(self, method, url): return self.fetch()
+                        dst = API([{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}], json.dumps(payload).encode())
+                        with self.assertRaisesRegex(ValueError, 'invalid source assets'):
+                            migrate_release(Source(), dst, 'source-assets', 'destination', 5, 'source', 'v1', 'secret', source_type=provider)
+                        self.assertFalse(dst.writes)
+
     def test_oversize_metadata_refused_before_download(self):
         class NoDownload(API):
             def download(self, url, f):
@@ -99,6 +169,41 @@ class MigrationTests(unittest.TestCase):
 
 
 class ScanTests(unittest.TestCase):
+    def test_cli_logs_repository_boundaries_and_redacts_labels(self):
+        import contextlib
+        import io
+        import tempfile
+        from unittest.mock import patch
+        from repo_mirror.manifest_migration import main
+        owner = 'ghp_' + 'a' * 36
+        config = {'destination_account_type': 'personal', 'sources': [{'type': 'github', 'base_url': 'https://github.com', 'owner': owner, 'repos': ['proj']}]}
+        counts = dict.fromkeys(('renamed', 'unchanged', 'source_only', 'destination_only', 'failed', 'missing_repository'), 0)
+        output = io.StringIO()
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.json') as f:
+            json.dump(config, f); f.flush()
+            with patch.dict('os.environ', {'GH_TOKEN': 'test', 'DESTINATION_OWNER': 'dest', 'MIRROR_TIMESTAMP_SECRET': 'secret'}, clear=True), patch('repo_mirror.manifest_migration.scan_repository', return_value=counts), contextlib.redirect_stdout(output):
+                self.assertEqual(main(['--config', f.name]), 0)
+        self.assertIn('repository 1/1 started', output.getvalue())
+        self.assertIn('repository 1/1 finished', output.getvalue())
+        self.assertNotIn(owner, output.getvalue())
+
+    def test_scan_passes_forgejo_type_to_asset_check(self):
+        from unittest.mock import patch
+        from repo_mirror.manifest_migration import scan_repository
+        from repo_mirror.sources import source_marker
+        source = {'type': 'forgejo', 'base_url': 'https://code.example', 'owner': 'alice', 'repos': ['proj']}
+        class Routes(API):
+            def pages(self, url):
+                if url.endswith('/releases'):
+                    return [{'id': 1, 'tag_name': 'v1', 'draft': False}]
+                return [{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}]
+            def request(self, method, url, data=None):
+                return {'description': source_marker(source, 'proj')}
+        with patch('repo_mirror.manifest_migration.migrate_release', return_value='renamed') as migrate:
+            result = scan_repository(source, 'proj', 'target', Routes([]), Routes([]), 'secret')
+        self.assertEqual(result['renamed'], 1)
+        self.assertEqual(migrate.call_args.kwargs['source_type'], 'forgejo')
+
     def test_scans_old_releases_and_reports_destination_only(self):
         from repo_mirror.manifest_migration import scan_repository
         source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["proj"]}

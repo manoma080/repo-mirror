@@ -23,7 +23,7 @@ SAFE_MIGRATION_ERRORS = frozenset({
     'ambiguous release identity', 'ambiguous untagged destination draft',
     'draft release requires manual review', 'invalid release body',
     'pending release requires manual review', 'destination repository disappeared', 'release changed',
-    'source availability changed',
+    'source availability changed', 'invalid source assets',
 })
 
 
@@ -41,7 +41,7 @@ class _BoundedBuffer(io.BytesIO):
         return super().write(data)
 
 
-def migrate_release(src, dst, source_assets_url, target, release_id, source, tag, secret, pre_write=None):
+def migrate_release(src, dst, source_assets_url, target, release_id, source, tag, secret, pre_write=None, source_type='github'):
     """Rename an authenticated legacy manifest, or refuse ambiguous state."""
     if not secret:
         raise ValueError('missing secret')
@@ -55,8 +55,15 @@ def migrate_release(src, dst, source_assets_url, target, release_id, source, tag
         if len(matches) != 1 or matches[0].get('name') not in (LEGACY, NEW):
             raise ValueError('missing or conflicting manifest')
         asset = matches[0]
-        if source_assets_url is not None and any(a.get('name') in RESERVED for a in src.pages(source_assets_url)):
-            raise ValueError('source reserved name')
+        if source_assets_url is not None:
+            source_assets = src.request('GET', source_assets_url) if source_type == 'forgejo' else src.pages(source_assets_url)
+            if not isinstance(source_assets, list) or any(
+                not isinstance(a, dict) or not isinstance(a.get('name'), str) or not a['name']
+                for a in source_assets
+            ):
+                raise ValueError('invalid source assets')
+            if any(a.get('name') in RESERVED for a in source_assets):
+                raise ValueError('source reserved name')
         if type(asset.get('id')) is not int or asset['id'] <= 0 or not isinstance(asset.get('url'), str) or not asset['url']:
             raise ValueError('invalid manifest identity')
         # GitHub adds volatile counters and timestamps; they are not identity.
@@ -206,7 +213,7 @@ def scan_repository(source, name, target, src, dst, secret):
                 if snapshot(index(list(dst.pages(target + "/releases"))).get(tag)) != snapshot(b):
                     raise ValueError("release changed")
 
-            outcome = migrate_release(src, dst, source_assets_url, target, b["id"], marker, tag, secret, pre_write=pre_write)
+            outcome = migrate_release(src, dst, source_assets_url, target, b["id"], marker, tag, secret, pre_write=pre_write, source_type=source['type'])
             result[outcome] += 1
         except Exception as exc:
             result["failed"] += 1
@@ -221,7 +228,7 @@ def main(argv=None):
     from urllib.parse import quote
     from repo_mirror.constants import GITHUB, NAME
     from repo_mirror.github_api import API, SourceAPI, AppTokenProvider
-    from repo_mirror.logging_utils import error_detail
+    from repo_mirror.logging_utils import error_detail, safe_label
     from repo_mirror.sources import validate_source, discover, destination_name
     from repo_mirror.source_filter import filter_plan
 
@@ -256,15 +263,19 @@ def main(argv=None):
         plan = filter_plan(plan, args.source_urls)
         totals = {"renamed": 0, "unchanged": 0, "source_only": 0, "destination_only": 0, "failed": 0, "missing_repository": 0}
         repository_failed = 0
-        for _, source, name in plan:
+        for repo_index, (_, source, name) in enumerate(plan, 1):
             target = GITHUB + "/repos/" + quote(owner, safe="") + "/" + quote(destination_name(source, name), safe="")
+            label = f"{safe_label(source.get('owner'))}/{safe_label(name)}"
+            print(f"repository {repo_index}/{len(plan)} started source_repo={label}", flush=True)
             try:
                 result = scan_repository(source, name, target, github if source["type"] == "github" else other, dst, secret)
                 for key in totals:
                     totals[key] += result[key]
             except Exception as exc:
                 repository_failed += 1
-                print(f"repository {source['owner']}/{name} failed: {migration_error(exc)}")
+                print(f"repository {repo_index}/{len(plan)} failed source_repo={label}: {migration_error(exc)}", flush=True)
+            finally:
+                print(f"repository {repo_index}/{len(plan)} finished source_repo={label}", flush=True)
         print("summary repositories=" + str(len(plan)) + " repository_failed=" + str(repository_failed) + " " + " ".join(f"{k}={v}" for k, v in totals.items()))
         return 1 if repository_failed or any(totals[k] for k in ("failed", "source_only", "destination_only", "missing_repository")) else 0
     except Exception as exc:
