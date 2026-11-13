@@ -14,11 +14,13 @@ SOURCE = {"type": "github", "base_url": "https://github.com", "owner": "alice"}
 
 class Source:
     def __init__(self):
-        self.releases = [{"id": n, "tag_name": str(n), "name": "current"} for n in range(12)]
+        self.releases = [{"id": n + 1, "tag_name": str(n), "name": "current"} for n in range(12)]
 
     def request(self, *args):
         if args[1].endswith("/releases/latest"):
             raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(args[1], 404, "", {}, None)
+        if "/releases/" in args[1] and args[1].rsplit("/", 1)[-1].isdigit():
+            return next(r.copy() for r in self.releases if str(r.get("id")) == args[1].rsplit("/", 1)[-1])
         return {"clone_url": "https://github.com/alice/demo.git"}
 
     def pages(self, url):
@@ -74,7 +76,7 @@ class RetryScopeTests(unittest.TestCase):
             def pages(self, url):
                 if url.endswith("/releases"):
                     return self.releases
-                if url.endswith("/11/assets"):
+                if url.endswith("/12/assets"):
                     return [{"name": "file", "size": 1, "browser_download_url": "https://github.com/file"}]
                 return []
 

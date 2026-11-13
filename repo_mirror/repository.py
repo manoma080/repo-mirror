@@ -328,6 +328,8 @@ def validate_source_release_listing(releases):
         raise ValueError("invalid source release listing")
     for release in releases:
         validate_source_release_metadata(release)
+        if not {"name", "body", "draft", "prerelease"} <= release.keys():
+            raise ValueError("incomplete source release metadata")
     validate_unique_source_tags(releases)
 
 
@@ -336,12 +338,13 @@ def validate_source_release_metadata(release):
         raise ValueError("invalid source release tag")
     if type(release.get("id")) is not int or release["id"] <= 0:
         raise ValueError("invalid source release id")
-    if "name" not in release or (release["name"] is not None and not isinstance(release["name"], str)):
+    if "name" in release and release["name"] is not None and not isinstance(release["name"], str):
         raise ValueError("invalid source release name")
-    if "body" not in release:
-        raise ValueError("invalid source release body")
-    if any(type(release.get(key)) is not bool for key in ("draft", "prerelease")):
+    if any(key in release and type(release[key]) is not bool for key in ("draft", "prerelease")):
         raise ValueError("invalid source release flags")
+    target = release.get("target_commitish")
+    if target is not None and (not isinstance(target, str) or not target):
+        raise ValueError("invalid source release target")
     validate_source_draft_tag(release)
     validate_source_release_markers(release)
 
@@ -364,6 +367,8 @@ def validate_source_latest(latest, releases):
     if latest is None:
         return
     validate_source_release_metadata(latest)
+    if not {"name", "body", "draft", "prerelease"} <= latest.keys():
+        raise ValueError("incomplete source release metadata")
     if latest["draft"] or latest["prerelease"]:
         raise ValueError("invalid source latest release")
     matches = [r for r in releases if r["id"] == latest["id"] and r["tag_name"] == latest["tag_name"]]
@@ -377,6 +382,11 @@ class ReleaseAggregateError(RuntimeError):
     def __init__(self, errors):
         super().__init__(f"{len(errors)} releases failed")
         self.release_errors = tuple(errors)
+
+
+def logical_release_body(body):
+    """Normalize only cross-provider comparisons, never snapshot evidence."""
+    return "" if body is None or body == " " else body
 
 
 def verify_empty_body_converged(src, dst, upstream, target, release):
@@ -397,7 +407,7 @@ def verify_empty_body_converged(src, dst, upstream, target, release):
             if (not {"body", "name", "draft", "prerelease", "target_commitish"} <= item.keys() or
                     not isinstance(tag, str) or not tag or
                     title is not None and not isinstance(title, str) or
-                    item.get("body") not in (None, "") or
+                    item.get("body") not in (None, "", " ") or
                     item.get("draft") is not False or type(item.get("prerelease")) is not bool or
                     not isinstance(item.get("target_commitish"), str) or not item["target_commitish"]):
                 raise ValueError()
@@ -412,6 +422,7 @@ def verify_empty_body_converged(src, dst, upstream, target, release):
         dest_meta = metadata(dest)
         if (dest_meta[1] != tag or
                 (dest_meta[2] != initial[2] and not (initial[2] in (None, "") and dest_meta[2] == tag)) or
+                logical_release_body(dest_meta[3]) != logical_release_body(initial[3]) or
                 dest_meta[4:] != initial[4:]):
             return None
         dest_url = target + "/releases/" + str(dest["id"])
@@ -643,9 +654,25 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         try:
             with timed(f"release tag={safe_label(tag)}"):
                 validate_source_draft_tag(release)
+                metadata_keys = ("id", "tag_name", "body", "name", "target_commitish", "draft", "prerelease")
+                release_id = release.get("id")
+                if type(release_id) is not int or release_id <= 0:
+                    raise ValueError("source release changed during sync")
+                baseline = src.request("GET", upstream + "/releases/" + str(release_id))
+                listed = next((item for item in releases if item["tag_name"] == tag), release)
+                if (not isinstance(baseline, dict) or
+                        any(key not in baseline or type(baseline[key]) is not type(snapshot[key]) or
+                            baseline[key] != snapshot[key]
+                            for snapshot in (listed, release) for key in metadata_keys if key in snapshot) or
+                        baseline.get("id") != release_id or baseline.get("tag_name") != tag):
+                    raise ValueError("source release changed during sync")
+                validate_source_release_metadata(baseline)
+                release = baseline
+                validate_source_draft_tag(release)
+                source_metadata = {key: (key in release, release.get(key)) for key in metadata_keys}
                 validate_release_source = getattr(dst, "validate_release_source", None)
                 if callable(validate_release_source):
-                    if getattr(dst, "verify_empty_body_read_only", False) and release.get("body") in (None, ""):
+                    if getattr(dst, "verify_empty_body_read_only", False) and release.get("body") in (None, "", " "):
                         failed = journal and any(
                             key.split(":", 1)[0] == journal.key(source, name, owner, tag, "")[:64]
                             for key in journal.failures
@@ -705,6 +732,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     ).hexdigest()
 
                 validate_source_release_markers(release)
+                # Preserve raw source values; destination body equivalence is not drift equivalence.
                 source_body = release.get("body")
                 source_name = release.get("name")
                 authenticated_draft = False
@@ -1708,9 +1736,17 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             f.seek(0)
                             if f.read() != content:
                                 raise ReleaseRecoveryError("mismatch")
+                fresh_release = src.request("GET", upstream + "/releases/" + str(release["id"]))
+                if not isinstance(fresh_release, dict) or any(
+                    (key in fresh_release, fresh_release.get(key)) != source_metadata[key]
+                    or type(fresh_release.get(key)) is not type(source_metadata[key][1])
+                    for key in metadata_keys
+                ):
+                    raise ValueError("source release changed during sync")
                 final_body = release.get("body")
+
                 if release.get("draft") is True:
-                    final_body = (final_body or "") + "\n" + IDENTITY_SENTINEL + draft_identity_signature(
+                    final_body = logical_release_body(final_body) + "\n" + IDENTITY_SENTINEL + draft_identity_signature(
                         secret, marker, tag, target, existing["id"]
                     )
                     if len(final_body) > 125000:
@@ -1755,7 +1791,6 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
             except Exception:
                 matches = False
             if not matches:
-                # Preserve Forgejo's existing safe conflict instead of selecting latest.
-                dst.validate_release_source({"body": ""})
+                raise RuntimeError("destination latest release cannot be selected")
         else:
             dst.request("PATCH", target + "/releases/" + str(latest_id), {"make_latest": "true"})

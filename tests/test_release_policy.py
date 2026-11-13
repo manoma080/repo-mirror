@@ -58,6 +58,9 @@ class ReleasePolicyTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         args[1], 404, "", {}, None
                     )
+                if "/releases/" in args[1]:
+                    url, release_id = args[1].rsplit("/", 1)
+                    return next(release for release in self.pages(url) if str(release["id"]) == release_id)
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
@@ -118,10 +121,13 @@ class ReleasePolicyTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         args[1], 404, "", {}, None
                     )
+                if "/releases/" in args[1]:
+                    url, release_id = args[1].rsplit("/", 1)
+                    return next(release for release in self.pages(url) if str(release["id"]) == release_id)
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
-                return [{"id": n, "tag_name": str(n)} for n in range(12)] if url.endswith("/releases") else []
+                return [{"id": n + 1, "tag_name": str(n)} for n in range(12)] if url.endswith("/releases") else []
 
         class Destination:
             def __init__(self):

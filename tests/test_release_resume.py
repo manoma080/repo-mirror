@@ -21,6 +21,8 @@ class ReleaseTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         args[1], 404, "", {}, None
                     )
+                if args[1].endswith("/releases/1"):
+                    return self.pages(args[1].rsplit("/", 1)[0])[0]
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
@@ -69,6 +71,8 @@ class ReleaseTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         args[1], 404, "", {}, None
                     )
+                if args[1].endswith("/releases/1"):
+                    return self.pages(args[1].rsplit("/", 1)[0])[0]
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
@@ -183,6 +187,8 @@ class ReleaseTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         args[1], 404, "", {}, None
                     )
+                if args[1].endswith("/releases/1"):
+                    return self.pages(args[1].rsplit("/", 1)[0])[0]
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
@@ -235,6 +241,8 @@ class ReleaseTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         args[1], 404, "", {}, None
                     )
+                if args[1].endswith("/releases/1"):
+                    return self.pages(args[1].rsplit("/", 1)[0])[0]
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):

@@ -1,6 +1,7 @@
 import base64
 import json
 import unittest
+from urllib.error import HTTPError
 
 from mirror_test_support import patch_everywhere
 
@@ -56,6 +57,12 @@ class EngineTests(unittest.TestCase):
                     return [
                         {"name": "bin.zip", "browser_download_url": "https://src.example/bin.zip", "size": 4}
                     ]
+                if method == "GET" and "/releases/" in url:
+                    listing, release_id = url.rsplit("/", 1)
+                    for release in self.pages(listing):
+                        if release.get("id") is not None and str(release["id"]) == release_id:
+                            return release.copy()
+                    raise HTTPError(url, 404, "", None, None)
                 if url.endswith("/assets?per_page=100&page=1"):
                     return []
                 return {}
@@ -146,6 +153,12 @@ class EngineTests(unittest.TestCase):
                 if url.endswith("/releases/4/assets"):
                     self.visited.append(url)
                     return [{"name": "file", "size": 1, "browser_download_url": "https://src.example/file"}]
+                if method == "GET" and "/releases/" in url:
+                    listing, release_id = url.rsplit("/", 1)
+                    for release in self.pages(listing):
+                        if release.get("id") is not None and str(release["id"]) == release_id:
+                            return release.copy()
+                    raise HTTPError(url, 404, "", None, None)
                 return {}
 
             def pages(self, url):
@@ -270,6 +283,8 @@ class SafetyTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         a[1], 404, "", {}, None
                     )
+                if a[1].endswith("/releases/1"):
+                    return {"id": 1, "tag_name": "v1"}
                 return {"clone_url": "https://github.com/Alice/demo.git"}
 
             def pages(self, url):

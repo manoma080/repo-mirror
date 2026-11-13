@@ -21,6 +21,8 @@ class IsolationTests(unittest.TestCase):
             def request(self, method, url):
                 if url.endswith("/releases/latest"):
                     raise HTTPError(url, 404, "", {}, io.BytesIO())
+                if method == "GET" and url.endswith("/releases/2"):
+                    return {"id": 2, "tag_name": "good"}
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
@@ -66,6 +68,10 @@ class IsolationTests(unittest.TestCase):
             def request(self, method, url):
                 if url.endswith("/releases/latest"):
                     raise HTTPError(url, 404, "", {}, io.BytesIO())
+                if method == "GET" and url.endswith("/releases/2"):
+                    return {"id": 2, "tag_name": "good"}
+                if method == "GET" and url.endswith("/releases/1"):
+                    return {"id": 1, "tag_name": "bad"}
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):

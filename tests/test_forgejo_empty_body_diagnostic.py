@@ -23,18 +23,18 @@ def run_mirror(bodies):
                      draft=False, prerelease=False) for i, body in enumerate(bodies)]
     class Source:
         def pages(self, url): return releases
-        def request(self, method, url): return releases[0]
+        def request(self, method, url):
+            if url.endswith('/latest'): return releases[0]
+            return next(item.copy() for item in releases if str(item['id']) == url.rsplit('/', 1)[-1])
     class Client:
         origin = 'http://127.0.0.1:3300'
         base = '/api/v1/repos/team/project'
     adapter = ForgejoDestinationAdapter('team/project', 'token', client=Client())
-    # Fail before any destination I/O, including for the intentionally unknown error.
-    if 'unknown' in bodies:
-        original = adapter.validate_release_source
-        def validate(release):
-            if release['body'] == 'unknown': raise ValueError('secret-token')
-            original(release)
-        adapter.validate_release_source = validate
+    # Exercise legacy diagnostic classification independently of current policy.
+    def validate(release):
+        if release['body'] == 'unknown': raise ValueError('secret-token')
+        raise SyncConflict(REASON)
+    adapter.validate_release_source = validate
     with patch.dict(os.environ, {'MIRROR_TIMESTAMP_SECRET': 'secret-token'}):
         mirror_releases({'type': 'github', 'owner': 'alice'}, 'demo', 'team', Source(), adapter,
                         'https://source/repo', adapter.target, 'marker', initializing=True)
