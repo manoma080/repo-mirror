@@ -4,7 +4,7 @@
 
 The runner validates and snapshots the full manifest and holds an owner-only nonblocking flock for the entire batch. It starts a separate sync process per source. Both templates select refreshable GitHub App credentials: the sync process obtains installation tokens through the app provider as needed, rather than relying on a single helper-minted token for the whole repository. A failed source does not stop subsequent sources; final exit status is 1 if any fail, 2 for configuration/lock errors, or 75 if another batch holds the lock. Child output is suppressed; logs contain source names, counts, and only allowlisted failure reasons. Detailed diagnostics require a separate controlled investigation. Do not run other sync processes without the same lock or other writers against these destinations.
 
-The sync is conservative, not an exact destructive mirror. It adds refs and fast-forwards branches, but does not delete refs or move existing tags; conflicts fail for operator reconciliation. Missing releases and assets may be created, but existing release metadata is not updated and existing assets are not overwritten or deleted. Changed release metadata, an existing draft, or different content for an existing asset causes that source to fail and requires operator reconciliation. Destination-only releases and assets are retained. The destination must be private, have the expected source provenance marker, and have Actions disabled. Asset bytes are compared, but a same-size source mutation without a digest can race verification. A failure can leave earlier successful changes in place; inspect before retrying, especially after an interrupted upload.
+**This is destructive reconciliation.** Shared Git logic can force-update branches and tags and delete destination-only refs. When wipe detection triggers, it first creates a private, timestamped `-wipe-` Git archive and verifies the captured refs; archive failure stops the update. This is conditional, not a backup for every destructive change. The archive contains Git refs and reachable objects only, not releases, assets, LFS objects, settings or hidden refs. The shared GitHub release policy processes all source releases during initialization; on later runs it selects the first listed release, the source latest release, missing releases, drafts, pending releases and previously failed releases. It can update metadata and replace or delete assets for selected releases, but changes to older existing releases that are not selected can be missed. Destination-only releases are retained; destination-only assets on selected releases can be deleted. Forgejo cannot explicitly select the latest release: if the source latest is not already Forgejo's latest, synchronization fails rather than pretending it selected it. The destination must be private, have the expected source provenance marker, and have Actions disabled. Asset bytes are compared, but a same-size source mutation without a digest can race verification. A failure can leave earlier successful changes in place; inspect before retrying, especially after an interrupted upload.
 
 Before an authorized bulk test, select two representative manifest sources, including one with releases and assets, and obtain authorization for their destination writes. Run each pilot separately under the same lock and without other writers. For each, verify the destination's privacy, provenance and disabled Actions; compare source and destination branch/tag refs, release metadata and asset bytes; then rerun and inspect the result for unexpected changes or conflicts. Record sanitized results without credentials or signed URLs. Reconcile any failure before proceeding. These are verification steps, not a claim that pilots have already passed.
 
@@ -13,9 +13,31 @@ The templates are inert files, not installed. Prefer the systemd user timer when
 After that gate, replace all placeholders in the selected template:
 
 - `@PYTHON@`: absolute Python executable with the sync package's dependencies available. Ensure `openssl` and `git` are available on the scheduler's PATH.
+- `@CHECKOUT@`: absolute path of the reviewed checkout containing `repo_mirror` and `forgejo-nintendo-sources.json`; use the same value in both occurrences.
+- `@TOKEN_FILE@`: absolute path to the Forgejo token file.
+- `@LOCK_FILE@`: absolute path to the persistent batch lock file in an owner-controlled directory.
 - `@OWNER@`: verified Forgejo account name.
 - `@APP_ID@`: GitHub App ID.
 - `@PRIVATE_KEY_FILE@`: absolute path to the GitHub App private key file, not its contents.
+- `@TIMESTAMP_SECRET_FILE@`: absolute path to a pre-provisioned, stable owner-only recovery signing secret, separate from the source manifest, Forgejo token and GitHub App key (including hard links). Generate it cryptographically with at least 32 bytes of randomness. Never put its value in a template or log. Preserve it across runs and restarts; changing it prevents verification of existing recovery markers.
+- `@JOURNAL_DIR@`: absolute path to a pre-existing owner-only persistent directory for recovery journals. Preserve its contents across runs and restarts; do not place it in temporary or ephemeral storage.
+
+The scheduler does not create the secret or journal directory. Provision both securely before enabling the job, owned by the scheduler user (secret mode 0600, directory mode 0700), and protect their parent directories from untrusted modifications. Back up the secret and journals securely together. Neither may be a symlink at the final path component.
+
+For a new installation, in a protected parent directory, generate a secret once (the exclusive create refuses to overwrite an existing one) and create the journal directory as the scheduler user:
+
+```sh
+umask 077
+python3 -c 'import os,secrets; p="/absolute/protected/path/recovery-secret"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,secrets.token_hex(32).encode()); os.close(fd)'
+mkdir -m 700 /absolute/protected/path/journals
+chmod 600 /absolute/protected/path/recovery-secret
+```
+
+The file contains 64 hexadecimal characters representing 32 random bytes; the scheduler rejects values shorter than 32 bytes after stripping surrounding whitespace. Length checks do not establish randomness. Never regenerate an existing secret as part of a deployment.
+
+### Migrating an existing timer or cron job
+
+Stop the old timer or disable the old cron entry and wait for any running batch and direct syncs to finish before changing anything. The new runner requires both `--timestamp-secret-file` and `--journal-dir`; an old installed command without them fails argument parsing. Provision the stable secret and persistent journal directory once as above, or retain the existing ones if already in use. Back them up securely, render **all** placeholders against the intended checkout, and update the installed service or cron entry with both arguments and the same stable paths. For systemd reload the user manager after updating the service; re-enable only after the review and pilot gate. Verify the installed command and timer after rollout. Do not rotate or delete the secret or journal to clear an error; investigate recovery state first.
 
 Use single paths/names without spaces or systemd/cron metacharacters. Do not embed tokens or private keys in templates. Add `--organization` if the owner is an organization, and adjust `--port` if needed. Keep the lock path the same in every invocation and in an owner-controlled directory. Verify the Forgejo token and app private key files are owner-only and owned by the running user. Ensure the checkout and credentials remain at the paths in the template, and that local Forgejo is running. Protect the worktree and source manifest from untrusted edits: the job executes code from this checkout.
 

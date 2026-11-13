@@ -70,6 +70,18 @@ def release_marker_is_pending(body):
     return isinstance(body, str) and "[repo-mirror:pending:v3]" in body
 
 
+def validate_source_release_markers(release):
+    """Reject release metadata reserved for mirror recovery and identity."""
+    body = release.get("body")
+    if (body is not None and not isinstance(body, str)) or (
+        isinstance(body, str) and ("[repo-mirror:pending:v3]" in body or IDENTITY_SENTINEL in body)
+    ):
+        raise ReleaseRecoveryError("marker")
+    name = release.get("name")
+    if isinstance(name, str) and name.startswith(("[repo-mirror:pending:v1]", "[repo-mirror:pending:v2]")):
+        raise ValueError("source release name uses reserved marker")
+
+
 def draft_original_name(release):
     name = release.get("name")
     if isinstance(name, str) and name.startswith(("[repo-mirror:pending:v1]", "[repo-mirror:pending:v2]")):
@@ -288,34 +300,98 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 "switch_default": switch_default,
             },
         )
+    mirror_releases(source, name, owner, src, dst, upstream, target, marker,
+                    initializing=initializing, journal=journal)
+    if initializing:
+        dst.request("PATCH", target, {"description": marker})
+
+
+def valid_source_release_tag(release):
+    return (isinstance(release, dict) and isinstance(release.get("tag_name"), str)
+            and bool(release["tag_name"]))
+
+
+def validate_source_draft_tag(release):
+    if release.get("draft") is True and release["tag_name"].startswith("untagged-"):
+        raise ValueError("source draft has untagged synthetic tag; manual reconciliation required")
+
+
+def validate_unique_source_tags(releases):
+    if len({r["tag_name"] for r in releases}) != len(releases):
+        raise ValueError("duplicate source release tag")
+
+
+def validate_source_release_listing(releases):
+    """Strict preflight of the complete source snapshot before destination writes."""
+    if not isinstance(releases, list):
+        raise ValueError("invalid source release listing")
+    for release in releases:
+        validate_source_release_metadata(release)
+    validate_unique_source_tags(releases)
+
+
+def validate_source_release_metadata(release):
+    if not valid_source_release_tag(release):
+        raise ValueError("invalid source release tag")
+    if type(release.get("id")) is not int or release["id"] <= 0:
+        raise ValueError("invalid source release id")
+    if "name" not in release or (release["name"] is not None and not isinstance(release["name"], str)):
+        raise ValueError("invalid source release name")
+    if "body" not in release:
+        raise ValueError("invalid source release body")
+    if any(type(release.get(key)) is not bool for key in ("draft", "prerelease")):
+        raise ValueError("invalid source release flags")
+    validate_source_draft_tag(release)
+    validate_source_release_markers(release)
+
+
+def fetch_source_latest(src, upstream):
+    try:
+        latest = src.request("GET", upstream + "/releases/latest")
+        if (not isinstance(latest, dict) or not latest.get("tag_name")
+                or latest.get("draft") or latest.get("prerelease")):
+            raise ValueError("invalid source latest release")
+        return latest
+    except HTTPError as exc:
+        if not not_found(exc):
+            raise
+        exc.close()
+        return None
+
+
+def validate_source_latest(latest, releases):
+    if latest is None:
+        return
+    validate_source_release_metadata(latest)
+    if latest["draft"] or latest["prerelease"]:
+        raise ValueError("invalid source latest release")
+    matches = [r for r in releases if r["id"] == latest["id"] and r["tag_name"] == latest["tag_name"]]
+    if len(matches) != 1 or matches[0]["draft"] or matches[0]["prerelease"]:
+        raise ValueError("source latest release not eligible in listing")
+
+
+def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, initializing, journal=None,
+                    validate_snapshot=None):
+    """Apply the release policy independently of repository and Git setup."""
     with timed("step release-discovery target=source"):
         releases = src.pages(upstream + "/releases")
+    if validate_snapshot is not None:
+        latest = fetch_source_latest(src, upstream)
+        validate_snapshot(releases, latest)
     invalid_releases = [
         r
         for r in releases
-        if not isinstance(r, dict) or not isinstance(r.get("tag_name"), str) or not r.get("tag_name")
+        if not valid_source_release_tag(r)
     ]
     if invalid_releases:
         print("release failed: invalid source release tag", file=sys.stderr, flush=True)
         releases = [
             r
             for r in releases
-            if isinstance(r, dict) and isinstance(r.get("tag_name"), str) and r.get("tag_name")
+            if valid_source_release_tag(r)
         ]
-    try:
-        latest = src.request("GET", upstream + "/releases/latest")
-        if (
-            not isinstance(latest, dict)
-            or not latest.get("tag_name")
-            or latest.get("draft")
-            or latest.get("prerelease")
-        ):
-            raise ValueError("invalid source latest release")
-    except HTTPError as exc:
-        if not not_found(exc):
-            raise
-        exc.close()
-        latest = None
+    if validate_snapshot is None:
+        latest = fetch_source_latest(src, upstream)
 
     destination_releases = None
     known_draft_tags = {}
@@ -348,8 +424,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 if len(authenticated) == 1:
                     known_draft_tags[item["id"]] = authenticated[0]
         return destination_releases
-    if len({r["tag_name"] for r in releases}) != len(releases):
-        raise ValueError("duplicate source release tag")
+    validate_unique_source_tags(releases)
     if initializing or len(releases) <= 1:
         selected = list(releases)
     else:
@@ -406,8 +481,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         )
         try:
             with timed(f"release tag={safe_label(tag)}"):
-                if release.get("draft") is True and tag.startswith("untagged-"):
-                    raise ValueError("source draft has untagged synthetic tag; manual reconciliation required")
+                validate_source_draft_tag(release)
                 try:
                     existing = dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))
                 except HTTPError as e:
@@ -455,14 +529,10 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                         secret.encode(), b"repo-mirror:release-recovery:v3\0" + encoded, hashlib.sha256
                     ).hexdigest()
 
+                validate_source_release_markers(release)
                 source_body = release.get("body")
-                if (source_body is not None and not isinstance(source_body, str)) or (
-                    isinstance(source_body, str) and (sentinel in source_body or IDENTITY_SENTINEL in source_body)
-                ):
-                    raise ReleaseRecoveryError("marker")
                 source_name = release.get("name")
-                if isinstance(source_name, str) and source_name.startswith((prefix_v1, prefix_v2)):
-                    raise ValueError("source release name uses reserved marker")
+                authenticated_draft = False
                 body = existing.get("body") if existing else None
                 if isinstance(body, str) and IDENTITY_SENTINEL in body:
                     if body.count(IDENTITY_SENTINEL) != 1 or "\n" + IDENTITY_SENTINEL not in body:
@@ -471,6 +541,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                     expected = draft_identity_signature(secret, marker, tag, target, existing["id"])
                     if not hmac.compare_digest(signature, expected):
                         raise ReleaseRecoveryError("marker")
+                    authenticated_draft = True
                 if body is not None and not isinstance(body, str):
                     raise ReleaseRecoveryError("marker")
                 state = None
@@ -534,6 +605,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                             raise ValueError()
                     except ValueError, TypeError:
                         raise ReleaseRecoveryError("marker") from None
+                    authenticated_draft = True
 
                 def marked_body(base, marker_state):
                     signed_state = dict(
@@ -563,6 +635,8 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                     else:
                         fields = {k: release.get(k) for k in ("draft", "prerelease")}
                         fields.update(tag_name=tag, name=source_name, body=marked, make_latest="false")
+                        if getattr(dst, "supports_target_commitish", False) and release.get("target_commitish") is not None:
+                            fields["target_commitish"] = release["target_commitish"]
                         try:
                             existing = dst.request("POST", target + "/releases", fields)
                             if isinstance(existing, dict):
@@ -584,6 +658,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                             or existing["id"] <= 0
                         ):
                             raise ReleaseRecoveryError("marker")
+                        authenticated_draft = True
                         # A create response supplies the ID; bind before inspecting or mutating assets.
                         dst.request(
                             "PATCH",
@@ -1407,17 +1482,22 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                     )
                     if len(final_body) > 125000:
                         raise ValueError("release body too long for draft identity")
-                dst.request(
-                    "PATCH",
-                    target + "/releases/" + str(existing["id"]),
-                    {
+                final_fields = {
                         "name": release.get("name"),
                         "body": final_body,
                         "make_latest": "false",
                         **({"tag_name": tag} if existing.get("draft") is True and release.get("draft") is False else {}),
                         **{k: release[k] for k in ("draft", "prerelease") if k in release},
-                    },
-                )
+                    }
+                if getattr(dst, "supports_target_commitish", False) and release.get("target_commitish") is not None:
+                    final_fields["target_commitish"] = release["target_commitish"]
+                old_tag = existing.get("tag_name")
+                if (authenticated_draft and isinstance(old_tag, str) and old_tag.startswith("untagged-")
+                        and existing.get("draft") is True and release.get("draft") is False
+                        and callable(getattr(dst, "publish_authenticated_draft", None))):
+                    dst.publish_authenticated_draft(existing["id"], old_tag, final_fields)
+                else:
+                    dst.request("PATCH", target + "/releases/" + str(existing["id"]), final_fields)
                 if latest and tag == latest["tag_name"]:
                     latest_id = existing["id"]
                 if journal:
@@ -1437,5 +1517,3 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         raise summary from release_errors[0]
     if latest_id is not None:
         dst.request("PATCH", target + "/releases/" + str(latest_id), {"make_latest": "true"})
-    if initializing:
-        dst.request("PATCH", target, {"description": marker})

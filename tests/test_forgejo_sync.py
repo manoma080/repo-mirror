@@ -6,7 +6,7 @@ import io
 import urllib.error
 from contextlib import redirect_stderr
 from email.message import Message
-from unittest.mock import patch
+from unittest.mock import patch, ANY
 from repo_mirror import forgejo_sync
 from repo_mirror.forgejo_releases import SyncConflict
 from repo_mirror.forgejo_git import APIError
@@ -15,6 +15,87 @@ URL = 'https://github.com/manoma080/mirror-Gezine-CivSwitch'
 
 
 class RunnerTests(unittest.TestCase):
+    def setUp(self):
+        source_api = patch('repo_mirror.forgejo_sync.SourceAPI', autospec=True)
+        self.github = source_api.start()
+        self.addCleanup(source_api.stop)
+        self.github.return_value.pages.return_value = [
+            {'id': 1, 'tag_name': 'v1', 'name': 'Version 1', 'body': 'Release notes',
+             'draft': False, 'prerelease': False, 'assets': []}
+        ]
+        self.github.return_value.request.return_value = dict(self.github.return_value.pages.return_value[0])
+
+    @patch.dict(os.environ, {'GITHUB_TOKEN': 'test'})
+    def test_recovery_secret_length_preflight(self):
+        from contextlib import nullcontext
+        with tempfile.TemporaryDirectory() as directory:
+            config = os.path.join(directory, 'config')
+            token = os.path.join(directory, 'token')
+            secret = os.path.join(directory, 'secret')
+            with open(config, 'w') as f: json.dump([URL], f)
+            with open(token, 'w') as f: f.write('test-token')
+            os.chmod(token, 0o600)
+            args = ['--config', config, '--source', URL, '--token-file', token,
+                    '--timestamp-secret-file', secret, '--journal-dir', directory,
+                    '--owner', 'local', '--use-github-token']
+            with open(secret, 'w') as f: f.write('x' * 31 + '\n')
+            os.chmod(secret, 0o600)
+            before = set(os.listdir(directory))
+            with patch('repo_mirror.forgejo_sync.LocalForgejoAPI') as api, \
+                 patch('repo_mirror.forgejo_sync.destination_locks') as locks, \
+                 redirect_stderr(io.StringIO()):
+                self.assertEqual(forgejo_sync.main(args), 2)
+                api.assert_not_called()
+                locks.assert_not_called()
+            self.assertEqual(set(os.listdir(directory)), before)
+            with open(secret, 'w') as f: f.write('x' * 32 + '\n')
+            with patch('repo_mirror.forgejo_sync.LocalForgejoAPI'), \
+                 patch('repo_mirror.forgejo_sync.destination_locks', return_value=nullcontext()), \
+                 patch('repo_mirror.forgejo_sync.journal_lock', return_value=nullcontext(directory)), \
+                 patch('repo_mirror.forgejo_sync._sync_requested', return_value=0) as sync:
+                self.assertEqual(forgejo_sync.main(args), 0)
+                self.assertEqual(sync.call_args.args[5], 'x' * 32)
+
+    @patch.dict(os.environ, {'GITHUB_TOKEN': 'test'})
+    def test_interrupted_initialization_resumes_then_becomes_incremental(self):
+        class API:
+            def __init__(self, *args):
+                self.repo = None
+            def token(self): return 'token'
+            def request(self, method, path, payload=None):
+                if method == 'POST':
+                    self.repo = dict(payload, id=1, full_name='local/mirror-Gezine-CivSwitch')
+                elif method == 'PATCH':
+                    self.repo.update(payload)
+                elif self.repo is None:
+                    raise APIError(404)
+                return dict(self.repo)
+        api = API()
+        with tempfile.TemporaryDirectory() as directory:
+            config, secret = os.path.join(directory, 'config'), os.path.join(directory, 'secret')
+            with open(config, 'w') as f: json.dump([URL], f)
+            with open(secret, 'w') as f: f.write('synthetic-recovery-fixture-value-32-bytes')
+            os.chmod(secret, 0o600)
+            token_file = os.path.join(directory, 'token')
+            with open(token_file, 'w') as token_stream: token_stream.write('local-token')
+            os.chmod(token_file, 0o600)
+            argv = ['--config', config, '--source', URL, '--token-file', token_file, '--owner', 'local',
+                    '--use-github-token', '--timestamp-secret-file', secret, '--journal-dir', directory]
+            modes = []
+            def releases(*args, **kwargs):
+                modes.append(kwargs['initializing'])
+                if len(modes) == 1: raise RuntimeError('interrupted')
+            with patch('repo_mirror.forgejo_sync.LocalForgejoAPI', return_value=api), \
+                 patch('repo_mirror.forgejo_sync.sync_refs', return_value=0), \
+                 patch('repo_mirror.forgejo_sync.snapshot_refs', return_value=(None, {}, {})), \
+                 patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter'), \
+                 patch('repo_mirror.forgejo_sync.mirror_releases', side_effect=releases):
+                self.assertEqual(forgejo_sync.main(argv), 1)
+                self.assertIn('[repo-mirror:initializing:v1]', api.repo['description'])
+                self.assertEqual(forgejo_sync.main(argv), 0)
+                self.assertEqual(forgejo_sync.main(argv), 0)
+            self.assertEqual(modes, [True, True, False])
+
     def test_private_key_rejects_insecure_file_and_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             key = os.path.join(directory, 'key')
@@ -31,6 +112,12 @@ class RunnerTests(unittest.TestCase):
 
     def test_app_credentials_are_shared_as_refreshable_provider(self):
         with tempfile.TemporaryDirectory() as directory:
+            secret = os.path.join(directory, 'secret')
+            with open(secret, 'w') as f: f.write('synthetic-recovery-fixture-value-32-bytes')
+            os.chmod(secret, 0o600)
+            token_file = os.path.join(directory, 'token')
+            with open(token_file, 'w') as token_stream: token_stream.write('local-token')
+            os.chmod(token_file, 0o600)
             config = os.path.join(directory, 'config')
             key = os.path.join(directory, 'key')
             with open(config, 'w') as f:
@@ -43,34 +130,52 @@ class RunnerTests(unittest.TestCase):
                  patch('repo_mirror.forgejo_sync.LocalForgejoAPI'), \
                  patch('repo_mirror.forgejo_sync.sync_refs', return_value=0) as refs, \
                  patch('repo_mirror.forgejo_sync.snapshot_refs', return_value=(None, {}, {})), \
-                 patch('repo_mirror.forgejo_sync.GitHubReleases') as github, \
-                 patch('repo_mirror.forgejo_sync.sync_releases'):
-                result = forgejo_sync.main(['--config', config, '--source', URL, '--token-file', 'x',
-                                            '--owner', 'local', '--app-id', '123', '--private-key-file', key])
+                 patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter'), \
+                 patch('repo_mirror.forgejo_sync.SourceAPI') as github, \
+                 patch('repo_mirror.forgejo_sync.mirror_releases'), \
+                 patch('repo_mirror.forgejo_sync.ForgejoDestination.begin_initialization', return_value=False):
+                github.return_value.pages.return_value = []
+                github.return_value.request.side_effect = urllib.error.HTTPError('https://api.github.com', 404, 'not found', Message(), None)
+                result = forgejo_sync.main(['--config', config, '--source', URL, '--token-file', token_file,
+                                            '--timestamp-secret-file', secret, '--journal-dir', directory, '--owner', 'local', '--app-id', '123', '--private-key-file', key])
             self.assertEqual(result, 0)
             app.assert_called_once_with('123', 'fake-key', 'manoma080')
             self.assertIs(refs.call_args.kwargs['source_token'], provider)
-            self.assertIs(github.call_args.args[1], provider)
+            self.assertIs(github.call_args.args[0], provider)
+            github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch/releases')
 
     def run_main(self, configured, sources):
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as f:
+        with tempfile.TemporaryDirectory() as directory, tempfile.NamedTemporaryFile(mode='w', suffix='.json') as f:
+            secret = os.path.join(directory, 'secret')
+            with open(secret, 'w') as key: key.write('synthetic-recovery-fixture-value-32-bytes')
+            os.chmod(secret, 0o600)
+            token_file = os.path.join(directory, 'token')
+            with open(token_file, 'w') as token_stream: token_stream.write('local-token')
+            os.chmod(token_file, 0o600)
             json.dump(configured, f)
             f.flush()
-            args = ['--config', f.name, '--token-file', '/not-used', '--owner', 'labadmin', '--use-github-token']
+            args = ['--config', f.name, '--token-file', token_file, '--owner', 'labadmin', '--use-github-token', '--timestamp-secret-file', secret, '--journal-dir', directory]
             for source in sources:
                 args += ['--source', source]
-            return forgejo_sync.main(args)
+            with patch('repo_mirror.forgejo_sync.ForgejoDestination.begin_initialization', return_value=False):
+                return forgejo_sync.main(args)
 
+    @patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter')
     @patch.dict(os.environ, {'GITHUB_TOKEN': 'test'})
-    @patch('repo_mirror.forgejo_sync.sync_releases')
+    @patch('repo_mirror.forgejo_sync.mirror_releases')
     @patch('repo_mirror.forgejo_sync.sync_refs', return_value=1)
     @patch('repo_mirror.forgejo_sync.LocalForgejoAPI')
     @patch('repo_mirror.forgejo_sync.snapshot_refs', return_value=(None, {}, {}))
-    def test_runs_exact_source_and_both_syncs(self, snapshot, api, refs, releases):
+    def test_runs_exact_source_and_both_syncs(self, snapshot, api, refs, releases, adapter):
         api.return_value.token.return_value = 'test-local'
         self.assertEqual(self.run_main([URL], [URL]), 0)
         self.assertEqual(refs.call_args.args[1:], ('mirror-Gezine-CivSwitch', 'manoma080/mirror-Gezine-CivSwitch'))
         releases.assert_called_once()
+        args, kwargs = releases.call_args
+        self.assertEqual(args[0], {'type': 'github', 'base_url': 'https://github.com', 'owner': 'manoma080'})
+        self.assertEqual(args[5], 'https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch')
+        self.assertFalse(kwargs['initializing'])
+        self.assertIsNotNone(kwargs['journal'])
 
     @patch('repo_mirror.forgejo_sync.LocalForgejoAPI')
     def test_unconfigured_or_duplicate_sources_do_not_write(self, api):
@@ -83,6 +188,23 @@ class RunnerTests(unittest.TestCase):
     @patch('repo_mirror.forgejo_sync.LocalForgejoAPI')
     def test_sync_failure_is_nonzero(self, api, refs):
         self.assertEqual(self.run_main([URL], [URL]), 1)
+        self.github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch/releases')
+        refs.assert_called_once()
+
+    @patch.dict(os.environ, {'GITHUB_TOKEN': 'test'})
+    @patch('repo_mirror.forgejo_sync.LocalForgejoAPI')
+    @patch('repo_mirror.forgejo_sync.sync_refs')
+    @patch('repo_mirror.forgejo_sync.mirror_releases')
+    def test_unsafe_source_preflight_blocks_ref_and_release_writes(self, releases, refs, api):
+        self.github.return_value.pages.return_value = [
+            {'id': 1, 'tag_name': 'v1', 'name': 'Version 1',
+             'body': '[repo-mirror:pending:v3]', 'draft': False, 'assets': []}
+        ]
+        self.assertEqual(self.run_main([URL], [URL]), 1)
+        self.github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch/releases')
+        refs.assert_not_called()
+        releases.assert_not_called()
+        api.return_value.request.assert_not_called()
 
     @patch.dict(os.environ, {'GITHUB_TOKEN': 'test'})
     @patch('repo_mirror.forgejo_sync.LocalForgejoAPI')
@@ -116,20 +238,50 @@ class RunnerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, output, b'')
             api.return_value.base_url = 'http://127.0.0.1:3300'
             api.return_value.token.return_value = 'local'
-            api.return_value.request.return_value = {'full_name': 'labadmin/mirror-Gezine-CivSwitch',
+            api.return_value.request.return_value = {'id': 1, 'full_name': 'labadmin/mirror-Gezine-CivSwitch',
                 'private': True, 'has_actions': False, 'default_branch': 'main',
                 'description': 'repo-mirror-source: github.com/manoma080/mirror-Gezine-CivSwitch'}
-            def releases(*args):
+            def releases(*args, **kwargs):
                 state['releases_done'] = True
-            with self.subTest(side=changed_side), patch('repo_mirror.forgejo_sync.sync_releases', side_effect=releases), \
+            with self.subTest(side=changed_side), patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter'), patch('repo_mirror.forgejo_sync.mirror_releases', side_effect=releases), \
                  patch('repo_mirror.forgejo_git.subprocess.run', side_effect=run):
                 self.assertEqual(self.run_main([URL], [URL]), 0 if changed_side == 'stable' else 1)
                 self.assertTrue(state['releases_done'])
 
+    @patch.dict(os.environ, {'GITHUB_TOKEN': 'test', 'MIRROR_TIMESTAMP_SECRET': 'unrelated'})
+    @patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter')
+    @patch('repo_mirror.forgejo_sync.LocalForgejoAPI')
+    @patch('repo_mirror.forgejo_sync.sync_refs', return_value=0)
+    @patch('repo_mirror.forgejo_sync.snapshot_refs', return_value=(None, {}, {}))
+    def test_journal_persists_and_local_secret_is_scoped(self, snapshot, refs, api, adapter):
+        with tempfile.TemporaryDirectory() as directory:
+            config, secret = os.path.join(directory, 'config'), os.path.join(directory, 'secret')
+            with open(config, 'w') as f: json.dump([URL], f)
+            with open(secret, 'w') as f: f.write('synthetic-recovery-fixture-value-32-bytes')
+            os.chmod(secret, 0o600)
+            token_file = os.path.join(directory, 'token')
+            with open(token_file, 'w') as token_stream: token_stream.write('local-token')
+            os.chmod(token_file, 0o600)
+            argv = ['--config', config, '--source', URL, '--token-file', token_file, '--owner', 'local',
+                    '--use-github-token', '--timestamp-secret-file', secret, '--journal-dir', directory]
+            def release(*args, **kwargs):
+                self.assertEqual(os.environ['MIRROR_TIMESTAMP_SECRET'], 'synthetic-recovery-fixture-value-32-bytes')
+                journal = kwargs['journal']
+                key = journal.key(args[0], args[1], args[2], 'v1', 'asset')
+                if not journal.failures:
+                    journal.set(key, True)
+                else:
+                    self.assertIn(key, journal.failures)
+            with patch('repo_mirror.forgejo_sync.mirror_releases', side_effect=release), \
+                 patch('repo_mirror.forgejo_sync.ForgejoDestination.begin_initialization', return_value=False):
+                self.assertEqual(forgejo_sync.main(argv), 0)
+                self.assertEqual(forgejo_sync.main(argv), 0)
+            self.assertEqual(os.environ['MIRROR_TIMESTAMP_SECRET'], 'unrelated')
+
     def test_configuration_os_errors_do_not_expose_paths(self):
         output = io.StringIO()
         with redirect_stderr(output):
-            self.assertEqual(forgejo_sync.main(['--config', '/secret-token/not-found', '--source', URL, '--token-file', 'x', '--owner', 'x']), 2)
+            self.assertEqual(forgejo_sync.main(['--config', '/secret-token/not-found', '--source', URL, '--token-file', 'x', '--owner', 'x', '--timestamp-secret-file', 'x', '--journal-dir', 'x']), 2)
         self.assertNotIn('secret-token', output.getvalue())
 
     def test_safe_error_categories(self):
