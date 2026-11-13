@@ -90,7 +90,7 @@ class TimestampTests(unittest.TestCase):
                     dst.assets["new"] = b"n"
                     dst.assets[name] = manifest if valid else b"foreign"
                     before = dict(dst.assets)
-                    if valid:
+                    if valid and not name.startswith("TIMESTAMPS.txt"):
                         def request(method, url, data=None):
                             if method == "PATCH" and "/releases/assets/" in url:
                                 dst.assets[data["name"]] = dst.assets.pop(name)
@@ -108,7 +108,7 @@ class TimestampTests(unittest.TestCase):
                     self.assertEqual(dst.assets, before)
                     self.assertEqual(dst.deleted, [])
 
-    def test_source_reserved_names_are_mirrored_without_cache_management(self):
+    def test_source_name_collisions_are_mirrored_with_safe_cache_policy(self):
         for name in ("TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging",
                      "REPO-MIRROR-MANIFEST.json", "REPO-MIRROR-MANIFEST.json.repo-mirror-staging",
                      "MIRROR-REPO-MANIFEST.json"):
@@ -124,8 +124,81 @@ class TimestampTests(unittest.TestCase):
                 dst.assets = {name: b"n"}
                 with patch_everywhere("mirror_git"):
                     mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-                self.assertEqual(dst.assets, {name: b"n"})
+                if name.startswith("TIMESTAMPS.txt"):
+                    self.assertEqual(dst.assets[name], b"n")
+                    self.assertIn("REPO-MIRROR-MANIFEST.json", dst.assets)
+                else:
+                    self.assertEqual(dst.assets, {name: b"n"})
                 self.assertEqual(dst.deleted, [])
+
+    def test_source_owned_legacy_assets_update_on_subsequent_mirror(self):
+        for name in ("TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging"):
+            with self.subTest(name=name):
+                class CollisionSource(TimestampSource):
+                    content = b"n"
+
+                    def pages(self, url):
+                        if url.endswith("/releases"):
+                            return super().pages(url)
+                        return [{"id": 1, "name": name, "size": len(self.content),
+                                 "updated_at": self.timestamp,
+                                 "browser_download_url": "https://github.com/new"}]
+
+                    def download(self, url, out):
+                        out.write(self.content)
+
+                class StableDestination(TimestampDestination):
+                    def __init__(self):
+                        super().__init__()
+                        self.ids = {}
+
+                    def pages(self, url):
+                        assets = super().pages(url)
+                        for asset in assets:
+                            name_key = asset["name"]
+                            if name_key not in self.ids:
+                                self.ids[name_key] = len(self.ids) + 1
+                            asset["id"] = self.ids[name_key]
+                        return assets
+
+                src, dst = CollisionSource(), StableDestination()
+                dst.assets = {name: b"n", "foreign-extra": b"keep"}
+                dst.fail = False
+
+                def request(method, url, data=None):
+                    if method == "DELETE":
+                        asset = next(a for a in dst.pages("") if str(a["id"]) == url.rsplit("/", 1)[-1])
+                        dst.deleted.append(asset["name"])
+                        del dst.assets[asset["name"]]
+                        return {}
+                    if method == "PATCH" and "/releases/assets/" in url:
+                        assert data is not None
+                        stage = "REPO-MIRROR-MANIFEST.json.repo-mirror-staging"
+                        dst.assets[data["name"]] = dst.assets.pop(stage)
+                        return {}
+                    return Destination.request(dst, method, url, data)
+
+                dst.request = request
+                with patch_everywhere("mirror_git"):
+                    mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+                    src.content = b"x"
+                    src.timestamp = "2025-01-02T00:00:00Z"
+                    mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+                self.assertEqual(dst.assets[name], b"x")
+                self.assertEqual(dst.assets["foreign-extra"], b"keep")
+                self.assertEqual(dst.deleted.count(name), 1)
+                self.assertNotIn("foreign-extra", dst.deleted)
+
+    def test_legacy_stage_is_untouched_and_new_cache_is_written(self):
+        src, dst = TimestampSource(), TimestampDestination()
+        dst.assets.update(changed=b"new", new=b"n")
+        dst.assets["TIMESTAMPS.txt.repo-mirror-staging"] = b"foreign"
+        with patch_everywhere("mirror_git"):
+            mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
+        self.assertEqual(dst.assets["TIMESTAMPS.txt.repo-mirror-staging"], b"foreign")
+        self.assertNotIn("TIMESTAMPS.txt", dst.assets)
+        self.assertIn("REPO-MIRROR-MANIFEST.json", dst.assets)
+        self.assertEqual(dst.deleted, [])
 
     def test_new_cache_uses_manifest_json_name(self):
         src, dst = TimestampSource(), TimestampDestination()
@@ -135,17 +208,19 @@ class TimestampTests(unittest.TestCase):
         self.assertIn("REPO-MIRROR-MANIFEST.json", dst.assets)
         self.assertNotIn("TIMESTAMPS.txt", dst.assets)
 
-    def test_existing_legacy_manifest_remains_usable(self):
+    def test_existing_legacy_manifest_is_never_used_or_replaced(self):
         src, dst = TimestampSource(), TimestampDestination()
         dst.assets.update(changed=b"new", new=b"n")
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-            dst.assets["TIMESTAMPS.txt"] = dst.assets.pop("REPO-MIRROR-MANIFEST.json")
+            legacy = dst.assets.pop("REPO-MIRROR-MANIFEST.json")
+            dst.assets["TIMESTAMPS.txt"] = legacy
             src.downloads.clear()
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-        self.assertIn("TIMESTAMPS.txt", dst.assets)
-        self.assertNotIn("REPO-MIRROR-MANIFEST.json", dst.assets)
-        self.assertNotIn("https://github.com/changed", src.downloads)
+        self.assertEqual(dst.assets["TIMESTAMPS.txt"], legacy)
+        self.assertIn("REPO-MIRROR-MANIFEST.json", dst.assets)
+        self.assertIn("https://github.com/changed", src.downloads)
+        self.assertEqual(dst.deleted, [])
 
     def test_mixed_manifest_generations_are_not_modified(self):
         src, dst = TimestampSource(), TimestampDestination()

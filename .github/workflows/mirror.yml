@@ -34,11 +34,6 @@ on:
         required: false
         type: boolean
         default: false
-      migrate_manifests:
-        description: 'Only migrate owned legacy manifests, including historical releases'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -64,17 +59,13 @@ jobs:
         env:
           ADD: ${{ inputs.add_to_config }}
           REMOVE: ${{ inputs.remove_from_config }}
-          MIGRATE: ${{ inputs.migrate_manifests }}
           URLS: ${{ inputs.source_urls }}
           DEST: ${{ inputs.destination_name }}
           VISIBILITY: ${{ inputs.visibility }}
         run: |
           set -euo pipefail
-          if [[ "$REMOVE" == true && ( "$ADD" == true || "$MIGRATE" == true || -n "$DEST" || "$VISIBILITY" != unchanged && "$VISIBILITY" != "" ) ]]; then
-            echo 'Remove cannot be combined with add, migration, or destination settings' >&2; exit 1
-          fi
-          if [[ "$MIGRATE" == true && ( "$ADD" == true || -n "$DEST" || "$VISIBILITY" != unchanged && "$VISIBILITY" != "" ) ]]; then
-            echo 'Migration cannot be combined with add or destination settings' >&2; exit 1
+          if [[ "$REMOVE" == true && ( "$ADD" == true || -n "$DEST" || "$VISIBILITY" != unchanged && "$VISIBILITY" != "" ) ]]; then
+            echo 'Remove cannot be combined with add or destination settings' >&2; exit 1
           fi
           if [[ ( "$ADD" == true || "$REMOVE" == true || -n "$DEST" || "$VISIBILITY" != unchanged && "$VISIBILITY" != "" ) && -z "${URLS//[[:space:]]/}" ]]; then
             echo 'Source URLs are required for these options' >&2; exit 1
@@ -139,17 +130,7 @@ jobs:
         with:
           ref: ${{ needs.test.outputs.tested-sha }}
           persist-credentials: false
-      - name: Migrate legacy manifests
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.migrate_manifests }}
-        env:
-          DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
-          MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}
-          MIRROR_APP_ID: ${{ secrets.MIRROR_APP_ID }}
-          MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
-          MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
-        run: python -m repo_mirror.manifest_migration --config config.json
       - name: Mirror
-        if: ${{ !inputs.migrate_manifests }}
         env:
           DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
           MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}
@@ -160,7 +141,7 @@ jobs:
           MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
         run: python mirror.py --config config.json --failures failures.json
       - name: Save failure journal
-        if: ${{ always() && !inputs.migrate_manifests }}
+        if: ${{ always() }}
         env:
           MANAGEMENT_TOKEN: ${{ github.token }}
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
