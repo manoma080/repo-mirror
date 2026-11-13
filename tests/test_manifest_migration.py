@@ -76,6 +76,26 @@ class MigrationTests(unittest.TestCase):
             migrate_release(ChangingForgejo(), dst, 'source-assets', 'destination', 5, 'source', 'v1', 'secret', source_type='forgejo')
         self.assertFalse(dst.writes)
 
+    def test_invalid_source_asset_names_block_rename(self):
+        payload = {'owner': 'repo-mirror:timestamps:v1', 'source': 'source', 'tag': 'v1', 'assets': {}}
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
+        payload['signature'] = hmac.new(b'secret', raw, hashlib.sha256).hexdigest()
+        for provider in ('github', 'forgejo'):
+            for invalid in ({}, {'name': None}, {'name': ''}, {'name': 123}, {'name': []}):
+                for invalid_check in (1, 3):
+                    with self.subTest(provider=provider, asset=invalid, check=invalid_check):
+                        class Source:
+                            calls = 0
+                            def fetch(self):
+                                self.calls += 1
+                                return [invalid] if self.calls == invalid_check else [{'name': 'file.zip'}]
+                            def pages(self, url): return self.fetch()
+                            def request(self, method, url): return self.fetch()
+                        dst = API([{'id': 42, 'name': 'TIMESTAMPS.txt', 'state': 'uploaded', 'url': 'asset'}], json.dumps(payload).encode())
+                        with self.assertRaisesRegex(ValueError, 'invalid source assets'):
+                            migrate_release(Source(), dst, 'source-assets', 'destination', 5, 'source', 'v1', 'secret', source_type=provider)
+                        self.assertFalse(dst.writes)
+
     def test_oversize_metadata_refused_before_download(self):
         class NoDownload(API):
             def download(self, url, f):

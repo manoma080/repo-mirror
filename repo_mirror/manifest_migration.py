@@ -57,7 +57,10 @@ def migrate_release(src, dst, source_assets_url, target, release_id, source, tag
         asset = matches[0]
         if source_assets_url is not None:
             source_assets = src.request('GET', source_assets_url) if source_type == 'forgejo' else src.pages(source_assets_url)
-            if not isinstance(source_assets, list) or any(not isinstance(a, dict) for a in source_assets):
+            if not isinstance(source_assets, list) or any(
+                not isinstance(a, dict) or not isinstance(a.get('name'), str) or not a['name']
+                for a in source_assets
+            ):
                 raise ValueError('invalid source assets')
             if any(a.get('name') in RESERVED for a in source_assets):
                 raise ValueError('source reserved name')
