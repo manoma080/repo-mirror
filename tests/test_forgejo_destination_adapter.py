@@ -166,7 +166,7 @@ class ForgejoDestinationAdapterTests(unittest.TestCase):
         self.assertEqual(created['upload_url'], adapter.target + '/releases/7/assets{?name,label}')
         self.assertEqual(client.calls[-1][2], {'tag_name': 'v1', 'name': 'Title', 'body': 'text', 'draft': False, 'prerelease': True, 'target_commitish': 'main'})
         adapter.request('PATCH', adapter.target + '/releases/7', {'name': 'new', 'body': '', 'make_latest': 'false'})
-        self.assertEqual(client.calls[-2][2], {'name': 'new', 'body': ''})
+        self.assertEqual(client.calls[-2][2], {'name': 'new', 'body': ' '})
         self.assertEqual(client.calls[-1][0], 'GET')
         client.latest = {'id': 8, 'tag_name': 'other'}
         with self.assertRaises(SyncConflict):
@@ -282,7 +282,7 @@ class ForgejoDestinationAdapterTests(unittest.TestCase):
             def pages(self, url):
                 return [] if url.endswith('/assets') else [source_release]
             def request(self, method, url):
-                if url.endswith('/latest'):
+                if method == 'GET' and (url.endswith('/latest') or url.endswith('/releases/1')):
                     return source_release
                 raise AssertionError(url)
         original = client._json

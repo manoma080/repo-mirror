@@ -51,6 +51,8 @@ class SharedReleaseEntryTests(unittest.TestCase):
                 return [{'id': 1, 'tag_name': 'v1'}]
 
             def request(self, method, url):
+                if url.endswith('/releases/1'):
+                    return {'id': 1, 'tag_name': 'v1'}
                 raise HTTPError(url, 404, '', {}, io.BytesIO())
 
         class Destination:

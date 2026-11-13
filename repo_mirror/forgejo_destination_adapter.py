@@ -15,10 +15,7 @@ class ForgejoDestinationAdapter:
     verify_empty_body_read_only = True
 
     def validate_release_source(self, release):
-        # Forgejo's release PATCH cannot reliably clear a nonempty body. Never
-        # start (or resume) a transaction that would need that operation.
-        if not (release.get('body') or ''):
-            raise SyncConflict('Forgejo empty source body cannot be safely mirrored; inspect any pending release and reconcile manually before retrying')
+        pass
 
     def __init__(self, owner_repo, token, port=3300, *, client=None, guard=None):
         owner, repo = source_identity(owner_repo)
@@ -50,6 +47,7 @@ class ForgejoDestinationAdapter:
         if not isinstance(item, dict):
             raise SyncConflict('invalid release')
         release = dict(item)
+
         rid = _id(release.get('id'))
         if 'name' not in release and 'title' in release:
             release['name'] = release.pop('title')
@@ -121,6 +119,9 @@ class ForgejoDestinationAdapter:
             if not isinstance(body, dict):
                 raise ValueError('invalid request body')
             body = dict(body)
+            if (release or path == '/releases') and 'body' in body and body['body'] in (None, '', ' '):
+                # An empty PATCH is ignored by Forgejo; a single space clears it.
+                body['body'] = ' '
             latest = body.pop('make_latest', None)
             if latest not in (None, 'false', 'true'):
                 raise ValueError('invalid latest value')
@@ -150,7 +151,8 @@ class ForgejoDestinationAdapter:
                 raise SyncConflict('release identity changed')
             self.guard()
             self.client._json(method, full, body)
-            current = self._release(self.client._json('GET', full))
+            raw_current = self.client._json('GET', full)
+            current = self._release(raw_current)
             if (type(current.get('id')) is not int or current['id'] != before['id'] or
                     current.get('tag_name') != ((body or {}).get('tag_name') if authorized else tag)):
                 raise SyncConflict('release identity changed')
@@ -158,6 +160,7 @@ class ForgejoDestinationAdapter:
                 if key not in current:
                     raise SyncConflict('release metadata not persisted: ' + key)
                 actual = current[key]
+
                 # Forgejo may represent an empty or null title as the release tag.
                 if key == 'name' and expected in ('', None) and actual == current['tag_name']:
                     continue

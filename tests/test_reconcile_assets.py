@@ -14,6 +14,9 @@ class Source:
     def request(self, *args):
         if args[1].endswith("/releases/latest"):
             raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(args[1], 404, "", {}, None)
+        if "/releases/" in args[1] and args[1].rsplit("/", 1)[-1].isdigit():
+            return next(r.copy() for r in self.pages(args[1].rsplit("/", 1)[0])
+                        if str(r.get("id")) == args[1].rsplit("/", 1)[-1])
         return {"clone_url": "https://github.com/alice/demo.git"}
 
     def pages(self, url):

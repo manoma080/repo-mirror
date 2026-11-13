@@ -70,6 +70,16 @@ class EmptyConvergenceTests(unittest.TestCase):
         self.assertEqual(sum(c[0] == 'DOWNLOAD' for c in self.src.calls), 4)
         self.assertGreaterEqual(sum(c[0] == 'DOWNLOAD' for c in self.dst.calls), 2)
 
+    def test_single_space_is_empty_on_either_side(self):
+        for source in (None, '', ' '):
+            for destination in (None, '', ' '):
+                with self.subTest(source=source, destination=destination):
+                    self.setUp()
+                    self.src.release['body'] = source
+                    self.dst.release['body'] = destination
+                    self.run_sync()
+                    self.assert_read_only()
+
     def test_source_duplicate_tag_after_discovery_fails_without_mutation(self):
         original = self.src.pages
         release_reads = 0
@@ -151,6 +161,24 @@ class ConvergenceRegressionTests(unittest.TestCase):
     def verify(self, src=None, upstream=UP):
         from repo_mirror.repository import verify_empty_body_converged
         return verify_empty_body_converged(src or self.src, self.dst, upstream, TARGET, self.src.release)
+
+    def test_forgejo_raw_body_drift_during_transfer_fails_closed(self):
+        from test_forgejo_destination_adapter import make_adapter
+        from repo_mirror.repository import verify_empty_body_converged
+
+        dst, client = make_adapter()
+        client.release = copy.deepcopy(self.dst.release)
+        client.releases = [client.release]
+        client.items = copy.deepcopy(self.dst.assets)
+        def download(asset, output):
+            output.write(self.dst.data[asset['url']])
+            client.release['body'] = ' '
+        client.download = download
+        with patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'configured-secret'}):
+            result = verify_empty_body_converged(self.src, dst, UP, dst.target, self.src.release)
+        self.assertIsNone(result)
+        self.assertEqual(client.release['body'], ' ')
+        self.assertFalse(any(call[0] in ('POST', 'PATCH', 'DELETE', 'upload') for call in client.calls))
 
     def test_published_sha256_mismatch_fails_closed_without_writes(self):
         self.src.assets[0]['digest'] = 'sha256:' + '0' * 64

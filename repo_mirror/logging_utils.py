@@ -136,6 +136,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "invalid source latest release",
         "release assets response is not an array",
         "source release name uses reserved marker",
+        "source release changed during sync",
         "release name too long for pending marker",
         "source asset size mismatch",
         "source asset digest mismatch",

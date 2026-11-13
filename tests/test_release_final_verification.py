@@ -26,6 +26,8 @@ class FinalVerificationTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
                         args[1], 404, "", {}, None
                     )
+                if args[1].endswith("/releases/1"):
+                    return {"id": 1, "tag_name": "v1", "name": "release"}
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):

@@ -17,6 +17,12 @@ class Source:
             if isinstance(self.latest, Exception):
                 raise self.latest
             return self.latest
+        if "/releases/" in url:
+            release_id = url.rsplit("/", 1)[-1]
+            for release in self.releases:
+                if release.get("id") is not None and str(release["id"]) == release_id:
+                    return release.copy()
+            raise HTTPError(url, 404, "", None, None)
         return {"clone_url": "https://github.com/alice/demo.git"}
 
     def pages(self, url):
@@ -190,6 +196,8 @@ class LatestAlignmentTests(unittest.TestCase):
                     return super().request(method, url, data)
                 if url.endswith("/assets"):
                     return []
+                if "/releases/" in url:
+                    return super().request(method, url, data)
                 return {"clone_url": "https://forge.example/alice/demo.git"}
 
         class ForgeDestination(Destination):

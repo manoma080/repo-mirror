@@ -1,6 +1,7 @@
 import io
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from mirror_test_support import patch_everywhere
 
@@ -22,6 +23,12 @@ class NewBehaviorTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(url, 404, "", {}, None)
                 if url.endswith("/assets"):
                     return []
+                if "/releases/" in url:
+                    listing, release_id = url.rsplit("/", 1)
+                    for release in self.pages(listing):
+                        if release.get("id") is not None and str(release["id"]) == release_id:
+                            return release.copy()
+                    raise HTTPError(url, 404, "", None, None)
                 return {"clone_url": "https://src.example/alice/demo.git"}
 
             def pages(self, url):

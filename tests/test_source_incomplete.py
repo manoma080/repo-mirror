@@ -21,6 +21,8 @@ class SourceIncompleteTests(unittest.TestCase):
             def request(self, method, url):
                 if url.endswith("/releases/latest"):
                     raise HTTPError(url, 404, "", {}, io.BytesIO())
+                if url.endswith("/releases/1"):
+                    return self.pages(url.rsplit("/", 1)[0])[0]
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):

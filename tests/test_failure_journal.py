@@ -48,6 +48,12 @@ class FailureJournalTest(unittest.TestCase):
             def request(self, method, url, data=None):
                 if url.endswith("/releases/latest"):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(url, 404, "", {}, None)
+                if "/releases/" in url:
+                    listing, release_id = url.rsplit("/", 1)
+                    for release in self.pages(listing):
+                        if release.get("id") is not None and str(release["id"]) == release_id:
+                            return release.copy()
+                    raise HTTPError(url, 404, "", None, None)
                 return {"clone_url": "https://github.com/alice/demo.git"}
 
             def pages(self, url):
@@ -69,7 +75,7 @@ class FailureJournalTest(unittest.TestCase):
                     return {"description": mirror.source_marker(source, "demo")}
                 if "/releases/tags/" in url:
                     if self.release is None:
-                        raise HTTPError(url, 404, "", {}, None)
+                        raise HTTPError(url, 404, "", None, None)
                     return self.release.copy()
                 if method == "POST" and url.endswith("/releases"):
                     self.release = dict(data, id=2, upload_url="https://uploads.github.com/a{?name}")

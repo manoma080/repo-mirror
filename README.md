@@ -112,6 +112,8 @@ When a web request fails, the log shows the HTTP status code and what operation 
 ## Releases in detail
 
 - A release with no files is valid. Each file must be under **2 GiB**.
+- **Empty release notes:** Exactly one ASCII space (U+0020) is treated as logically empty in release-body comparisons and draft finalization; an intentional one-space source therefore cannot be distinguished from empty in those paths. Other whitespace, including two or more spaces, tabs and newlines, remains meaningful and is preserved. Source drift checks compare raw bodies, not normalized ones. When finalizing a published GitHub release, the mirror sends the source body unchanged; comparisons may still treat one space and empty as equivalent. Forgejo uses the representation described below.
+- **Forgejo destination tradeoff:** Forgejo's release PATCH cannot reliably clear nonempty notes with an empty body. The workaround writes exactly one ASCII space for a truly empty source body, so the persisted Forgejo body is not byte-for-byte identical, even though it will typically appear empty. Pending markers are temporary; recovery after interruption requires a valid signed marker and compatible source and transaction state. Completed published releases should have the pending marker removed; completed drafts have the separate identity-marker exception below. Reconciliation is not atomic, and failures may require manual review.
 - **Drafts:** GitHub may return a synthetic `untagged-` tag for a draft. Source drafts with such tags are rejected rather than copied as real tags (even a legitimate draft tag with that prefix is conservatively rejected). For supported source tags, completed destination drafts retain a visible signed identity marker in their body until publication, so reruns can identify and publish the same release. Pending drafts use an ID-bound v3 recovery marker. Keep `MIRROR_TIMESTAMP_SECRET` stable: changing it, removing/editing a marker, or using older unmarked destination drafts requires manual reconciliation. Names and synthetic destination tags are not identities. If a create succeeds but its ID-bound marker cannot be saved, manual reconciliation can also be necessary.
 - **Latest release:** the source's `/releases/latest` picks the release to mark as latest on GitHub, even if it is older than the usual window. The mirror promotes it only after all selected releases are done. A failed promotion is retried next run. Pre-releases and drafts are never promoted.
 - **404 from `/releases/latest`:** no release is promoted. The repository may be private, or the Forgejo server may be too old. Other errors fail the repository.
@@ -121,11 +123,11 @@ When a web request fails, the log shows the HTTP status code and what operation 
 
 While a release is being copied, its notes get a `[repo-mirror:pending:v3]` marker with transaction data. The title stays the same until the copy finishes.
 
-- If a run stops, the next run can resume the marked release, even outside the usual window, as long as it still exists at the source.
+- If a run stops, the next run can resume the marked release, even outside the usual window, if the signed marker is valid and the source and transaction state remain compatible.
 - Markers are signed with a secret (see [Secret setup](#secret-setup)). The signature proves the marker came from this mirror.
 - Do not write or copy these reserved markers in release notes or titles.
 - Malformed or conflicting markers, and changed source file lists, need manual review.
-- After the copy, the source's title and notes are restored (including empty notes). Very long notes may leave no room for the marker.
+- After the copy, the source's title and notes are restored subject to the empty-note policy above. Very long notes may leave no room for the marker.
 - A new mirror stays in "initializing" mode until its full history is copied.
 
 ### Starter files
@@ -148,7 +150,7 @@ Failed uploads are saved in `failures.json` on the management branch. The next r
 
 | Situation | What happens |
 | --- | --- |
-| A run is cancelled or cannot save the file | The release marker still lets the next run resume. |
+| A run is cancelled or cannot save the file | A valid release marker can let the next run resume if the source and transaction state remain compatible; otherwise manual review may be needed. |
 | Someone changes the management branch during a run | Saving may fail instead of overwriting their change. Run again. |
 | Branch protection blocks the workflow | Allow the workflow's GitHub token to push `failures.json`. |
 | A source or marker is changed or removed | Old entries may need manual review. |
