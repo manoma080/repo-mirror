@@ -1,6 +1,6 @@
 # Repository mirror
 
-This project copies public GitHub and Forgejo repositories into GitHub repositories (private by default). The original repository is the **source**. The copy is the **mirror**. Forgejo is a self-hosted Git server.
+This project copies public GitHub and Forgejo repositories into GitHub repositories (private by default), and supports copying GitHub repositories to a local Forgejo host. The original repository is the **source**. The copy is the **mirror**. Forgejo is a self-hosted Git server.
 
 ## What it copies
 
@@ -14,6 +14,24 @@ This project copies public GitHub and Forgejo repositories into GitHub repositor
 | Stars | Not copied. |
 
 **Use a dedicated mirror account or organization.** The workflow can overwrite and delete branches and tags in the mirrors.
+
+## GitHub and Forgejo destinations
+
+Both paths use the shared Git ref reconciliation and release orchestration, with provider-specific API and Git adapters. This is code-level support, not a guarantee that every deployment or transfer has been live-verified.
+
+| | GitHub destination | Local Forgejo destination |
+| --- | --- | --- |
+| Sources and execution | Public GitHub or Forgejo sources; GitHub Actions, scheduled or manual; up to eight concurrent repositories. | GitHub sources; local runner with systemd/cron templates, not automatically installed or enabled; four concurrent processes by default. The scheduled manifest is a restricted subset, not the GitHub config. |
+| Git refs and protection | Both reconcile branches and tags, including force updates and deletion. A detected wipe triggers a private, verified archive before updating; the archive contains Git refs and reachable objects only, not releases, assets or LFS. Detection is conditional, not a general backup. | Same shared wipe policy; destination must be private, have the expected source marker and have Actions disabled. |
+| Releases and assets | Both initialize with all source releases; later runs select the first and latest, missing, draft, pending and failed releases. Changes to other older releases can be missed. Destination-only releases and ordinary destination-only assets are retained; selected assets with changed bytes can be replaced, and mirror-managed cache assets can be deleted or replaced. | Same shared policy and limitations. Synchronization is not atomic. |
+| Latest | Promotes the source latest after selected releases succeed. | Cannot force latest: checks what Forgejo reports and fails if it cannot match the requested latest. |
+| Metadata and files | Source release timestamps are not copied. Files must be under 2 GiB. | Forgejo may represent an empty title as its tag and an empty body as one ASCII space; this is not lossless. Uploads pass the source MIME type when available, otherwise `application/octet-stream`. Forgejo often lacks destination digests, so comparison can require downloading bytes; see [Checking files](#checking-files). |
+
+The Forgejo path uses the same empty-body comparison rules as GitHub, including the intentional-one-space ambiguity; see [Releases in detail](#releases-in-detail). Its host setup, restricted manifest, safety gates and live-test limitations are documented in [scheduler/README.md](scheduler/README.md). In particular, changed-asset transfers were tested with mocks but still need live verification.
+
+### Shared-code impact on GitHub
+
+The shared release path also changes GitHub behavior: it reads each selected source release by ID for a baseline before processing and, on the normal path, again before finalization, failing on raw same-side metadata drift rather than treating empty and one-space bodies as equivalent. The read-only convergence path performs its own verification instead of normal finalization. Draft finalization treats one space as logically empty, including on GitHub; published GitHub finalization sends the raw source body. Destination release snapshot caching also updates its draft alias when a release changes identity. These are potential effects of shared code, not an attribution of any particular run failure to the Forgejo work. See [`repo_mirror/repository.py`](repo_mirror/repository.py) and the provider adapters in [`repo_mirror/`](repo_mirror/).
 
 ## Choose sources for a manual run
 
@@ -115,7 +133,7 @@ When a web request fails, the log shows the HTTP status code and what operation 
 - **Empty release notes:** Exactly one ASCII space (U+0020) is treated as logically empty in release-body comparisons and draft finalization; an intentional one-space source therefore cannot be distinguished from empty in those paths. Other whitespace, including two or more spaces, tabs and newlines, remains meaningful and is preserved. Source drift checks compare raw bodies, not normalized ones. When finalizing a published GitHub release, the mirror sends the source body unchanged; comparisons may still treat one space and empty as equivalent. Forgejo uses the representation described below.
 - **Forgejo destination tradeoff:** Forgejo's release PATCH cannot reliably clear nonempty notes with an empty body. The workaround writes exactly one ASCII space for a truly empty source body, so the persisted Forgejo body is not byte-for-byte identical, even though it will typically appear empty. Pending markers are temporary; recovery after interruption requires a valid signed marker and compatible source and transaction state. Completed published releases should have the pending marker removed; completed drafts have the separate identity-marker exception below. Reconciliation is not atomic, and failures may require manual review.
 - **Drafts:** GitHub may return a synthetic `untagged-` tag for a draft. Source drafts with such tags are rejected rather than copied as real tags (even a legitimate draft tag with that prefix is conservatively rejected). For supported source tags, completed destination drafts retain a visible signed identity marker in their body until publication, so reruns can identify and publish the same release. Pending drafts use an ID-bound v3 recovery marker. Keep `MIRROR_TIMESTAMP_SECRET` stable: changing it, removing/editing a marker, or using older unmarked destination drafts requires manual reconciliation. Names and synthetic destination tags are not identities. If a create succeeds but its ID-bound marker cannot be saved, manual reconciliation can also be necessary.
-- **Latest release:** the source's `/releases/latest` picks the release to mark as latest on GitHub, even if it is older than the usual window. The mirror promotes it only after all selected releases are done. A failed promotion is retried next run. Pre-releases and drafts are never promoted.
+- **Latest release:** the source's `/releases/latest` picks the release to mark as latest on GitHub, even if it is older than the usual window. The GitHub mirror promotes it only after all selected releases are done. For a Forgejo destination, the mirror checks the destination latest rather than promoting it. A failed promotion is retried next run. Pre-releases and drafts are never promoted.
 - **404 from `/releases/latest`:** no release is promoted. The repository may be private, or the Forgejo server may be too old. Other errors fail the repository.
 - **Order:** releases are sorted by publish time, then creation time. If a time is missing or invalid, the source's list order is used. GitHub sets its own release times; the source's times are not copied.
 
@@ -157,12 +175,14 @@ Failed uploads are saved in `failures.json` on the management branch. The next r
 
 ## Checking files
 
-A retry checks files that are already uploaded and copies missing ones. Each file is compared in this order. The first step that gives an answer wins.
+A retry checks files that are already uploaded and copies missing ones. On the general path, comparison uses the following evidence and falls back to bytes when needed. The Forgejo adapter has a separate authenticated GitHub digest shortcut described below.
 
 1. **Published SHA-256 digest** (a fingerprint of the file's bytes). Used when both sites publish a valid digest, they match, and the sizes match. Forgejo often has no digest.
 2. **Checksum file fallback.** If the source has exactly one `SHA256SUMS` or `SHA256SUMS.txt` (up to 1 MiB), its strictly formatted lines are used as digests. Bad lines, duplicate names, unsafe paths or several checksum files turn this off.
 3. **Timestamp and size cache (heuristic).** Used only for files with a usable ID, timestamp and size, and only if a verified `REPO-MIRROR-MANIFEST.json` (or legacy `TIMESTAMPS.txt`) exists. See below.
 4. **Byte comparison.** If the first three steps cannot decide, the file is downloaded and compared byte by byte.
+
+For the Forgejo adapter, a valid SHA-256 digest from the authenticated GitHub source listing can avoid downloading the source asset: the mirror downloads and hashes the same-size destination asset and skips the source download if it matches. It then re-downloads and hashes the pinned destination asset during final verification and checks the source asset snapshot again. The timestamp-cache shortcut is disabled for this adapter; checksum-file fallback does not enable this digest shortcut.
 
 Missing or bad digests are never treated as proof of a match. Equal sizes alone do not prove equal contents.
 
@@ -170,7 +190,7 @@ Missing or bad digests are never treated as proof of a match. Equal sizes alone 
 
 - **Checksum files are a source claim, not proof.** A malicious source can publish bad files with matching hashes. Verify the source yourself if you do not trust it.
 - **The file-list fingerprint** (used to guard pending releases) only includes stable fields: name, size, asset ID, state, published digest and checksum-file content. It ignores volatile fields such as download counts, timestamps, download URLs, uploader, labels and content type. A content change that keeps all stable fields the same can slip past it. The byte check before replacing a file covers that gap for files already on the mirror.
-- **Timestamp and size cache (`REPO-MIRROR-MANIFEST.json`).** The mirror stores each file's ID, timestamp, size and SHA-256 in a signed file named `REPO-MIRROR-MANIFEST.json`. Existing verified `TIMESTAMPS.txt` files continue to be used under their old name; they are not automatically renamed. A file is skipped only if all identity fields match and the mirror's stored hash matches the copy on GitHub. This is a **heuristic**: a source can change a file without changing its timestamp or size, so changes can be missed.
+- **Timestamp and size cache (`REPO-MIRROR-MANIFEST.json`).** On the general path, the mirror stores each file's ID, timestamp, size and SHA-256 in a signed file named `REPO-MIRROR-MANIFEST.json`. Existing verified `TIMESTAMPS.txt` files continue to be used under their old name; they are not automatically renamed. A file is skipped only if all identity fields match and the mirror's stored hash matches the copy on GitHub. This is a **heuristic**: a source can change a file without changing its timestamp or size, so changes can be missed.
 - If the source has either manifest name or its `.repo-mirror-staging` name, or the existing manifest was not made by this mirror, the cache is turned off for that release. If both old and new names (including staging names) are present, caching is disabled. Source files are never reused or deleted for this.
 - Updates write the new cache file, check it, delete the old one, then rename. This is not one atomic step. If a rename is interrupted, the verified staging file is kept for the next run. A stale or conflicting staging file needs manual cleanup and is never removed automatically.
 
