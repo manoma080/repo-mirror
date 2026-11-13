@@ -379,6 +379,157 @@ class ReleaseAggregateError(RuntimeError):
         self.release_errors = tuple(errors)
 
 
+def verify_empty_body_converged(src, dst, upstream, target, release):
+    """Prove a published empty-body release already matches, using reads only.
+
+    Return the pinned destination ID, or None whenever evidence is insufficient.
+    Both sides are downloaded twice to detect byte drift without trusting digests.
+    Final reads are not atomic; concurrent changes after a read can still race.
+    """
+    try:
+        def valid_id(value):
+            return type(value) is int and value > 0
+
+        def metadata(item):
+            if not isinstance(item, dict) or not valid_id(item.get("id")):
+                raise ValueError()
+            tag, title = item.get("tag_name"), item.get("name")
+            if (not {"body", "name", "draft", "prerelease", "target_commitish"} <= item.keys() or
+                    not isinstance(tag, str) or not tag or
+                    title is not None and not isinstance(title, str) or
+                    item.get("body") not in (None, "") or
+                    item.get("draft") is not False or type(item.get("prerelease")) is not bool or
+                    not isinstance(item.get("target_commitish"), str) or not item["target_commitish"]):
+                raise ValueError()
+            return (item["id"], tag, title, item.get("body"), item["draft"],
+                    item["prerelease"], item["target_commitish"])
+
+        validate_source_release_markers(release)
+        initial = metadata(release)
+        tag = release["tag_name"]
+        source_url = upstream + "/releases/" + str(release["id"])
+        dest = dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))
+        dest_meta = metadata(dest)
+        if (dest_meta[1] != tag or
+                (dest_meta[2] != initial[2] and not (initial[2] in (None, "") and dest_meta[2] == tag)) or
+                dest_meta[4:] != initial[4:]):
+            return None
+        dest_url = target + "/releases/" + str(dest["id"])
+
+        def release_lists():
+            source_list = list(src.pages(upstream + "/releases"))
+            if any(not valid_source_release_tag(item) or not valid_id(item.get("id"))
+                   for item in source_list):
+                raise ValueError()
+            validate_unique_source_tags(source_list)
+            if len({item["id"] for item in source_list}) != len(source_list):
+                raise ValueError()
+            dest_list = list(dst.pages(target + "/releases"))
+            if (any(not isinstance(item, dict) or not valid_id(item.get("id")) or
+                    not isinstance(item.get("tag_name"), str) or not item["tag_name"]
+                    for item in dest_list) or
+                    len({item["id"] for item in dest_list}) != len(dest_list) or
+                    len({item["tag_name"] for item in dest_list}) != len(dest_list)):
+                raise ValueError()
+            matches = [item for item in dest_list if isinstance(item, dict) and item.get("tag_name") == tag]
+            if (len(matches) != 1 or metadata(matches[0]) != dest_meta or
+                    any(not isinstance(item, dict) or
+                        (item.get("draft") is True and str(item.get("tag_name", "")).startswith("untagged-"))
+                        for item in dest_list)):
+                raise ValueError()
+            source_matches = [item for item in source_list if isinstance(item, dict) and item.get("id") == initial[0]]
+            if len(source_matches) != 1 or metadata(source_matches[0]) != initial:
+                raise ValueError()
+            def stable_listing(items):
+                def fields(item, keys):
+                    return tuple((key, key in item, item.get(key)) for key in keys)
+                result = {}
+                for item in items:
+                    nested = item.get("assets")
+                    if nested is not None and not isinstance(nested, list):
+                        raise ValueError()
+                    asset_fields = None
+                    if nested is not None:
+                        if any(not isinstance(asset, dict) for asset in nested):
+                            raise ValueError()
+                        asset_fields = sorted((fields(asset, ("id", "name", "size", "state", "digest"))
+                                               for asset in nested), key=repr)
+                    result[item["id"]] = (fields(item, ("id", "tag_name", "name", "body", "draft",
+                                                         "prerelease", "target_commitish")), asset_fields)
+                return result
+            return stable_listing(source_list), stable_listing(dest_list)
+
+        initial_lists = release_lists()
+
+        def assets(adapter, url):
+            result = {}
+            ids = set()
+            for asset in adapter.pages(url + "/assets"):
+                if (not isinstance(asset, dict) or not valid_id(asset.get("id")) or
+                        asset["id"] in ids or not isinstance(asset.get("name"), str) or not asset["name"] or
+                        asset["name"] in result or asset.get("state") != "uploaded" or
+                        type(asset.get("size")) is not int or asset["size"] < 0 or
+                        not isinstance(asset.get("url"), str) or not asset["url"]):
+                    raise ValueError()
+                ids.add(asset["id"])
+                result[asset["name"]] = dict(asset)
+            return result
+
+        def snapshot(items):
+            return {name: (a["id"], a["name"], a["size"], a["state"], a.get("digest"))
+                    for name, a in items.items()}
+
+        def digest(adapter, asset):
+            with tempfile.TemporaryFile() as data:
+                if adapter is src and callable(getattr(adapter, "download_verified_asset", None)):
+                    adapter.download_verified_asset(asset, data)
+                else:
+                    adapter.download(asset["url"], data)
+                if data.tell() != asset["size"]:
+                    raise ValueError()
+                data.seek(0)
+                hashed = hashlib.sha256()
+                for chunk in iter(lambda: data.read(CHUNK_SIZE), b""):
+                    hashed.update(chunk)
+                published = asset.get("digest")
+                if adapter is src and isinstance(published, str) and published.lower().startswith("sha256:"):
+                    if (not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", published) or
+                            hashed.hexdigest() != published[7:].lower()):
+                        raise ValueError()
+                return hashed.digest()
+
+        source_assets, dest_assets = assets(src, source_url), assets(dst, dest_url)
+        if source_assets.keys() != dest_assets.keys():
+            return None
+        hashes = {}
+        for name, item in source_assets.items():
+            if item["size"] != dest_assets[name]["size"]:
+                return None
+            hashes[name] = digest(src, item)
+            if hashes[name] != digest(dst, dest_assets[name]):
+                return None
+        if (metadata(src.request("GET", source_url)) != initial or
+                metadata(dst.request("GET", dest_url)) != dest_meta or
+                metadata(dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))) != dest_meta):
+            return None
+        source_again, dest_again = assets(src, source_url), assets(dst, dest_url)
+        if snapshot(source_assets) != snapshot(source_again) or snapshot(dest_assets) != snapshot(dest_again):
+            return None
+        for name in source_assets:
+            if digest(src, source_again[name]) != hashes[name] or digest(dst, dest_again[name]) != hashes[name]:
+                return None
+        if (metadata(src.request("GET", source_url)) != initial or
+                metadata(dst.request("GET", dest_url)) != dest_meta or
+                metadata(dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))) != dest_meta or
+                snapshot(assets(src, source_url)) != snapshot(source_assets) or
+                snapshot(assets(dst, dest_url)) != snapshot(dest_assets) or
+                release_lists() != initial_lists):
+            return None
+        return dest["id"]
+    except Exception:
+        return None
+
+
 def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, initializing, journal=None,
                     validate_snapshot=None):
     """Apply the release policy independently of repository and Git setup."""
@@ -468,6 +619,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         except KeyError, AttributeError, TypeError, ValueError:
             pass
     latest_id = None
+    latest_read_only = False
     selected_tags = {r["tag_name"] for r in selected}
     skipped = sum(1 for release in releases if release["tag_name"] not in selected_tags)
     print(
@@ -493,6 +645,17 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 validate_source_draft_tag(release)
                 validate_release_source = getattr(dst, "validate_release_source", None)
                 if callable(validate_release_source):
+                    if getattr(dst, "verify_empty_body_read_only", False) and release.get("body") in (None, ""):
+                        failed = journal and any(
+                            key.split(":", 1)[0] == journal.key(source, name, owner, tag, "")[:64]
+                            for key in journal.failures
+                        )
+                        converged = None if failed else verify_empty_body_converged(src, dst, upstream, target, release)
+                        if converged is not None:
+                            if latest and tag == latest["tag_name"]:
+                                latest_id = converged
+                                latest_read_only = True
+                            continue
                     validate_release_source(release)
                 try:
                     existing = dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))
@@ -1570,6 +1733,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     dst.request("PATCH", target + "/releases/" + str(existing["id"]), final_fields)
                 if latest and tag == latest["tag_name"]:
                     latest_id = existing["id"]
+                    latest_read_only = False
                 if journal:
                     for asset_name in {asset["name"] for asset in source_assets} | observed_starter_names:
                         key = journal.key(source, name, owner, tag, asset_name)
@@ -1584,4 +1748,14 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
             raise release_errors[0]
         raise ReleaseAggregateError(release_errors) from release_errors[0]
     if latest_id is not None:
-        dst.request("PATCH", target + "/releases/" + str(latest_id), {"make_latest": "true"})
+        if latest_read_only:
+            try:
+                current = dst.request("GET", target + "/releases/latest")
+                matches = isinstance(current, dict) and type(current.get("id")) is int and current["id"] == latest_id
+            except Exception:
+                matches = False
+            if not matches:
+                # Preserve Forgejo's existing safe conflict instead of selecting latest.
+                dst.validate_release_source({"body": ""})
+        else:
+            dst.request("PATCH", target + "/releases/" + str(latest_id), {"make_latest": "true"})
