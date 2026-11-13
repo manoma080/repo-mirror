@@ -105,6 +105,13 @@ def _release_map(items):
     return result
 
 
+def _destination_metadata_matches(source, target):
+    # Forgejo may store an empty release name as the tag; preserve all other checks.
+    return all(target.get(k) == source[k] or (
+        k == 'name' and source[k] == '' and target.get(k) == source['tag_name']
+    ) for k in _FIELDS)
+
+
 def sync_releases(source, destination):
     """Copy all releases; raise on conflicts, interrupted operations or failed verification.
 
@@ -130,7 +137,7 @@ def sync_releases(source, destination):
         if target is not None:
             if release['draft'] or target.get('draft'):
                 raise SyncConflict('existing draft identity requires reconciliation')
-            if any(target.get(k) != release[k] for k in _FIELDS):
+            if not _destination_metadata_matches(release, target):
                 raise SyncConflict('release metadata collision')
         else:
             target = destination.create_release({k: release[k] for k in _FIELDS})
@@ -169,9 +176,7 @@ def sync_releases(source, destination):
         ):
             raise SyncConflict('source release changed during sync')
         verified = _release_map(destination.list_releases()).get(tag)
-        if verified is None or verified.get('id') != target['id'] or any(
-            verified.get(k) != release[k] for k in _FIELDS
-        ):
+        if verified is None or verified.get('id') != target['id'] or not _destination_metadata_matches(release, verified):
             raise SyncConflict('release verification failed')
 
     final_src = _release_map(source.list_releases())
@@ -184,7 +189,7 @@ def sync_releases(source, destination):
     final_dst = _release_map(destination.list_releases())
     if any(
         tag not in final_dst or final_dst[tag].get('id') != target_ids[tag] or
-        any(final_dst[tag].get(k) != release[k] for k in _FIELDS)
+        not _destination_metadata_matches(release, final_dst[tag])
         for tag, release in src.items()
     ):
         raise SyncConflict('release verification failed')
