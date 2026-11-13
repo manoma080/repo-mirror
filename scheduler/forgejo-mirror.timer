@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Forgejo mirror every six hours
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*-*-* 00,06,12,18:00:00
+Persistent=true
+Unit=forgejo-mirror.service
+
+[Install]
+WantedBy=timers.target

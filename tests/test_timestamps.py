@@ -110,7 +110,8 @@ class TimestampTests(unittest.TestCase):
 
     def test_source_reserved_names_are_mirrored_without_cache_management(self):
         for name in ("TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging",
-                     "REPO-MIRROR-MANIFEST.json", "REPO-MIRROR-MANIFEST.json.repo-mirror-staging"):
+                     "REPO-MIRROR-MANIFEST.json", "REPO-MIRROR-MANIFEST.json.repo-mirror-staging",
+                     "MIRROR-REPO-MANIFEST.json"):
             with self.subTest(name=name):
                 class CollisionSource(TimestampSource):
                     def pages(self, url):

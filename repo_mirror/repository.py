@@ -1040,7 +1040,8 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                     bool(secret)
                     and not pending
                     and not (legacy_present and new_present)
-                    and not ({legacy_name, legacy_stage, new_name, new_stage} & set(all_source_names))
+                    and not ({legacy_name, legacy_stage, new_name, new_stage,
+                              "MIRROR-REPO-MANIFEST.json"} & set(all_source_names))
                 )
                 cache_owner = {"owner": "repo-mirror:timestamps:v1", "source": marker, "tag": tag}
                 cached = {}
