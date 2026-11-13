@@ -12,6 +12,7 @@ from repo_mirror.forgejo_releases import ForgejoReleases, SyncConflict, _id
 
 class ForgejoDestinationAdapter:
     supports_target_commitish = True
+    verify_empty_body_read_only = True
 
     def validate_release_source(self, release):
         # Forgejo's release PATCH cannot reliably clear a nonempty body. Never

@@ -59,6 +59,14 @@ class ForgejoSourceAdapter:
     def request(self, method, url, data=None, **kwargs):
         return self.api.request(method, url, data, **kwargs)
 
+    def download_verified_asset(self, asset, output):
+        """Download only the browser URL bound to this listed asset identity."""
+        url = asset.get('browser_download_url')
+        loaded = self._assets.get(url)
+        if loaded is None or type(asset.get('id')) is not int or loaded.get('id') != asset['id']:
+            raise ValueError('source asset identity changed')
+        return self.download(url, output)
+
     def download(self, url, output):
         if url not in self._assets:
             raise ValueError('unknown source asset URL')
