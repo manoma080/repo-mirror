@@ -34,6 +34,50 @@ class Fake:
 
 
 class TestForgejoReleases(unittest.TestCase):
+    def test_blank_name_normalized_on_create_and_existing_release(self):
+        rel = {'id': 1, 'tag_name': 'v1', 'name': '', 'body': 'notes', 'draft': False, 'prerelease': False, 'target_commitish': 'main'}
+        asset = {'id': 2, 'name': 'x', 'size': 3, 'state': 'uploaded'}
+        class NormalizingDestination(Fake):
+            def create_release(self, release):
+                self.sent = dict(release)
+                return super().create_release(dict(release, name=release['tag_name']))
+        src = Fake([rel], {1: [asset]}, {2: b'abc'})
+        dst = NormalizingDestination([], {}, {})
+        sync_releases(src, dst)
+        self.assertEqual(dst.sent['name'], '')
+        sync_releases(src, dst)
+        self.assertEqual(dst.releases[0]['body'], 'notes')
+        self.assertEqual(dst.blobs[20], b'abc')
+        self.assertEqual(len(dst.assets[10]), 1)
+
+    def test_blank_name_requires_blank_or_tag_at_every_destination_gate(self):
+        rel = {'id': 1, 'tag_name': 'v1', 'name': '', 'body': 'notes', 'draft': False, 'prerelease': False, 'target_commitish': 'main'}
+        class Destination(Fake):
+            def __init__(self, name, change_at=None):
+                super().__init__([dict(rel, id=10, name=name)], {}, {})
+                self.change_at = change_at
+                self.calls = 0
+            def list_releases(self):
+                self.calls += 1
+                if self.calls == self.change_at:
+                    self.releases[0]['name'] = 'other'
+                return super().list_releases()
+        for name in ('', 'v1'):
+            with self.subTest(name=name):
+                sync_releases(Fake([dict(rel)], {}, {}), Destination(name))
+        for name, change_at, message in [('other', None, 'metadata collision'),
+                                          ('v1', 2, 'release verification'),
+                                          ('v1', 3, 'release verification')]:
+            with self.subTest(name=name, change_at=change_at):
+                dst = Destination(name, change_at)
+                with self.assertRaisesRegex(SyncConflict, message):
+                    sync_releases(Fake([dict(rel)], {}, {}), dst)
+                self.assertEqual(dst.releases[0]['body'], 'notes')
+        for source_name, target_name in [('title', 'v1'), (' ', 'v1'), ('title', '')]:
+            with self.subTest(source_name=source_name, target_name=target_name):
+                with self.assertRaisesRegex(SyncConflict, 'metadata collision'):
+                    sync_releases(Fake([dict(rel, name=source_name)], {}, {}), Destination(target_name))
+
     def test_release_added_during_transfer_aborts(self):
         rel = {'id': 1, 'tag_name': 'v1', 'name': 'n', 'body': '', 'draft': False, 'prerelease': False, 'target_commitish': 'main'}
         class Source(Fake):
