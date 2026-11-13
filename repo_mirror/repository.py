@@ -230,7 +230,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
             GITHUB + endpoint,
             {
                 "name": dest_name,
-                "private": True,
+                "private": source.get("destinations", {}).get(name.lower(), {}).get("visibility", "private") != "public",
                 "auto_init": False,
                 "description": marker + " [repo-mirror:initializing:v1]",
             },

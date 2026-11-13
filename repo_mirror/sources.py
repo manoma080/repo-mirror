@@ -17,6 +17,17 @@ def validate_source(source):
     for value in [source.get("owner"), source.get("prefix", "") if source.get("prefix", "") != "" else "x"]:
         if not isinstance(value, str) or not NAME.fullmatch(value) or value in (".", ".."):
             raise ValueError("invalid owner or prefix")
+    mappings = source.get("destinations", {})
+    if not isinstance(mappings, dict):
+        raise ValueError("invalid destination mappings")
+    for key, settings in mappings.items():
+        if (not isinstance(key, str) or key != key.lower() or not NAME.fullmatch(key) or key in (".", "..")
+                or not isinstance(settings, dict) or set(settings) - {"name", "visibility"}
+                or settings.get("visibility", "private") not in ("private", "public")):
+            raise ValueError("invalid destination mappings")
+        if "name" in settings and (not isinstance(settings["name"], str) or len(settings["name"]) > 100
+                or not NAME.fullmatch(settings["name"]) or settings["name"] in (".", "..")):
+            raise ValueError("invalid destination mappings")
     repos = source.get("repos")
     if repos != "all" and (
         not isinstance(repos, list)
@@ -47,7 +58,7 @@ def destination_name(source, name):
     """Return the destination repository name for a source repository."""
     if not isinstance(name, str) or not NAME.fullmatch(name) or name in (".", ".."):
         raise ValueError("invalid discovered repository name")
-    result = source.get("prefix", "mirror-" + source["owner"] + "-") + name
+    result = source.get("destinations", {}).get(name.lower(), {}).get("name", source.get("prefix", "mirror-" + source["owner"] + "-") + name)
     if len(result) > 100 or not NAME.fullmatch(result) or result in (".", ".."):
         raise ValueError("invalid destination repository name")
     return result

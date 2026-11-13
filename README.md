@@ -1,6 +1,6 @@
 # Repository mirror
 
-This project copies public GitHub and Forgejo repositories into private GitHub repositories. The original repository is the **source**. The copy is the **mirror**. Forgejo is a self-hosted Git server.
+This project copies public GitHub and Forgejo repositories into GitHub repositories (private by default). The original repository is the **source**. The copy is the **mirror**. Forgejo is a self-hosted Git server.
 
 ## What it copies
 
@@ -19,8 +19,8 @@ This project copies public GitHub and Forgejo repositories into private GitHub r
 
 Enter exact repository URLs in the **source_urls** box, separated by commas. Leave it empty to mirror everything in the config.
 
-- URLs must match a configured host, owner and repository name exactly.
-- Unknown, duplicate or malformed URLs stop the run.
+- URLs must be exact credential-free HTTPS repository links; unknown URLs can be mirrored once or added to config.
+- Malformed URLs and destination name collisions stop the run.
 - The run first looks up every source and checks for name clashes. If any lookup fails, the run stops before copying.
 - Scheduled runs always mirror everything.
 
@@ -28,10 +28,16 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 
 - **Ticked** with URLs: the URLs are written into `config.json` and committed to the default branch first. The test and mirror jobs then run on that commit, and only the typed repositories are mirrored. Future scheduled runs include them.
 - **Unticked** with URLs: a one-time mirror. The repositories are copied now but are not saved to `config.json`, so scheduled runs skip them. They do not need to be in the config, but the same host, owner and name rules apply.
-- **Empty** (ticked or not): a regular full run of everything in the config.
+- **Empty** with add unticked: a regular full run of everything in the config. Add requires URLs.
 - Repositories already in the config are not written twice. If nothing changes, no commit is made.
 - Repository URLs on `github.com` are read as GitHub sources. Any other host is read as a Forgejo source.
 - Terms: *config* means `config.json`, the list of sources the mirror reads. *One-time mirror* means a run that copies repositories without saving them for later runs.
+
+### Destination and removal options
+
+- **destination_name** optionally replaces `mirror-<owner>-<repo>` for exactly one URL. Names must be valid GitHub repository names and must not collide with another destination. A pre-existing repository is used only if its source marker matches; visibility is never changed implicitly.
+- **visibility** defaults to unchanged, preserving saved settings; new destinations default to private. Select private or public to explicitly override a saved setting; public exposes mirrored contents. It applies only on creation, not to existing destinations. With add selected, settings are persisted per source repository for scheduled runs; otherwise they apply only to this run.
+- **remove_from_config** requires one or more URLs, commits only the config removal and skips the entire mirror job, including migration and journal writes. It does not delete repositories. It cannot be combined with add, migration, custom name or public visibility. Individual URLs covered by a `repos: "all"` source cannot be removed this way; edit the configuration explicitly instead.
 
 ## Configure sources
 
