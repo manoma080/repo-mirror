@@ -1115,7 +1115,6 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         # asset set changed.
                         extras = set(old_by_name) - {a["name"] for a in assets}
                         cache_names = {
-                            "TIMESTAMPS.txt", "TIMESTAMPS.txt.repo-mirror-staging",
                             "REPO-MIRROR-MANIFEST.json", "REPO-MIRROR-MANIFEST.json.repo-mirror-staging",
                         }
                         secret = os.environ.get("MIRROR_TIMESTAMP_SECRET", "")
@@ -1302,24 +1301,15 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     source_assets
                 ):
                     raise ReleaseRecoveryError("mismatch")
-                # A source asset with either reserved name always wins; never treat it as
-                # our metadata or attempt to manage the auxiliary names in that release.
-                legacy_name = "TIMESTAMPS.txt"
-                legacy_stage = legacy_name + ".repo-mirror-staging"
+                # Source-owned current cache names disable cache management.
                 new_name = "REPO-MIRROR-MANIFEST.json"
                 new_stage = new_name + ".repo-mirror-staging"
-                # Continue an existing legacy transaction under its original names.
-                # Mixed generations are ambiguous and must not be modified.
-                legacy_present = legacy_name in by_name or legacy_stage in by_name
-                new_present = new_name in by_name or new_stage in by_name
-                cache_name, stage_name = (legacy_name, legacy_stage) if legacy_present else (new_name, new_stage)
+                cache_name, stage_name = new_name, new_stage
                 secret = os.environ.get("MIRROR_TIMESTAMP_SECRET", "")
                 cache_enabled = (
                     bool(secret)
                     and not pending
-                    and not (legacy_present and new_present)
-                    and not ({legacy_name, legacy_stage, new_name, new_stage,
-                              "MIRROR-REPO-MANIFEST.json"} & set(all_source_names))
+                    and not ({new_name, new_stage, "MIRROR-REPO-MANIFEST.json"} & set(all_source_names))
                 )
                 cache_owner = {"owner": "repo-mirror:timestamps:v1", "source": marker, "tag": tag}
                 cached = {}

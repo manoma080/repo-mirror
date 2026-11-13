@@ -90,7 +90,8 @@ class TokenRefreshTests(unittest.TestCase):
         self.assertIn("MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}", text)
         self.assertNotIn("actions/create-github-app-token@", text)
         journal_step = text.split("- name: Save failure journal", 1)[1].split("\n      - name:", 1)[0]
-        self.assertIn("if: ${{ always() && !inputs.migrate_manifests }}", journal_step)
+        self.assertIn("if: ${{ always() }}", journal_step)
+        self.assertNotIn("migrate_manifests", text)
 
     def test_log_redaction_accepts_refreshable_provider(self):
         provider = mirror.AppTokenProvider("123", "private", "dest")
