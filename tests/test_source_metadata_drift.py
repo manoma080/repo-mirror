@@ -7,6 +7,116 @@ from repo_mirror.repository import mirror_releases
 
 
 class SourceMetadataDriftTests(unittest.TestCase):
+    def test_forgejo_empty_target_with_existing_identical_tag(self):
+        source = {'type': 'forgejo', 'base_url': 'https://forge.example', 'owner': 'alice'}
+        with patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'}):
+            src, api = Source(body='notes'), GitHubAPI()
+            src.release['target_commitish'] = ''
+            dst = GitHubShapedDestination('team/project', 'token', client=api)
+            src_request, dst_request = src.request, dst.request
+            def source_request(method, url, body=None):
+                if '/git/refs/tags/' in url:
+                    return [{'ref': 'refs/tags/v1', 'object': {'type': 'tag', 'sha': 'a' * 40}}]
+                if url.endswith('/assets'):
+                    return src.pages(url)
+                return src_request(method, url, body)
+            def destination_request(method, url, body=None):
+                if '/git/ref/tags/' in url:
+                    return {'ref': 'refs/tags/v1', 'object': {'type': 'tag', 'sha': 'a' * 40}}
+                return dst_request(method, url, body)
+            src.request, dst.request = source_request, destination_request
+            mirror_releases(source, 'repo', 'team', src, dst, UP, dst.target, 'marker', initializing=False)
+            self.assertEqual(api.release['body'], 'notes')
+
+    def test_empty_forgejo_target_missing_or_mismatched_tags_never_write(self):
+        from test_forgejo_space_body_integration import missing
+        source = {'type': 'forgejo', 'base_url': 'https://forge.example', 'owner': 'alice'}
+        for draft in (False, True):
+            for failure in ('missing-source', 'missing-destination', 'mismatch'):
+                with self.subTest(draft=draft, failure=failure), patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'}):
+                    src, api = Source(body='notes', draft=draft), GitHubAPI(existing=False)
+                    src.release['target_commitish'] = ''
+                    dst = GitHubShapedDestination('team/project', 'token', client=api)
+                    source_request, destination_request = src.request, dst.request
+                    def source_ref(method, url, body=None):
+                        if '/git/refs/tags/' in url:
+                            if failure == 'missing-source': raise missing(url)
+                            return [{'ref': 'refs/tags/v1', 'object': {'type': 'commit', 'sha': 'a' * 40}}]
+                        return source_request(method, url, body)
+                    def destination_ref(method, url, body=None):
+                        if '/git/ref/tags/' in url:
+                            if failure == 'missing-destination': raise missing(url)
+                            return {'ref': 'refs/tags/v1', 'object': {'type': 'commit', 'sha': ('b' if failure == 'mismatch' else 'a') * 40}}
+                        return destination_request(method, url, body)
+                    src.request, dst.request = source_ref, destination_ref
+                    with self.assertRaises(Exception):
+                        mirror_releases(source, 'repo', 'team', src, dst, UP, dst.target, 'marker', initializing=False)
+                    self.assertFalse(any(method != 'GET' for method, _, _ in api.calls))
+
+    def test_empty_forgejo_target_create_and_draft_preserve_payload_and_detect_drift(self):
+        source = {'type': 'forgejo', 'base_url': 'https://forge.example', 'owner': 'alice'}
+        for draft in (False, True):
+            for drift in (False, True):
+                with self.subTest(draft=draft, drift=drift), patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'}):
+                    src, api = Source(body='notes', draft=draft), GitHubAPI(existing=False)
+                    src.release['target_commitish'] = ''
+                    dst = GitHubShapedDestination('team/project', 'token', client=api)
+                    source_request, destination_request = src.request, dst.request
+                    def source_ref(method, url, body=None):
+                        if '/git/refs/tags/' in url:
+                            return [{'ref': 'refs/tags/v1', 'object': {'type': 'tag', 'sha': 'a' * 40}}]
+                        if url.endswith('/assets'): return src.pages(url)
+                        return source_request(method, url, body)
+                    def destination_ref(method, url, body=None):
+                        if '/git/ref/tags/' in url:
+                            return {'ref': 'refs/tags/v1', 'object': {'type': 'tag', 'sha': 'a' * 40}}
+                        return destination_request(method, url, body)
+                    src.request, dst.request = source_ref, destination_ref
+                    if drift:
+                        upload = api.upload
+                        def changed(*args, **kwargs):
+                            result = upload(*args, **kwargs)
+                            src.release['target_commitish'] = None
+                            return result
+                        api.upload = changed
+                        with self.assertRaisesRegex(ValueError, 'source release changed during sync'):
+                            mirror_releases(source, 'repo', 'team', src, dst, UP, dst.target, 'marker', initializing=False)
+                        self.assertIn('[repo-mirror:pending:v3]', api.release['body'])
+                    else:
+                        mirror_releases(source, 'repo', 'team', src, dst, UP, dst.target, 'marker', initializing=False)
+                        self.assertEqual(api.release['draft'], draft)
+                    writes = [body for method, _, body in api.calls if method in ('POST', 'PATCH')]
+                    self.assertTrue(any(method == 'POST' for method, _, _ in api.calls))
+                    self.assertTrue(all('target_commitish' not in body for body in writes))
+
+    def test_tag_change_during_copy_keeps_pending_marker(self):
+        source = {'type': 'forgejo', 'base_url': 'https://forge.example', 'owner': 'alice'}
+        with patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'}):
+            src, api = Source(body='notes'), GitHubAPI()
+            src.release['target_commitish'] = ''
+            dst = GitHubShapedDestination('team/project', 'token', client=api)
+            source_request, destination_request = src.request, dst.request
+            changed = [False]
+            def source_ref(method, url, body=None):
+                if '/git/refs/tags/' in url:
+                    return [{'ref': 'refs/tags/v1', 'object': {'type': 'tag', 'sha': ('b' if changed[0] else 'a') * 40}}]
+                if url.endswith('/assets'): return src.pages(url)
+                return source_request(method, url, body)
+            def destination_ref(method, url, body=None):
+                if '/git/ref/tags/' in url:
+                    return {'ref': 'refs/tags/v1', 'object': {'type': 'tag', 'sha': ('b' if changed[0] else 'a') * 40}}
+                return destination_request(method, url, body)
+            src.request, dst.request = source_ref, destination_ref
+            upload = api.upload
+            def drift(*args, **kwargs):
+                result = upload(*args, **kwargs)
+                changed[0] = True
+                return result
+            api.upload = drift
+            with self.assertRaisesRegex(ValueError, 'tag verification failed'):
+                mirror_releases(source, 'repo', 'team', src, dst, UP, dst.target, 'marker', initializing=False)
+            self.assertIn('[repo-mirror:pending:v3]', api.release['body'])
+
     def test_list_can_omit_optional_metadata_present_in_authoritative_snapshot(self):
         with patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'synthetic-test-only-secret'}):
             src, api = Source(), ForgejoAPI()
