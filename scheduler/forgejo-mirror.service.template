@@ -3,6 +3,5 @@ Description=Sync selected GitHub mirrors to local Forgejo
 
 [Service]
 Type=oneshot
-WorkingDirectory=@CHECKOUT@
-ExecStart=@PYTHON@ -m repo_mirror.forgejo_schedule run --manifest @CHECKOUT@/forgejo-nintendo-sources.json --token-file @TOKEN_FILE@ --timestamp-secret-file @TIMESTAMP_SECRET_FILE@ --journal-dir @JOURNAL_DIR@ --owner @OWNER@ --app-id @APP_ID@ --private-key-file @PRIVATE_KEY_FILE@ --lock @LOCK_FILE@
+ExecStart=@PYTHON@ @UPDATER@ --remote @REMOTE@ --state-dir @STATE_DIR@ --job-lock @JOB_LOCK_FILE@ --helper-python @HELPER_PYTHON@ -- --token-file @TOKEN_FILE@ --timestamp-secret-file @TIMESTAMP_SECRET_FILE@ --journal-dir @JOURNAL_DIR@ --owner @OWNER@ --app-id @APP_ID@ --private-key-file @PRIVATE_KEY_FILE@ --lock @LOCK_FILE@
 UMask=0077

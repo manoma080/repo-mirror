@@ -89,13 +89,19 @@ def main(argv=None):
                 failures = 0
                 pending = iter(enumerate(sources, 1))
                 active = {}
+                interrupted = False
                 def terminate(signum, frame):
-                    raise KeyboardInterrupt
-                previous_term = signal.signal(signal.SIGTERM, terminate)
+                    nonlocal interrupted
+                    interrupted = True
+                previous_handlers = {sig: signal.signal(sig, terminate) for sig in (signal.SIGTERM, signal.SIGINT)}
                 try:
                     exhausted = False
                     while active or not exhausted:
+                        if interrupted:
+                            raise KeyboardInterrupt
                         while len(active) < args.jobs and not exhausted:
+                            if interrupted:
+                                raise KeyboardInterrupt
                             try:
                                 index, source = next(pending)
                             except StopIteration:
@@ -147,6 +153,11 @@ def main(argv=None):
                                 continue
                             if status is None:
                                 continue
+                            # A helper may exit while descendants in its session still write.
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
                             reason = 'helper or sync process failed; check helper configuration and credentials'
                             diagnostics.seek(0)
                             for line in diagnostics:
@@ -164,7 +175,6 @@ def main(argv=None):
                         if active:
                             time.sleep(0.05)
                 finally:
-                    signal.signal(signal.SIGTERM, previous_term)
                     for process in active:
                         try:
                             os.killpg(process.pid, signal.SIGTERM)
@@ -184,6 +194,10 @@ def main(argv=None):
                                 pass
                             process.wait()
                             diagnostics.close()
+                    for sig, handler in previous_handlers.items():
+                        signal.signal(sig, handler)
+                if interrupted:
+                    raise KeyboardInterrupt
                 print(f'Batch: {len(sources) - failures} succeeded, {failures} failed', flush=True)
                 return 1 if failures else 0
     except KeyboardInterrupt:
