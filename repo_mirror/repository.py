@@ -333,7 +333,7 @@ def validate_source_release_listing(releases):
     validate_unique_source_tags(releases)
 
 
-def validate_source_release_metadata(release):
+def validate_source_release_metadata(release, *, allow_empty_target=False):
     if not valid_source_release_tag(release):
         raise ValueError("invalid source release tag")
     if type(release.get("id")) is not int or release["id"] <= 0:
@@ -343,10 +343,33 @@ def validate_source_release_metadata(release):
     if any(key in release and type(release[key]) is not bool for key in ("draft", "prerelease")):
         raise ValueError("invalid source release flags")
     target = release.get("target_commitish")
-    if target is not None and (not isinstance(target, str) or not target):
+    if target is not None and (not isinstance(target, str) or (not target and not allow_empty_target)):
         raise ValueError("invalid source release target")
     validate_source_draft_tag(release)
     validate_source_release_markers(release)
+
+
+def verify_forgejo_empty_target_tag(src, dst, upstream, target, tag):
+    """Require identical existing tag objects; never allow a default-branch tag."""
+    if getattr(dst, "supports_target_commitish", False):
+        raise ValueError("cannot verify destination tag for empty source target")
+    ref = "refs/tags/" + tag
+    source_refs = src.request("GET", upstream + "/git/refs/tags/" + quote(tag, safe=""))
+    dest_ref = dst.request("GET", target + "/git/ref/tags/" + quote(tag, safe=""))
+    if not isinstance(source_refs, list):
+        raise ValueError("source tag verification failed")
+    matching = [item for item in source_refs if isinstance(item, dict) and item.get("ref") == ref]
+    if len(matching) != 1 or not isinstance(dest_ref, dict) or dest_ref.get("ref") != ref:
+        raise ValueError("tag verification failed")
+    source_object, dest_object = matching[0].get("object"), dest_ref.get("object")
+    if not isinstance(source_object, dict) or not isinstance(dest_object, dict):
+        raise ValueError("tag verification failed")
+    sha = source_object.get("sha")
+    if (not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+            or source_object.get("type") not in ("tag", "commit")
+            or dest_object.get("sha") != sha or dest_object.get("type") != source_object.get("type")):
+        raise ValueError("tag verification failed")
+    return (source_object["type"], sha)
 
 
 def fetch_source_latest(src, upstream):
@@ -666,10 +689,14 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             for snapshot in (listed, release) for key in metadata_keys if key in snapshot) or
                         baseline.get("id") != release_id or baseline.get("tag_name") != tag):
                     raise ValueError("source release changed during sync")
-                validate_source_release_metadata(baseline)
+                allow_empty_target = source.get("type") == "forgejo"
+                validate_source_release_metadata(baseline, allow_empty_target=allow_empty_target)
                 release = baseline
                 validate_source_draft_tag(release)
                 source_metadata = {key: (key in release, release.get(key)) for key in metadata_keys}
+                empty_forgejo_target = allow_empty_target and release.get("target_commitish") == ""
+                if empty_forgejo_target:
+                    original_tag_object = verify_forgejo_empty_target_tag(src, dst, upstream, target, tag)
                 validate_release_source = getattr(dst, "validate_release_source", None)
                 if callable(validate_release_source):
                     if getattr(dst, "verify_empty_body_read_only", False) and release.get("body") in (None, "", " "):
@@ -836,6 +863,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     if existing:
                         dst.request("PATCH", target + "/releases/" + str(existing["id"]), {"body": marked})
                     else:
+                        if empty_forgejo_target:
+                            if verify_forgejo_empty_target_tag(src, dst, upstream, target, tag) != original_tag_object:
+                                raise ValueError("tag verification failed")
                         fields = {k: release.get(k) for k in ("draft", "prerelease")}
                         fields.update(tag_name=tag, name=source_name, body=marked, make_latest="false")
                         if getattr(dst, "supports_target_commitish", False) and release.get("target_commitish") is not None:
@@ -1733,6 +1763,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     for key in metadata_keys
                 ):
                     raise ValueError("source release changed during sync")
+                if empty_forgejo_target:
+                    if verify_forgejo_empty_target_tag(src, dst, upstream, target, tag) != original_tag_object:
+                        raise ValueError("tag verification failed")
                 # GitHub ignores a null body in PATCH; explicitly clear the
                 # recovery marker. Forgejo's adapter maps empty to one space.
                 final_body = release.get("body")
