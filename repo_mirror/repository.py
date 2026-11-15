@@ -16,6 +16,7 @@ from urllib.parse import quote, urlencode, urlparse
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
 from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
+from repo_mirror.github_api import SourceAPI as GitHubSourceAPI
 from repo_mirror.github_api import not_found, same_file, transient_transfer_error, transfer_retry_delay
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
@@ -567,6 +568,10 @@ def verify_empty_body_converged(src, dst, upstream, target, release):
 def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, initializing, journal=None,
                     validate_snapshot=None):
     """Apply the release policy independently of repository and Git setup."""
+    if source.get("type") == "github" and isinstance(src, GitHubSourceAPI):
+        src = ForgejoSourceAdapter(source["owner"] + "/" + name, src.source_token, api=src)
+        if upstream != src.base:
+            raise ValueError("source API URL does not match source identity")
     with timed("step release-discovery target=source"):
         releases = src.pages(upstream + "/releases")
     if validate_snapshot is not None:

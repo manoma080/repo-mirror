@@ -135,9 +135,8 @@ def is_wipe(old_files, new_files, old_commits, reachable_commits):
 
 
 def mirror_git(source_url, destination_url, token, after_push=None, *, safety=None):
-    # Git is isolated from user/system configuration and never receives the token
-    # while contacting the source. Hooks are disabled and no checkout occurs.
-    """Copy every branch and tag from the source Git repo to the destination, using a token-safe push."""
+    """Copy branches and tags using isolated, host-scoped Git credentials."""
+    # Hooks are disabled, user/system Git configuration is isolated, and no checkout occurs.
     if safety is None:
         raise RuntimeError("safety context required for git mirroring")
     with tempfile.TemporaryDirectory(prefix="repo-mirror-") as tmp:
@@ -184,9 +183,19 @@ def mirror_git(source_url, destination_url, token, after_push=None, *, safety=No
                 "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic " + auth,
             }
 
+        github_source = bool(
+            isinstance(source_url, str)
+            and re.fullmatch(r"https://github\.com(?::443)?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source_url, re.IGNORECASE)
+            and all(part not in (".", "..") for part in source_url.split("/")[-2:])
+        )
+
+        def source_run(args):
+            remote_operation = source_url in args and ("ls-remote" in args or "fetch" in args)
+            return run(args, safe_credentials() if github_source and remote_operation else None)
+
         run(["init", "--bare", tmp])
         return synchronize_snapshots(
-            run,
+            source_run,
             lambda args: run(args, safe_credentials()),
             tmp,
             source_url,
