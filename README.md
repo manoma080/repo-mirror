@@ -27,7 +27,7 @@ Both paths use the shared Git ref reconciliation and release orchestration, with
 | Latest | Promotes the source latest after selected releases succeed. | Cannot force latest: checks what Forgejo reports and fails if it cannot match the requested latest. |
 | Metadata and files | Source release timestamps are not copied. Files must be under 2 GiB. | Forgejo may represent an empty title as its tag and an empty body as one ASCII space; this is not lossless. Uploads pass the source MIME type when available, otherwise `application/octet-stream`. Forgejo often lacks destination digests, so comparison can require downloading bytes; see [Checking files](#checking-files). |
 
-The Forgejo path uses the same empty-body comparison rules as GitHub, including the intentional-one-space ambiguity; see [Releases in detail](#releases-in-detail). Its host setup, restricted manifest, safety gates and live-test limitations are documented in [scheduler/README.md](scheduler/README.md). In particular, changed-asset transfers were tested with mocks but still need live verification.
+The Forgejo path uses [`config-forgejo.json`](config-forgejo.json), independently of GitHub Actions' `config.json`. It uses the same empty-body comparison rules as GitHub, including the intentional-one-space ambiguity; see [Releases in detail](#releases-in-detail). Its host setup, restricted manifest, authentication, retry journals, safety gates and live-test limitations are documented in [scheduler/README.md](scheduler/README.md). In particular, changed-asset transfers were tested with mocks but still need live verification.
 
 ### Shared-code impact on GitHub
 
