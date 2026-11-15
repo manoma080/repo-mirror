@@ -15,10 +15,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from repo_mirror.forgejo_sync import SAFE_REASONS
+from repo_mirror.forgejo_sync import SAFE_REASONS, parse_source
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
 SOURCE = re.compile(r'https://github\.com/manoma080/mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*')
+
+
+def validate_sources(sources):
+    if not isinstance(sources, list) or not sources:
+        raise ValueError('invalid source manifest')
+    destinations = set()
+    for source in sources:
+        if not isinstance(source, str):
+            raise ValueError('invalid source manifest')
+        identity = parse_source(source)
+        destination = identity.rsplit('/', 1)[1].lower()
+        if destination in destinations:
+            raise ValueError('conflicting destination')
+        destinations.add(destination)
 
 
 def main(argv=None):
@@ -44,10 +58,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         sources = json.loads(Path(args.manifest).read_text(encoding='utf-8'))
-        if (not isinstance(sources, list) or not sources or
-            any(not isinstance(s, str) or not SOURCE.fullmatch(s) or s.endswith('.git') for s in sources) or
-            len({s.lower() for s in sources}) != len(sources)):
-            raise ValueError('invalid source manifest')
+        validate_sources(sources)
         if not re.fullmatch(r'[0-9]+', args.installation) or not 1 <= args.port <= 65535 or not 1 <= args.jobs <= 64:
             raise ValueError('invalid installation or port')
         if not math.isfinite(args.repository_timeout) or args.repository_timeout <= 0:
@@ -110,11 +121,12 @@ def main(argv=None):
                             command = [args.sync_python, '-m', 'repo_mirror.forgejo_sync', '--config', str(snapshot),
                                        '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port),
                                        '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
-                            if args.app_id:
-                                command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
-                            else:
-                                command += ['--use-github-token']
-                                command = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--'] + command
+                            if SOURCE.fullmatch(source):
+                                if args.app_id:
+                                    command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
+                                else:
+                                    command += ['--use-github-token']
+                                    command = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--'] + command
                             if args.organization:
                                 command.append('--organization')
                             command += ['--source', source]

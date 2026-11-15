@@ -157,6 +157,28 @@ class SafeRedirect(HTTPRedirectHandler):
         return redirected
 
 
+def https_origin(url):
+    """Return the normalized HTTPS origin, rejecting credentials and malformed URLs."""
+    parsed = urlparse(url)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.fragment):
+        raise ValueError("unsafe HTTPS origin")
+    port = parsed.port
+    if port == 0:
+        raise ValueError("unsafe HTTPS origin")
+    return (parsed.scheme, parsed.hostname, 443 if port is None else port)
+
+
+class OriginRedirect(SafeRedirect):
+    def __init__(self, origin):
+        self.origin = origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if https_origin(newurl) != self.origin:
+            raise ValueError("redirect outside configured origin")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class AppTokenProvider:
     """Creates and caches short-lived GitHub App installation tokens."""
 
@@ -304,6 +326,9 @@ class API:
 
     def _request(self, method, url, body=None, headers=None, *, upload=False):
         parsed = urlparse(url)
+        origin = getattr(self, "trusted_api_origin", None)
+        if origin is not None and https_origin(url) != origin:
+            raise ValueError("API request outside configured origin")
         if parsed.scheme != "https" or parsed.username or parsed.password:
             raise ValueError("API URL must be credential-free HTTPS")
         headers = dict(headers or {})
@@ -446,9 +471,12 @@ class API:
                 ):
                     raise ValueError("unsafe asset URL")
                 port = parsed.port or 443
+                trusted_origin = getattr(self, 'trusted_asset_origin', None)
+                if trusted_origin is not None and (parsed.hostname, port) != trusted_origin:
+                    raise ValueError("asset redirect outside configured origin")
                 addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
                 ips = [ipaddress.ip_address(a[4][0]) for a in addresses]
-                if not ips or any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in ips):
+                if not ips or (trusted_origin is None and any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in ips)):
                     raise ValueError("asset address is not public")
                 family, socktype, proto, _, address = addresses[0]
                 raw = socket.socket(family, socktype, proto)
@@ -510,6 +538,10 @@ class SourceAPI(API):
     def __init__(self, token):
         super().__init__()
         self.source_token = token
+
+    def restrict_origin(self, url):
+        self.trusted_api_origin = https_origin(url)
+        self.opener = build_opener(OriginRedirect(self.trusted_api_origin), UploadErrorProcessor())
 
     def _request_token(self, method, parsed):
         if (

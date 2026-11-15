@@ -323,12 +323,12 @@ def validate_unique_source_tags(releases):
         raise ValueError("duplicate source release tag")
 
 
-def validate_source_release_listing(releases):
+def validate_source_release_listing(releases, *, allow_empty_target=False):
     """Strict preflight of the complete source snapshot before destination writes."""
     if not isinstance(releases, list):
         raise ValueError("invalid source release listing")
     for release in releases:
-        validate_source_release_metadata(release)
+        validate_source_release_metadata(release, allow_empty_target=allow_empty_target)
         if not {"name", "body", "draft", "prerelease"} <= release.keys():
             raise ValueError("incomplete source release metadata")
     validate_unique_source_tags(releases)
@@ -352,6 +352,9 @@ def validate_source_release_metadata(release, *, allow_empty_target=False):
 
 def verify_forgejo_empty_target_tag(src, dst, upstream, target, tag):
     """Require identical existing tag objects; never allow a default-branch tag."""
+    verify = getattr(dst, "verify_source_tag", None)
+    if callable(verify):
+        return verify(tag)
     if getattr(dst, "supports_target_commitish", False):
         raise ValueError("cannot verify destination tag for empty source target")
     ref = "refs/tags/" + tag
@@ -387,10 +390,10 @@ def fetch_source_latest(src, upstream):
         return None
 
 
-def validate_source_latest(latest, releases):
+def validate_source_latest(latest, releases, *, allow_empty_target=False):
     if latest is None:
         return
-    validate_source_release_metadata(latest)
+    validate_source_release_metadata(latest, allow_empty_target=allow_empty_target)
     if not {"name", "body", "draft", "prerelease"} <= latest.keys():
         raise ValueError("incomplete source release metadata")
     if latest["draft"] or latest["prerelease"]:
@@ -413,7 +416,7 @@ def logical_release_body(body):
     return "" if body is None or body == " " else body
 
 
-def verify_empty_body_converged(src, dst, upstream, target, release):
+def verify_empty_body_converged(src, dst, upstream, target, release, *, empty_forgejo_target=False):
     """Prove a published empty-body release already matches, using reads only.
 
     Return the pinned destination ID, or None whenever evidence is insufficient.
@@ -433,7 +436,8 @@ def verify_empty_body_converged(src, dst, upstream, target, release):
                     title is not None and not isinstance(title, str) or
                     item.get("body") not in (None, "", " ") or
                     item.get("draft") is not False or type(item.get("prerelease")) is not bool or
-                    not isinstance(item.get("target_commitish"), str) or not item["target_commitish"]):
+                    not isinstance(item.get("target_commitish"), str) or
+                    (not item["target_commitish"] and not empty_forgejo_target)):
                 raise ValueError()
             return (item["id"], tag, title, item.get("body"), item["draft"],
                     item["prerelease"], item["target_commitish"])
@@ -447,7 +451,8 @@ def verify_empty_body_converged(src, dst, upstream, target, release):
         if (dest_meta[1] != tag or
                 (dest_meta[2] != initial[2] and not (initial[2] in (None, "") and dest_meta[2] == tag)) or
                 logical_release_body(dest_meta[3]) != logical_release_body(initial[3]) or
-                dest_meta[4:] != initial[4:]):
+                dest_meta[4:6] != initial[4:6] or
+                (not empty_forgejo_target and dest_meta[6] != initial[6])):
             return None
         dest_url = target + "/releases/" + str(dest["id"])
 
@@ -709,8 +714,14 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             key.split(":", 1)[0] == journal.key(source, name, owner, tag, "")[:64]
                             for key in journal.failures
                         )
-                        converged = None if failed else verify_empty_body_converged(src, dst, upstream, target, release)
+                        converged = None if failed else verify_empty_body_converged(
+                            src, dst, upstream, target, release, empty_forgejo_target=empty_forgejo_target)
                         if converged is not None:
+                            # The empty target gives no commitish to compare; pin the
+                            # actual tag object across the entire read-only proof.
+                            if empty_forgejo_target and verify_forgejo_empty_target_tag(
+                                    src, dst, upstream, target, tag) != original_tag_object:
+                                raise ValueError("source tag changed during sync")
                             if latest and tag == latest["tag_name"]:
                                 latest_id = converged
                                 latest_read_only = True

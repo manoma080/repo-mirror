@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from repo_mirror.forgejo_local import forgejo_source_identity
 from repo_mirror.git_sync import synchronize_snapshots
 from repo_mirror.snapshot_push import _default_branch, _refs
 
@@ -33,6 +34,8 @@ def _name(value):
 
 
 def _source(source):
+    if isinstance(source, str) and source.startswith("https://"):
+        source = forgejo_source_identity(source).split("/", 3)[3]
     if not isinstance(source, str) or source.count("/") != 1:
         raise ValueError("invalid source identity")
     owner, repo = source.split("/")
@@ -41,6 +44,17 @@ def _source(source):
     if repo.endswith(".git"):
         raise ValueError("source identity must not have .git suffix")
     return owner, repo
+
+
+def _source_url(source):
+    owner, repo = _source(source)
+    if source.startswith("https://"):
+        return forgejo_source_identity(source) + ".git"
+    return f"https://github.com/{owner}/{repo}.git"
+
+
+def _source_marker(source):
+    return "repo-mirror-source: " + _source_url(source)[len("https://"):-len(".git")]
 
 
 class LocalForgejoAPI:
@@ -114,7 +128,7 @@ class ForgejoDestination:
     def ensure_repository(self, name, source):
         name = _name(name)
         source_owner, source_name = _source(source)
-        marker = f"repo-mirror-source: github.com/{source_owner}/{source_name}"
+        marker = _source_marker(source)
         path = f"/api/v1/repos/{self.owner}/{name}"
         try:
             repo = self.api.request("GET", path)
@@ -174,7 +188,7 @@ class ForgejoDestination:
         self.run_pin = None
         repo = self.ensure_repository(name, source)
         owner, source_name = _source(source)
-        marker = f"repo-mirror-source: github.com/{owner}/{source_name}"
+        marker = _source_marker(source)
         if repo["description"] == marker:
             expected_id = repo['id']
             self._read_pinned(name, marker, expected_id, marker)
@@ -186,13 +200,13 @@ class ForgejoDestination:
 
     def revalidate(self, name, source, expected):
         owner, source_name = _source(source)
-        marker = f"repo-mirror-source: github.com/{owner}/{source_name}"
+        marker = _source_marker(source)
         return self._read_pinned(name, marker, *expected)
 
     def complete_initialization(self, name, source, *, expected=None):
         name = _name(name)
         owner, source_name = _source(source)
-        marker = f"repo-mirror-source: github.com/{owner}/{source_name}"
+        marker = _source_marker(source)
         path = f"/api/v1/repos/{self.owner}/{name}"
         repo = (self.revalidate(name, source, expected) if expected is not None
                 else self.api.request("GET", path))
@@ -237,10 +251,13 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None):
         or origin.fragment
     ):
         raise ValueError("invalid Forgejo Git origin")
-    if source_token is None:
+    public_forgejo = source.startswith("https://")
+    if source_token is None and not public_forgejo:
         source_token = os.environ.get("GITHUB_TOKEN")
     def github_token():
         token = source_token() if callable(source_token) else source_token
+        if public_forgejo and token is None:
+            return ""
         if not isinstance(token, str) or not token or "\n" in token or "\r" in token:
             raise RuntimeError("GITHUB_TOKEN required for source clone")
         return token
@@ -255,7 +272,7 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None):
 
     def revalidate(repo_name):
         marker_owner, marker_repo = _source(source)
-        marker = f'repo-mirror-source: github.com/{marker_owner}/{marker_repo}'
+        marker = _source_marker(source)
         current = destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{repo_name}')
         destination._verify(current, repo_name, marker, actions=True)
         if (current.get('id'), current.get('description')) != pins[repo_name]:
@@ -263,7 +280,7 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None):
         return current
 
     pin(name, info)
-    source_url = f"https://github.com/{owner}/{repo}.git"
+    source_url = _source_url(source)
     destination_url = f"{destination.api.base_url.rstrip('/')}/{destination.owner}/{name}.git"
     with tempfile.TemporaryDirectory(prefix="repo-mirror-forgejo-") as tmp:
         askpass = Path(tmp) / "askpass"
@@ -419,7 +436,7 @@ def snapshot_refs(destination, name, source, *, source_token, expected=None):
             or origin.username or origin.password or origin.path not in ('', '/')
             or origin.query or origin.fragment):
         raise ValueError('invalid Forgejo Git origin')
-    source_url = f'https://github.com/{owner}/{repo}.git'
+    source_url = _source_url(source)
     dest_url = f'{destination.api.base_url.rstrip("/")}/{destination.owner}/{name}.git'
     if expected is not None:
         destination.revalidate(name, source, expected)
@@ -433,7 +450,9 @@ def snapshot_refs(destination, name, source, *, source_token, expected=None):
 
         def git(args, token, user):
             token = token() if callable(token) else token
-            if not isinstance(token, str) or not token or '\n' in token or '\r' in token:
+            if token is None and source.startswith("https://"):
+                token = ""
+            if not isinstance(token, str) or (not token and not source.startswith("https://")) or '\n' in token or '\r' in token:
                 raise RuntimeError('GITHUB_TOKEN required for source clone')
             env = dict(base_env, MIRROR_TOKEN=token, MIRROR_USER=user)
             result = subprocess.run(['git', '-c', 'core.hooksPath=' + os.devnull,
@@ -485,7 +504,7 @@ def snapshot_refs(destination, name, source, *, source_token, expected=None):
             raise RuntimeError('source default branch not verified')
         info = (destination.revalidate(name, source, expected) if expected is not None
                 else destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{name}'))
-        destination._verify(info, name, f'repo-mirror-source: github.com/{owner}/{repo}', actions=True)
+        destination._verify(info, name, _source_marker(source), actions=True)
         if source_head is not None and info.get('default_branch') != source_head[0][len('refs/heads/'):]:
             raise RuntimeError('Forgejo default branch readback did not match')
         if destination_refs != source_refs:

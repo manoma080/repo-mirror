@@ -20,7 +20,25 @@ import time
 from urllib.parse import urlsplit
 
 SOURCE = re.compile(r'https://github\.com/manoma080/mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*')
+FORGEJO_SOURCE = re.compile(r'https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9_][A-Za-z0-9_-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*')
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
+
+
+def valid_source(source):
+    if not isinstance(source, str) or source.endswith('.git'):
+        return False
+    if SOURCE.fullmatch(source):
+        return True
+    if not FORGEJO_SOURCE.fullmatch(source):
+        return False
+    try:
+        parsed = urlsplit(source)
+        host, port = parsed.hostname, parsed.port
+        return bool(host and host != 'github.com' and not host.startswith('github.com.') and port != 0 and all(
+            re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label)
+            for label in host.split('.')))
+    except ValueError:
+        return False
 
 
 def checked_process(command, *, cwd, env, lock_fd, quiet=True, scheduler=False):
@@ -177,8 +195,8 @@ def main(argv=None):
                 manifest = snapshot / 'config-forgejo.json'
                 sources = json.loads(manifest.read_text(encoding='utf-8'))
                 if (not isinstance(sources, list) or not sources or
-                    any(not isinstance(s, str) or not SOURCE.fullmatch(s) or s.endswith('.git') for s in sources) or
-                    len({s.lower() for s in sources}) != len(sources)):
+                    any(not valid_source(s) for s in sources) or
+                    len({s.rsplit('/', 1)[-1].lower() for s in sources}) != len(sources)):
                     raise ValueError('invalid manifest')
                 if not (snapshot / 'repo_mirror' / 'forgejo_schedule.py').is_file():
                     raise ValueError('scheduler missing')
