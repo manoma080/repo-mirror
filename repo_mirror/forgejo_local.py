@@ -3,6 +3,7 @@ import http.client
 import json
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def local_api(path, token_file):
@@ -21,9 +22,32 @@ def local_api(path, token_file):
 
 
 def source_identity(value):
-    if not re.fullmatch(r'[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*', value) or value.endswith('.git'):
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*', value) or value.endswith('.git'):
         raise ValueError('invalid source identity')
     return tuple(value.split('/'))
+
+
+def forgejo_source_identity(value):
+    """Validate an HTTPS Forgejo URL and return a host-qualified identity.
+
+    Returns a canonical host-qualified identity for a public Forgejo source.
+    """
+    if not isinstance(value, str) or not re.fullmatch(
+            r'https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*', value):
+        raise ValueError('invalid source URL')
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError('invalid source URL') from None
+    host = parsed.hostname
+    if (not host or host == 'github.com' or host.startswith('github.com.') or not all(
+            re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label)
+            for label in host.split('.')) or port == 0):
+        raise ValueError('invalid source URL')
+    owner, repo = source_identity(parsed.path[1:])
+    authority = host + (f':{port}' if port not in (None, 443) else '')
+    return f'https://{authority}/{owner}/{repo}'
 
 
 def source_assets(assets):

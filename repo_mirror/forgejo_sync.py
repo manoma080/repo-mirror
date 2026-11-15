@@ -22,7 +22,9 @@ from repo_mirror.github_api import SourceAPI
 from repo_mirror.journal import FailureJournal
 from repo_mirror.repository import (ReleaseAggregateError, mirror_releases, validate_source_release_listing,
                                     fetch_source_latest, validate_source_latest)
-from repo_mirror.sources import source_marker
+from repo_mirror.sources import source_marker, source_api_base
+from repo_mirror.forgejo_local import forgejo_source_identity
+from repo_mirror.forgejo_source_adapter import PublicForgejoSourceAdapter
 from repo_mirror.github_api import AppTokenProvider
 
 CONFLICT_REASONS = frozenset({
@@ -53,7 +55,7 @@ GIT_REASONS = frozenset({
 })
 CONFIG_REASONS = frozenset({
     'invalid source URL', 'config must be a JSON array of source URLs',
-    'duplicate configured source', 'duplicate requested source',
+    'duplicate configured source', 'duplicate requested source', 'conflicting destination',
     'requested source not exactly configured',
     'GITHUB_TOKEN required; run under the Manobot app helper', 'invalid port',
     'Forgejo token file must be owner-only and owned by current user',
@@ -102,9 +104,9 @@ def safe_reason(exc, *, configuration=False):
 
 def parse_source(value):
     match = re.fullmatch(r'https://github\.com/(manoma080)/(mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*)', value)
-    if not match or match.group(2).endswith('.git'):
-        raise ValueError('invalid source URL')
-    return '/'.join(match.groups())
+    if match and not match.group(2).endswith('.git'):
+        return '/'.join(match.groups())
+    return forgejo_source_identity(value)
 
 
 def read_secure_file(path):
@@ -163,7 +165,7 @@ def destination_locks(port, owner, requested):
     automatically on close or process death. External clients do not cooperate.
     """
     names = sorted({hashlib.sha256(
-        f'http://127.0.0.1:{port}/{owner.lower()}/{identity.split("/")[1].lower()}'.encode()
+        f'http://127.0.0.1:{port}/{owner.lower()}/{identity.rsplit("/", 1)[-1].lower()}'.encode()
     ).hexdigest() for identity in requested})
     sockets = []
     try:
@@ -212,6 +214,9 @@ def main(argv=None):
         identities = [parse_source(s) for s in configured]
         if len(set(x.lower() for x in identities)) != len(identities):
             raise ValueError('duplicate configured source')
+        destinations = [identity.rsplit('/', 1)[-1].lower() for identity in identities]
+        if len(set(destinations)) != len(destinations):
+            raise ValueError('conflicting destination')
         requested = [parse_source(s) for s in args.source]
         if len(set(x.lower() for x in requested)) != len(requested):
             raise ValueError('duplicate requested source')
@@ -229,7 +234,9 @@ def main(argv=None):
             raise ValueError('recovery secret must be separate')
         if not local_token or '\n' in local_token or '\r' in local_token:
             raise ValueError('invalid Forgejo token')
-        if args.app_id and args.private_key_file and not args.use_github_token:
+        if not any(not x.startswith('https://') for x in requested) and not (args.app_id or args.private_key_file or args.use_github_token):
+            token = None
+        elif args.app_id and args.private_key_file and not args.use_github_token:
             key, key_id = read_secure_file(args.private_key_file)
             if key_id == secret_id:
                 raise ValueError('recovery secret must be separate')
@@ -271,15 +278,24 @@ def main(argv=None):
 def _sync_requested(args, requested, dest, token, local_token, secret, journal_dir):
     failures = []
     for identity in requested:
-        name = identity.split('/')[1]
+        name = identity.rsplit('/', 1)[-1]
         try:
             journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{identity.lower()}'.encode()).hexdigest()
             journal = FailureJournal(os.path.join(journal_dir, journal_id + '.json'))
-            src = ForgejoSourceAdapter(identity, token, api=SourceAPI(token))
-            upstream = f'https://api.github.com/repos/{identity}'
+            if identity.startswith('https://'):
+                base, source_owner, _ = identity.rsplit('/', 2)
+                source = {'type': 'forgejo', 'base_url': base, 'owner': source_owner, 'repos': [name]}
+                source_token = None
+                src = PublicForgejoSourceAdapter(identity, api=SourceAPI(None))
+            else:
+                source = {'type': 'github', 'base_url': 'https://github.com', 'owner': identity.split('/')[0]}
+                source_token = token
+                src = ForgejoSourceAdapter(identity, token, api=SourceAPI(token))
+            upstream = f"{source_api_base(source)}/repos/{source['owner']}/{name}"
             source_releases = src.pages(upstream + '/releases')
-            validate_source_release_listing(source_releases)
-            validate_source_latest(fetch_source_latest(src, upstream), source_releases)
+            validation_options = {'allow_empty_target': True} if source['type'] == 'forgejo' else {}
+            validate_source_release_listing(source_releases, **validation_options)
+            validate_source_latest(fetch_source_latest(src, upstream), source_releases, **validation_options)
             # This preflight cannot prevent the source changing immediately
             # afterwards; mirror_releases fetches and checks it again.
             initializing = dest.begin_initialization(name, identity)
@@ -288,17 +304,24 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 if expected is not None:
                     dest.revalidate(name, identity, expected)
             guard()
-            sync_refs(dest, name, identity, source_token=token, expected=expected)
+            sync_refs(dest, name, identity, source_token=source_token, expected=expected)
             guard()
-            before = snapshot_refs(dest, name, identity, source_token=token, expected=expected)
+            before = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected)
             guard()
-            source = {'type': 'github', 'base_url': 'https://github.com', 'owner': identity.split('/')[0]}
             adapter = ForgejoDestinationAdapter(f'{args.owner}/{name}', local_token, args.port, guard=guard)
+            if source['type'] == 'forgejo':
+                def verify_source_tag(tag):
+                    current = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected)
+                    ref = 'refs/tags/' + tag
+                    if current != before or ref not in current[1] or current[1][ref] != current[2].get(ref):
+                        raise ValueError('tag verification failed')
+                    return ('git-ref', current[1][ref])
+                adapter.verify_source_tag = verify_source_tag
             previous_secret = os.environ.get('MIRROR_TIMESTAMP_SECRET')
             os.environ['MIRROR_TIMESTAMP_SECRET'] = secret
             def validate_snapshot(releases, latest):
-                validate_source_release_listing(releases)
-                validate_source_latest(latest, releases)
+                validate_source_release_listing(releases, **validation_options)
+                validate_source_latest(latest, releases, **validation_options)
 
             try:
                 mirror_releases(source, name, args.owner, src, adapter, upstream, adapter.target,
@@ -310,7 +333,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 else:
                     os.environ['MIRROR_TIMESTAMP_SECRET'] = previous_secret
             guard()
-            after = snapshot_refs(dest, name, identity, source_token=token, expected=expected)
+            after = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected)
             guard()
             if after[0] != before[0] or after[1] != before[1]:
                 raise RuntimeError('source refs changed during sync')

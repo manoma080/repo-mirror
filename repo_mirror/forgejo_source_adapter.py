@@ -3,12 +3,12 @@ import re
 import sys
 import time
 from urllib.error import HTTPError
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from repo_mirror.forgejo_local import source_identity
 from repo_mirror.forgejo_releases import GitHubReleases, _id
-from repo_mirror.github_api import SafeRedirect, SourceAPI, transient_transfer_error, transfer_retry_delay
+from repo_mirror.github_api import SafeRedirect, SourceAPI, https_origin, transient_transfer_error, transfer_retry_delay
 
 
 class _AssetRedirect(SafeRedirect):
@@ -88,3 +88,79 @@ class ForgejoSourceAdapter:
                     exc.close()
                 print(f'asset download retry {attempt + 1}/3 target=source', file=sys.stderr, flush=True)
                 time.sleep(delay)
+
+
+class PublicForgejoSourceAdapter:
+    """Public Forgejo API and asset reads; never receives GitHub credentials."""
+
+    def __init__(self, identity, *, api=None):
+        from repo_mirror.forgejo_local import forgejo_source_identity
+        identity = forgejo_source_identity(identity)
+        base, owner, repo = identity.rsplit('/', 2)
+        self.base = f'{base}/api/v1/repos/{owner}/{repo}'
+        self.origin = https_origin(base)
+        self.browser_prefix = f'/{owner}/{repo}/releases/download/'
+        self.api = api if api is not None else SourceAPI(None)
+        if isinstance(self.api, SourceAPI):
+            self.api.restrict_origin(base)
+        # The configured Forgejo origin is trusted; never extend this exception
+        # to an asset URL supplied by the remote server or to another origin.
+        parsed_origin = urlsplit(base)
+        self.api.trusted_asset_origin = (parsed_origin.hostname, parsed_origin.port or 443)
+        self._assets = {}
+
+    def _normalize_assets(self, items):
+        if not isinstance(items, list):
+            raise ValueError('invalid source asset listing')
+        result = []
+        for item in items:
+            asset = dict(item)
+            _id(asset.get('id'))
+            url = asset.get('browser_download_url')
+            if not isinstance(url, str):
+                raise ValueError('invalid source asset URL')
+            parsed = urlsplit(url)
+            decoded = parsed.path
+            while True:
+                if '\\' in decoded or any(part in ('.', '..') for part in decoded.split('/')):
+                    raise ValueError('invalid source asset URL')
+                next_decoded = unquote(decoded)
+                if next_decoded == decoded:
+                    break
+                decoded = next_decoded
+            if (https_origin(url) != self.origin
+                    or not parsed.path.startswith(self.browser_prefix)
+                    or not parsed.path[len(self.browser_prefix):] or parsed.query or parsed.fragment):
+                raise ValueError('invalid source asset URL')
+            previous = self._assets.get(url)
+            if previous is not None and previous != asset['id']:
+                raise ValueError('ambiguous source asset URL')
+            self._assets[url] = asset['id']
+            asset.setdefault('state', 'uploaded')
+            result.append(asset)
+        return result
+
+    def pages(self, url):
+        if https_origin(url) != self.origin:
+            raise ValueError('API request outside configured origin')
+        if re.fullmatch(re.escape(self.base) + r'/releases/[1-9][0-9]*/assets', url):
+            return self._normalize_assets(self.api.request('GET', url))
+        return self.api.pages(url)
+
+    def request(self, method, url, data=None, **kwargs):
+        if https_origin(url) != self.origin:
+            raise ValueError('API request outside configured origin')
+        if method == 'GET' and re.fullmatch(re.escape(self.base) + r'/releases/[1-9][0-9]*/assets', url):
+            return self.pages(url)
+        return self.api.request(method, url, data, **kwargs)
+
+    def download_verified_asset(self, asset, output):
+        url = asset.get('browser_download_url')
+        if type(asset.get('id')) is not int or self._assets.get(url) != asset['id']:
+            raise ValueError('source asset identity changed')
+        return self.api.download(url, output)
+
+    def download(self, url, output):
+        if url not in self._assets:
+            raise ValueError('unknown source asset URL')
+        return self.api.download(url, output)

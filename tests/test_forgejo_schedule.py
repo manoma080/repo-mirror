@@ -11,6 +11,64 @@ SCRIPT = ROOT / 'repo_mirror' / 'forgejo_schedule.py'
 
 
 class ScheduleTest(unittest.TestCase):
+    def test_parser_rejects_unsafe_names_and_lookalike_host(self):
+        from repo_mirror.forgejo_schedule import validate_sources
+        for source in ('https://github.com.evil.example/a/b',
+                       'https://forge.example/-owner/repo', 'https://forge.example/owner/-repo'):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                validate_sources(['https://localhost/ok/first', source])
+
+    def test_public_forgejo_worker_does_not_require_github_auth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'; secret.write_text('x' * 32); secret.chmod(0o600)
+            journals = tmp / 'journals'; journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources'; manifest.write_text(json.dumps(['https://localhost/a/b']))
+            worker = tmp / 'worker'; worker.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS"\n'); worker.chmod(0o700)
+            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(tmp / 'missing-helper'), '--sync-python', str(worker)]
+            result = subprocess.run(cmd, env={**os.environ, 'ARGS': str(tmp / 'args')}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('--use-github-token', (tmp / 'args').read_text())
+
+    def test_invalid_sources_rejected_before_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            manifest = tmp / 'manifest'
+            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', 'unused', '--journal-dir', 'unused', '--owner', 'alice', '--lock', str(tmp / 'lock')]
+            for source in ['http://forge.example/a/b', 'https://forge.example/a/b.git',
+                           'https://user@forge.example/a/b', 'https://forge.example/a/b?q=1',
+                           'https://github.com/other/repo', 'https://forge.example:99999/a/b',
+                           'https://github.com.evil.example/a/b', 'https://forge.example/-owner/repo',
+                           'https://forge.example/owner/-repo']:
+                with self.subTest(source=source):
+                    manifest.write_text(json.dumps([source]))
+                    self.assertEqual(subprocess.run(cmd, capture_output=True).returncode, 2)
+                    self.assertFalse((tmp / 'lock').exists())
+
+    def test_mixed_sources_pass_original_urls_and_reject_collisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'; secret.write_text('x' * 32); secret.chmod(0o600)
+            journals = tmp / 'journals'; journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            sources = ['https://github.com/manoma080/mirror-a', 'https://Forge.Example:443/Owner/Repo']
+            manifest.write_text(json.dumps(sources))
+            helper = tmp / 'helper.py'
+            helper.write_text('import os,sys\na=sys.argv[sys.argv.index("--")+1:]\nos.execvp(a[0], a)\n')
+            worker = tmp / 'worker'
+            worker.write_text('#!/bin/sh\nfor last; do :; done\nprintf "%s\\n" "$last" >> "$CALLS"\n'); worker.chmod(0o700)
+            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--sync-python', str(worker)]
+            env = {**os.environ, 'CALLS': str(tmp / 'calls')}
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertCountEqual((tmp / 'calls').read_text().splitlines(), sources)
+            (tmp / 'calls').unlink(); (tmp / 'lock').unlink()
+            manifest.write_text(json.dumps([sources[0], 'https://other.example/other/MIRROR-a']))
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse((tmp / 'calls').exists())
+            self.assertFalse((tmp / 'lock').exists())
+
     def test_four_children_overlap_and_pool_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
