@@ -160,6 +160,9 @@ def main(argv=None):
             ):
                 settings = source.get("destinations", {}).get(name.lower(), {})
                 legacy = settings.get("legacy")
+                if legacy is not None:
+                    from repo_mirror.migration_attestation import github_claim, verify
+                    verify(github_claim(source, name, owner), legacy.get("signature"), os.environ.get("MIRROR_TIMESTAMP_SECRET", ""))
                 marker = (source_marker({**source, "owner": legacy["source_owner"]}, legacy["source_name"])
                           if legacy is not None else source_marker(source, name))
                 check_existing(get_existing(dst, target), marker)

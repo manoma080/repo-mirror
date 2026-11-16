@@ -120,7 +120,9 @@ def parse_manifest(sources):
             identity = parse_source(url)
             entry = {'url': url, 'identity': identity, 'destination_name': identity.rsplit('/', 1)[-1]}
         elif isinstance(item, dict) and set(item) == {'url', 'source_id', 'destination_id', 'destination_name',
-                                                     'legacy_url', 'legacy_destination_name'}:
+                                                     'legacy_url', 'legacy_destination_name', 'signature'}:
+            if not isinstance(item['signature'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['signature']):
+                raise ValueError('invalid migration attestation')
             if not isinstance(item['url'], str) or not isinstance(item['legacy_url'], str):
                 raise ValueError('invalid source URL')
             identity = parse_source(item['url'])
@@ -285,6 +287,9 @@ def main(argv=None):
             raise ValueError('invalid signing secret')
         if len(secret.encode('utf-8')) < 32:
             raise ValueError('recovery secret too short')
+        from repo_mirror.migration_attestation import forgejo_claim, verify
+        for entry in mappings.values():
+            verify(forgejo_claim(entry, args.port, args.owner), entry['signature'], secret)
         local_token, local_id = read_secure_file(args.token_file)
         local_token = local_token.strip()
         if local_id == secret_id:
@@ -346,6 +351,9 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
         source_name = identity.rsplit('/', 1)[-1]
         recovery_identity = entry['legacy_identity'] if entry else identity
         try:
+            if entry:
+                from repo_mirror.migration_attestation import forgejo_claim, verify
+                verify(forgejo_claim(entry, args.port, args.owner), entry.get('signature'), secret)
             journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{recovery_identity.lower()}'.encode()).hexdigest()
             journal = FailureJournal(os.path.join(journal_dir, journal_id + '.json'))
             if identity.startswith('https://'):

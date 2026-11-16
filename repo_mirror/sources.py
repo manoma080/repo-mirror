@@ -1,5 +1,6 @@
 """sources: see README for an overview."""
 
+import re
 from urllib.error import HTTPError
 from urllib.parse import quote, urlparse
 
@@ -31,10 +32,11 @@ def validate_source(source):
         if "legacy" in settings:
             if source.get("repos") == "all":
                 raise ValueError("legacy repository binding requires explicit repos")
-            if (not isinstance(legacy, dict) or set(legacy) != {"source_owner", "source_name", "destination_name"}
+            if (not isinstance(legacy, dict) or set(legacy) != {"source_owner", "source_name", "destination_name", "signature"}
                     or not {"source_id", "destination_id"} <= settings.keys()
                     or any(not isinstance(v, str) or not NAME.fullmatch(v) or v in (".", "..") or len(v) > 100
-                           for v in legacy.values())):
+                           for k, v in legacy.items() if k != "signature")
+                    or not isinstance(legacy.get("signature"), str) or not re.fullmatch(r"[0-9a-f]{64}", legacy["signature"])):
                 raise ValueError("invalid legacy repository binding")
         if "name" in settings and (not isinstance(settings["name"], str) or len(settings["name"]) > 100
                 or not NAME.fullmatch(settings["name"]) or settings["name"] in (".", "..")):

@@ -51,7 +51,9 @@ def valid_manifest(sources):
             url, old = item, item
             names = {url.rsplit('/', 1)[-1].lower()}
         elif isinstance(item, dict) and set(item) == {'url', 'source_id', 'destination_id', 'destination_name',
-                                                     'legacy_url', 'legacy_destination_name'}:
+                                                     'legacy_url', 'legacy_destination_name', 'signature'}:
+            if not isinstance(item['signature'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['signature']):
+                return False
             url, old = item['url'], item['legacy_url']
             if (not isinstance(url, str) or not isinstance(old, str)
                     or any(type(item[k]) is not int or item[k] <= 0 for k in ('source_id', 'destination_id'))):

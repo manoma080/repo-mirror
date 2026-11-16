@@ -9,6 +9,8 @@ def setup_mirror():
     source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
               'destinations': {'repo': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
                   'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}}
+    from repo_mirror.migration_attestation import github_claim, sign
+    source['destinations']['repo']['legacy']['signature'] = sign(github_claim(source, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
     src, dst = Mock(), Mock()
     src.request.return_value = {'id': 1, 'clone_url': 'https://github.com/new/repo.git', 'default_branch': 'main'}
     old_marker = source_marker({**source, 'owner': 'old'}, 'repo')
@@ -16,6 +18,7 @@ def setup_mirror():
     return source, src, dst, old_marker
 
 
+@patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'fixture-signing-secret-0123456789abcdef'})
 class RelocationSecurityTests(unittest.TestCase):
     def test_identity_changes_are_blocked_at_each_write_boundary(self):
         for side in ('source', 'destination'):

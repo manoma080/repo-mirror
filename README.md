@@ -97,7 +97,8 @@ For a GitHub destination, use an explicit repository list and a mapping such as:
 ```json
 {"type":"github", "base_url":"https://github.com", "owner":"new-owner", "repos":["new-repo"],
  "destinations":{"new-repo":{"name":"mirror-new", "source_id":123, "destination_id":456,
-   "legacy":{"source_owner":"old-owner", "source_name":"old-repo", "destination_name":"mirror-old"}}}}
+   "legacy":{"source_owner":"old-owner", "source_name":"old-repo", "destination_name":"mirror-old",
+             "signature":"<64-lowercase-hex-characters>"}}}}
 ```
 
 For the local Forgejo destination, the manifest continues to accept ordinary URL strings; an explicitly verified relocation may instead use:
@@ -105,8 +106,34 @@ For the local Forgejo destination, the manifest continues to accept ordinary URL
 ```json
 {"url":"https://forge.example/new-owner/new-repo", "source_id":123, "destination_id":456,
  "destination_name":"mirror-new", "legacy_url":"https://forge.example/old-owner/old-repo",
- "legacy_destination_name":"mirror-old"}
+ "legacy_destination_name":"mirror-old", "signature":"<64-lowercase-hex-characters>"}
 ```
+
+After independently verifying the history, prepare a claim JSON file with exactly these fields (the values below correspond to the GitHub example and destination owner `dest`):
+
+```json
+{"source_provider":"github", "source_origin":"https://github.com",
+ "old_source_owner":"old-owner", "old_source_name":"old-repo",
+ "current_source_owner":"new-owner", "current_source_name":"new-repo", "source_id":123,
+ "destination_origin":"https://github.com", "destination_owner":"dest",
+ "old_destination_name":"mirror-old", "current_destination_name":"mirror-new", "destination_id":456}
+```
+
+For the GitHub destination, run `python -m repo_mirror.migration_attestation --claim claim.json --i-verified-history` with that runner's existing `MIRROR_TIMESTAMP_SECRET` in the environment; put the printed signature in `legacy.signature`.
+
+For the Forgejo manifest example above, with destination owner `dest` and scheduler `--port 3000`, the corresponding claim is:
+
+```json
+{"source_provider":"forgejo", "source_origin":"https://forge.example",
+ "old_source_owner":"old-owner", "old_source_name":"old-repo",
+ "current_source_owner":"new-owner", "current_source_name":"new-repo", "source_id":123,
+ "destination_origin":"http://127.0.0.1:3000", "destination_owner":"dest",
+ "old_destination_name":"mirror-old", "current_destination_name":"mirror-new", "destination_id":456}
+```
+
+Run `python -m repo_mirror.migration_attestation --claim claim.json --i-verified-history --secret-file /path/to/timestamp-secret`, using the same owner-only recovery secret file as the Forgejo runner, and put the output in the manifest entry's `signature`. The Forgejo signer derives the source origin and names exactly from the URLs; it uses `github` only when the origin is `https://github.com` (case-insensitive), otherwise `forgejo`. The destination origin includes the configured local port and the destination owner is the scheduler's `--owner`. IDs must be positive JSON integers. Claim files must contain exactly the illustrated fields, with values matching the runner's inputs.
+
+GitHub and Forgejo use their respective existing recovery signing secrets; do not assume their secrets or signatures are interchangeable. Each attestation secret must be at least 32 UTF-8 bytes and generated with a cryptographically secure random generator (for example, `python -c 'import secrets; print(secrets.token_hex(32))'`). Length alone does not guarantee entropy. If an existing secret is weak, rotate it with appropriate recovery-state planning; previous attestations must be re-signed. Keep both secrets stable and protected, and do not put secret values in claims, manifests, commands or logs. The signer does not inspect providers or verify evidence: the flag records an operator decision, not proof of history. The runner never signs automatically. Any change to a claim field or signing secret requires a new independently reviewed signature; protect the claim file. Signature verification does not replace live ID checks or protect against a compromised signing key. On the Forgejo path, any invalid or missing structured-entry signature fails the **entire manifest** before any workers start, including ordinary URL entries; correct and review the manifest before retrying.
 
 The old and current source must be on the same forge origin. These fields do not rename repositories or publish configuration. Coordinate and drain all writers, preserve signing keys and journals, verify complete release and draft inventories and both pins, then perform and read back the destination rename and configuration publication in a controlled window. A partial rename/config change requires reconciliation before resuming; it is not atomic. Legacy mappings with `repos: "all"` are rejected: configure that repository explicitly. Discovery of unpinned renamed repositories is not automatic identity verification. Forgejo's installed launcher must support the structured manifest before it is used. Real provider migration and recovery must be validated separately from unit tests.
 
