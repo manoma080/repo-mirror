@@ -86,6 +86,8 @@ Example:
 
 The first entry creates `mirror-alice-project-one`. If two sources would create the same name, give them different prefixes. `"all"` means repositories the user owns, not repositories they starred.
 
+For the GitHub destination path, optional per-repository mappings can pin numeric repository identities, for example `"destinations": {"project-one": {"source_id": 123, "destination_id": 456}}`. Mapping keys are lowercase source names; IDs must be positive integers. A pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. Omitting either pin preserves existing behavior. The source clone URL check still applies. These are pre-write checks, not atomic protection against a repository changing after the check; they do not apply to the separate Forgejo destination workflow.
+
 ## Set up the GitHub App
 
 The mirror uses a [GitHub App](https://docs.github.com/apps) to act on your behalf. Install it on the account or organization that owns the mirrors, with access to all repositories, including new ones.

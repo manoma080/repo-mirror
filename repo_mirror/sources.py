@@ -22,7 +22,9 @@ def validate_source(source):
         raise ValueError("invalid destination mappings")
     for key, settings in mappings.items():
         if (not isinstance(key, str) or key != key.lower() or not NAME.fullmatch(key) or key in (".", "..")
-                or not isinstance(settings, dict) or set(settings) - {"name", "visibility"}
+                or not isinstance(settings, dict) or set(settings) - {"name", "visibility", "source_id", "destination_id"}
+                or any(type(settings[k]) is not int or settings[k] <= 0
+                       for k in ("source_id", "destination_id") if k in settings)
                 or settings.get("visibility", "private") not in ("private", "public")):
             raise ValueError("invalid destination mappings")
         if "name" in settings and (not isinstance(settings["name"], str) or len(settings["name"]) > 100
