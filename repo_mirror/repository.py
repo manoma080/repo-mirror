@@ -223,6 +223,10 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     settings = source.get("destinations", {}).get(name.lower(), {})
     if "legacy" in settings:
         validate_source(source)
+        from repo_mirror.migration_attestation import github_claim, verify
+        verify(github_claim(source, name, owner), settings["legacy"].get("signature"), os.environ.get("MIRROR_TIMESTAMP_SECRET", ""))
+    if "legacy" in settings:
+        validate_source(source)
         legacy = settings["legacy"]
         historical_source = {**source, "owner": legacy["source_owner"]}
         historical_name = legacy["source_name"]

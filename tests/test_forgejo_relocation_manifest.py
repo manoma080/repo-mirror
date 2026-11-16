@@ -1,5 +1,10 @@
 import unittest
 from repo_mirror.forgejo_sync import parse_manifest
+from repo_mirror.migration_attestation import forgejo_claim, sign
+
+def signed(item):
+    item['signature'] = sign(forgejo_claim(item, 3300, 'dest'), 'fixture-signing-secret-0123456789abcdef')
+    return item
 
 
 class ForgejoRelocationManifestTests(unittest.TestCase):
@@ -8,7 +13,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
         from scheduler.auto_update import valid_manifest
         item = {'url': 'https://git.example/new/repo', 'source_id': 11, 'destination_id': 22,
                 'destination_name': 'new-repo', 'legacy_url': 'https://git.example/old/repo',
-                'legacy_destination_name': 'old-repo'}
+                'legacy_destination_name': 'old-repo', 'signature': 'a' * 64}
         validate_sources([item])
         self.assertTrue(valid_manifest([item]))
         self.assertFalse(valid_manifest([{**item, 'destination_id': True}]))
@@ -21,9 +26,9 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
 
         identity = 'https://git.example/new/repo'
         old = 'https://git.example/old/repo'
-        entry = parse_manifest([{'url': identity, 'source_id': 11, 'destination_id': 22,
+        entry = parse_manifest([signed({'url': identity, 'source_id': 11, 'destination_id': 22,
                                  'destination_name': 'new-repo', 'legacy_url': old,
-                                 'legacy_destination_name': 'old-repo'}])[0]
+                                 'legacy_destination_name': 'old-repo', 'signature': 'a' * 64})])[0]
         repo = {'id': 22, 'full_name': 'dest/new-repo', 'private': True, 'has_actions': False,
                 'description': 'repo-mirror-source: git.example/old/repo [repo-mirror:initialized:v1]'}
         api = Mock()
@@ -42,7 +47,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
              patch('repo_mirror.forgejo_sync.snapshot_refs', return_value=(None, {}, {})) as snapshot, \
              patch('repo_mirror.forgejo_sync.mirror_releases'):
             result = _sync_requested(SimpleNamespace(port=3300, owner='dest'), [identity], dest,
-                                     None, 'token', 'secret', '/tmp', mappings={identity: entry})
+                                     None, 'token', 'fixture-signing-secret-0123456789abcdef', '/tmp', mappings={identity: entry})
         self.assertEqual(result, 0)
         self.assertEqual(sync.call_args.args[2], identity)
         self.assertEqual(sync.call_args.kwargs['recovery_identity'], old)
@@ -55,9 +60,9 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
         from types import SimpleNamespace
         from repo_mirror.forgejo_sync import _sync_requested
         identity = 'https://git.example/new/repo'
-        entry = parse_manifest([{'url': identity, 'source_id': 11, 'destination_id': 22,
+        entry = parse_manifest([signed({'url': identity, 'source_id': 11, 'destination_id': 22,
                                  'destination_name': 'new-repo', 'legacy_url': 'https://git.example/old/repo',
-                                 'legacy_destination_name': 'old-repo'}])[0]
+                                 'legacy_destination_name': 'old-repo', 'signature': 'a' * 64})])[0]
         src = Mock()
         src.request.return_value = {'id': 11, 'full_name': 'new/repo', 'clone_url': identity + '.git'}
         src.pages.return_value = []
@@ -75,7 +80,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
              patch('repo_mirror.forgejo_sync.sync_refs'), \
              patch('repo_mirror.forgejo_sync.snapshot_refs', return_value=(None, {}, {})), \
              patch('repo_mirror.forgejo_sync.mirror_releases') as releases:
-            result = _sync_requested(args, [identity], dest, None, 'token', 'secret', '/tmp',
+            result = _sync_requested(args, [identity], dest, None, 'token', 'fixture-signing-secret-0123456789abcdef', '/tmp',
                                      mappings={identity: entry})
         self.assertEqual(result, 0)
         dest.begin_initialization.assert_called_once_with('new-repo', entry['legacy_identity'], expected_id=22)
@@ -90,15 +95,15 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
         from types import SimpleNamespace
         from repo_mirror.forgejo_sync import _sync_requested
         identity = 'https://git.example/new/repo'
-        entry = parse_manifest([{'url': identity, 'source_id': 11, 'destination_id': 22,
+        entry = parse_manifest([signed({'url': identity, 'source_id': 11, 'destination_id': 22,
                                  'destination_name': 'new-repo', 'legacy_url': 'https://git.example/old/repo',
-                                 'legacy_destination_name': 'old-repo'}])[0]
+                                 'legacy_destination_name': 'old-repo', 'signature': 'a' * 64})])[0]
         source = Mock()
         source.request.return_value = {'id': 99, 'full_name': 'new/repo', 'clone_url': identity + '.git'}
         destination = Mock()
         with patch('repo_mirror.forgejo_sync.PublicForgejoSourceAdapter', return_value=source):
             result = _sync_requested(SimpleNamespace(port=3300, owner='dest'), [identity], destination,
-                                     None, 'token', 'secret', '/tmp', mappings={identity: entry})
+                                     None, 'token', 'fixture-signing-secret-0123456789abcdef', '/tmp', mappings={identity: entry})
         self.assertEqual(result, 1)
         destination.begin_initialization.assert_not_called()
 
@@ -114,7 +119,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
     def test_pinned_mapping_and_legacy_string(self):
         mapping = {'url': 'https://git.example/new/repo', 'source_id': 11, 'destination_id': 22,
                    'destination_name': 'new-repo', 'legacy_url': 'https://git.example/old/repo',
-                   'legacy_destination_name': 'old-repo'}
+                   'legacy_destination_name': 'old-repo', 'signature': 'a' * 64}
         result = parse_manifest([mapping, 'https://git.example/other/other'])
         self.assertEqual(result[0]['identity'], 'https://git.example/new/repo')
         self.assertEqual(result[0]['destination_name'], 'new-repo')
@@ -123,7 +128,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
     def test_rejects_untrusted_mapping_and_destination_collision(self):
         mapping = {'url': 'https://git.example/new/repo', 'source_id': 11, 'destination_id': 22,
                    'destination_name': 'new-repo', 'legacy_url': 'https://git.example/old/repo',
-                   'legacy_destination_name': 'old-repo'}
+                   'legacy_destination_name': 'old-repo', 'signature': 'a' * 64}
         for key, val in [('source_id', True), ('destination_id', 0),
                          ('destination_name', '../escape'), ('legacy_url', 'https://elsewhere.example/old/repo')]:
             with self.subTest(key=key), self.assertRaises(ValueError):

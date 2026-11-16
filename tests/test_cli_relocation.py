@@ -13,6 +13,8 @@ SOURCE = {
     'destinations': {'repo': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
         'legacy': {'source_owner': 'old', 'source_name': 'old-repo', 'destination_name': 'mirror-old'}}},
 }
+from repo_mirror.migration_attestation import github_claim, sign
+SOURCE['destinations']['repo']['legacy']['signature'] = sign(github_claim(SOURCE, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
 OLD_MARKER = source_marker({**SOURCE, 'owner': 'old'}, 'old-repo')
 
 
@@ -23,7 +25,7 @@ def run_cli(tmp_path, marker):
     src.request.return_value = {'id': 1, 'clone_url': 'https://github.com/new/repo.git'}
     dst = Mock()
     dst.request.return_value = {'id': 2, 'description': marker, 'default_branch': 'main'}
-    env = {'MIRROR_TIMESTAMP_SECRET': 'test-secret', 'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}
+    env = {'MIRROR_TIMESTAMP_SECRET': 'fixture-signing-secret-0123456789abcdef', 'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}
     with patch.dict('os.environ', env, clear=True), \
          patch.object(cli, 'SourceAPI', return_value=src), \
          patch.object(cli, 'API', side_effect=[Mock(), dst]), \
