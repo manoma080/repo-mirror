@@ -125,7 +125,9 @@ class ForgejoDestination:
         self.organization = organization
         self.run_pin = None
 
-    def ensure_repository(self, name, source):
+    def ensure_repository(self, name, source, *, expected_id=None):
+        if expected_id is not None and (type(expected_id) is not int or expected_id <= 0):
+            raise ValueError("invalid destination repository ID")
         name = _name(name)
         source_owner, source_name = _source(source)
         marker = _source_marker(source)
@@ -135,6 +137,8 @@ class ForgejoDestination:
         except APIError as exc:
             if exc.status != 404:
                 raise
+            if expected_id is not None:
+                raise RuntimeError("pinned Forgejo destination missing") from None
             endpoint = f"/api/v1/orgs/{self.owner}/repos" if self.organization else "/api/v1/user/repos"
             created = self.api.request(
                 "POST",
@@ -153,6 +157,8 @@ class ForgejoDestination:
             if repo.get('id') != created_id:
                 raise RuntimeError('Forgejo repository replaced during creation')
         self._verify(repo, name, marker, actions=False)
+        if expected_id is not None and repo['id'] != expected_id:
+            raise RuntimeError("Forgejo destination ID mismatch")
         expected_id = repo['id']
         expected_description = repo['description']
         if repo.get("has_actions") is not False:
@@ -183,10 +189,11 @@ class ForgejoDestination:
             raise RuntimeError("Forgejo repository identity or initialization state changed")
         return repo
 
-    def begin_initialization(self, name, source):
+    def begin_initialization(self, name, source, *, expected_id=None):
         """Conservatively migrate legacy mirrors through a full-history pass."""
         self.run_pin = None
-        repo = self.ensure_repository(name, source)
+        repo = (self.ensure_repository(name, source) if expected_id is None
+                else self.ensure_repository(name, source, expected_id=expected_id))
         owner, source_name = _source(source)
         marker = _source_marker(source)
         if repo["description"] == marker:
@@ -235,8 +242,9 @@ def plan_updates(desired, observed, is_ancestor):
     return updates
 
 
-def sync_refs(destination, name, source, *, source_token=None, expected=None):
+def sync_refs(destination, name, source, *, source_token=None, expected=None, recovery_identity=None):
     """Reconcile heads and tags using the shared archive-before-wipe policy."""
+    provenance = recovery_identity if recovery_identity is not None else source
     owner, repo = _source(source)
     name = _name(name)
     _name(destination.owner)
@@ -261,8 +269,8 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None):
         if not isinstance(token, str) or not token or "\n" in token or "\r" in token:
             raise RuntimeError("GITHUB_TOKEN required for source clone")
         return token
-    info = (destination.revalidate(name, source, expected) if expected is not None
-            else destination.ensure_repository(name, source))
+    info = (destination.revalidate(name, provenance, expected) if expected is not None
+            else destination.ensure_repository(name, provenance))
     pins = {}
     def pin(repo_name, info):
         repo_id = info.get('id') if isinstance(info, dict) else None
@@ -272,7 +280,7 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None):
 
     def revalidate(repo_name):
         marker_owner, marker_repo = _source(source)
-        marker = _source_marker(source)
+        marker = _source_marker(provenance)
         current = destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{repo_name}')
         destination._verify(current, repo_name, marker, actions=True)
         if (current.get('id'), current.get('description')) != pins[repo_name]:
@@ -395,7 +403,7 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None):
             revalidate(name)
             if source_snapshot is None or _refs(source_run, source_url) != source_snapshot:
                 raise RuntimeError('source refs changed during sync')
-            pin(archive_name, destination.ensure_repository(archive_name, source))
+            pin(archive_name, destination.ensure_repository(archive_name, provenance))
             archive_url = f"{destination.api.base_url.rstrip('/')}/{destination.owner}/{archive_name}.git"
             archive_targets[archive_url] = archive_name
             return archive_url, lambda ref: set_default(archive_name, ref)
@@ -427,7 +435,8 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None):
 
 
 
-def snapshot_refs(destination, name, source, *, source_token, expected=None):
+def snapshot_refs(destination, name, source, *, source_token, expected=None, recovery_identity=None):
+    provenance = recovery_identity if recovery_identity is not None else source
     owner, repo = _source(source)
     name = _name(name)
     _name(destination.owner)
@@ -439,7 +448,7 @@ def snapshot_refs(destination, name, source, *, source_token, expected=None):
     source_url = _source_url(source)
     dest_url = f'{destination.api.base_url.rstrip("/")}/{destination.owner}/{name}.git'
     if expected is not None:
-        destination.revalidate(name, source, expected)
+        destination.revalidate(name, provenance, expected)
     with tempfile.TemporaryDirectory(prefix='repo-mirror-forgejo-') as tmp:
         askpass = Path(tmp) / 'askpass'
         askpass.write_text('#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "$MIRROR_USER";; *) printf "%s\\n" "$MIRROR_TOKEN";; esac\n')
@@ -502,9 +511,9 @@ def snapshot_refs(destination, name, source, *, source_token, expected=None):
         if ((source_head is None and source_refs) or
                 (source_head is not None and source_refs.get(source_head[0]) != source_head[1])):
             raise RuntimeError('source default branch not verified')
-        info = (destination.revalidate(name, source, expected) if expected is not None
+        info = (destination.revalidate(name, provenance, expected) if expected is not None
                 else destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{name}'))
-        destination._verify(info, name, _source_marker(source), actions=True)
+        destination._verify(info, name, _source_marker(provenance), actions=True)
         if source_head is not None and info.get('default_branch') != source_head[0][len('refs/heads/'):]:
             raise RuntimeError('Forgejo default branch readback did not match')
         if destination_refs != source_refs:

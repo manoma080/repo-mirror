@@ -22,11 +22,20 @@ def validate_source(source):
         raise ValueError("invalid destination mappings")
     for key, settings in mappings.items():
         if (not isinstance(key, str) or key != key.lower() or not NAME.fullmatch(key) or key in (".", "..")
-                or not isinstance(settings, dict) or set(settings) - {"name", "visibility", "source_id", "destination_id"}
+                or not isinstance(settings, dict) or set(settings) - {"name", "visibility", "source_id", "destination_id", "legacy"}
                 or any(type(settings[k]) is not int or settings[k] <= 0
                        for k in ("source_id", "destination_id") if k in settings)
                 or settings.get("visibility", "private") not in ("private", "public")):
             raise ValueError("invalid destination mappings")
+        legacy = settings.get("legacy")
+        if "legacy" in settings:
+            if source.get("repos") == "all":
+                raise ValueError("legacy repository binding requires explicit repos")
+            if (not isinstance(legacy, dict) or set(legacy) != {"source_owner", "source_name", "destination_name"}
+                    or not {"source_id", "destination_id"} <= settings.keys()
+                    or any(not isinstance(v, str) or not NAME.fullmatch(v) or v in (".", "..") or len(v) > 100
+                           for v in legacy.values())):
+                raise ValueError("invalid legacy repository binding")
         if "name" in settings and (not isinstance(settings["name"], str) or len(settings["name"]) > 100
                 or not NAME.fullmatch(settings["name"]) or settings["name"] in (".", "..")):
             raise ValueError("invalid destination mappings")

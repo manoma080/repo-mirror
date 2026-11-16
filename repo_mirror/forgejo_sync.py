@@ -109,6 +109,68 @@ def parse_source(value):
     return forgejo_source_identity(value)
 
 
+def parse_manifest(sources):
+    """Validate every source and its pinned relocation mapping before any worker starts."""
+    if not isinstance(sources, list) or not sources:
+        raise ValueError('invalid source manifest')
+    entries, identities, destinations, legacy_identities = [], set(), set(), set()
+    for item in sources:
+        if isinstance(item, str):
+            url = item
+            identity = parse_source(url)
+            entry = {'url': url, 'identity': identity, 'destination_name': identity.rsplit('/', 1)[-1]}
+        elif isinstance(item, dict) and set(item) == {'url', 'source_id', 'destination_id', 'destination_name',
+                                                     'legacy_url', 'legacy_destination_name'}:
+            if not isinstance(item['url'], str) or not isinstance(item['legacy_url'], str):
+                raise ValueError('invalid source URL')
+            identity = parse_source(item['url'])
+            legacy_identity = parse_source(item['legacy_url'])
+            for key in ('source_id', 'destination_id'):
+                if type(item[key]) is not int or item[key] <= 0:
+                    raise ValueError('invalid repository ID')
+            for key in ('destination_name', 'legacy_destination_name'):
+                value = item[key]
+                if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', value) or value in ('.', '..') or len(value) > 100:
+                    raise ValueError('invalid destination name')
+            # Source IDs are scoped to a forge instance; never allow a mapping
+            # to assert that the same numeric ID belongs to a different forge.
+            if item['url'].rsplit('/', 2)[0].lower() != item['legacy_url'].rsplit('/', 2)[0].lower():
+                raise ValueError('source instance mismatch')
+            entry = {**item, 'identity': identity, 'legacy_identity': legacy_identity}
+        else:
+            raise ValueError('invalid source manifest')
+        old_identity = entry.get('legacy_identity', identity).lower()
+        names = {entry['destination_name'].lower(), entry.get('legacy_destination_name', entry['destination_name']).lower()}
+        source_names = {identity.lower(), old_identity}
+        if source_names & (identities | legacy_identities):
+            raise ValueError('duplicate configured source')
+        if names & destinations:
+            raise ValueError('conflicting destination')
+        identities.add(identity.lower())
+        legacy_identities.add(old_identity)
+        destinations.update(names)
+        entries.append(entry)
+    return entries
+
+
+def verify_source_pin(identity, metadata, expected_id):
+    """Validate an already trusted source ID and its canonical clone location."""
+    if type(expected_id) is not int or expected_id <= 0 or not isinstance(metadata, dict) or type(metadata.get('id')) is not int or metadata['id'] != expected_id:
+        raise ValueError('source repository ID mismatch')
+    url = identity if identity.startswith('https://') else 'https://github.com/' + identity
+    expected_name = identity.rsplit('/', 2)[-2:]
+    actual_name, clone = metadata.get('full_name'), metadata.get('clone_url')
+    if not isinstance(actual_name, str) or not isinstance(clone, str):
+        raise ValueError('invalid source identity metadata')
+    expected_name = '/'.join(expected_name)
+    if identity.startswith('https://'):
+        valid = actual_name == expected_name and clone == url + '.git'
+    else:
+        valid = actual_name.lower() == expected_name.lower() and clone.lower() == (url + '.git').lower()
+    if not valid:
+        raise ValueError('canonical source identity mismatch')
+
+
 def read_secure_file(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     try:
@@ -209,19 +271,14 @@ def main(argv=None):
     try:
         with open(args.config, encoding='utf-8') as stream:
             configured = json.load(stream)
-        if not isinstance(configured, list) or not all(isinstance(x, str) for x in configured):
-            raise ValueError('config must be a JSON array of source URLs')
-        identities = [parse_source(s) for s in configured]
-        if len(set(x.lower() for x in identities)) != len(identities):
-            raise ValueError('duplicate configured source')
-        destinations = [identity.rsplit('/', 1)[-1].lower() for identity in identities]
-        if len(set(destinations)) != len(destinations):
-            raise ValueError('conflicting destination')
+        entries = parse_manifest(configured)
+        by_url = {entry['url']: entry for entry in entries}
         requested = [parse_source(s) for s in args.source]
         if len(set(x.lower() for x in requested)) != len(requested):
             raise ValueError('duplicate requested source')
-        if any(s not in configured for s in args.source):
+        if any(s not in by_url for s in args.source):
             raise ValueError('requested source not exactly configured')
+        mappings = {entry['identity']: entry for entry in entries if 'source_id' in entry}
         secret, secret_id = read_secure_file(args.timestamp_secret_file)
         secret = secret.strip()
         if not secret or any(c in secret for c in ('\n', '\r', '\x00')):
@@ -266,52 +323,67 @@ def main(argv=None):
         # journal users and pins the directory inode across renames.
         result = 0
         for identity in requested:
-            with destination_locks(args.port, args.owner, [identity]):
+            entry = mappings.get(identity)
+            lock_targets = ([entry['destination_name'], entry['legacy_destination_name']] if entry else [identity])
+            with destination_locks(args.port, args.owner, lock_targets):
                 with journal_lock(args.journal_dir, shared=True) as journal_dir:
-                    result |= _sync_requested(args, [identity], dest, token, local_token, secret, journal_dir)
+                    if entry:
+                        result |= _sync_requested(args, [identity], dest, token, local_token, secret, journal_dir,
+                                                  mappings={identity: entry})
+                    else:
+                        result |= _sync_requested(args, [identity], dest, token, local_token, secret, journal_dir)
         return result
     except (OSError, ValueError) as exc:
         print(f'FORGEJO_FAILURE: {safe_reason(exc, configuration=True)}', file=sys.stderr)
         return 2
 
 
-def _sync_requested(args, requested, dest, token, local_token, secret, journal_dir):
+def _sync_requested(args, requested, dest, token, local_token, secret, journal_dir, *, mappings=None):
     failures = []
     for identity in requested:
-        name = identity.rsplit('/', 1)[-1]
+        entry = (mappings or {}).get(identity)
+        name = entry['destination_name'] if entry else identity.rsplit('/', 1)[-1]
+        source_name = identity.rsplit('/', 1)[-1]
+        recovery_identity = entry['legacy_identity'] if entry else identity
         try:
-            journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{identity.lower()}'.encode()).hexdigest()
+            journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{recovery_identity.lower()}'.encode()).hexdigest()
             journal = FailureJournal(os.path.join(journal_dir, journal_id + '.json'))
             if identity.startswith('https://'):
                 base, source_owner, _ = identity.rsplit('/', 2)
-                source = {'type': 'forgejo', 'base_url': base, 'owner': source_owner, 'repos': [name]}
+                source = {'type': 'forgejo', 'base_url': base, 'owner': source_owner, 'repos': [source_name]}
                 source_token = None
                 src = PublicForgejoSourceAdapter(identity, api=SourceAPI(None))
             else:
                 source = {'type': 'github', 'base_url': 'https://github.com', 'owner': identity.split('/')[0]}
                 source_token = token
                 src = ForgejoSourceAdapter(identity, token, api=SourceAPI(token))
-            upstream = f"{source_api_base(source)}/repos/{source['owner']}/{name}"
+            upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
+            if entry:
+                verify_source_pin(identity, src.request('GET', upstream), entry['source_id'])
             source_releases = src.pages(upstream + '/releases')
             validation_options = {'allow_empty_target': True} if source['type'] == 'forgejo' else {}
             validate_source_release_listing(source_releases, **validation_options)
             validate_source_latest(fetch_source_latest(src, upstream), source_releases, **validation_options)
             # This preflight cannot prevent the source changing immediately
             # afterwards; mirror_releases fetches and checks it again.
-            initializing = dest.begin_initialization(name, identity)
+            initializing = (dest.begin_initialization(name, recovery_identity, expected_id=entry['destination_id'])
+                            if entry else dest.begin_initialization(name, identity))
             expected = dest.run_pin
             def guard():
+                if entry:
+                    verify_source_pin(identity, src.request('GET', upstream), entry['source_id'])
                 if expected is not None:
-                    dest.revalidate(name, identity, expected)
+                    dest.revalidate(name, recovery_identity, expected)
             guard()
-            sync_refs(dest, name, identity, source_token=source_token, expected=expected)
+            recovery_options = {'recovery_identity': recovery_identity} if entry else {}
+            sync_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
             guard()
-            before = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected)
+            before = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
             guard()
             adapter = ForgejoDestinationAdapter(f'{args.owner}/{name}', local_token, args.port, guard=guard)
             if source['type'] == 'forgejo':
                 def verify_source_tag(tag):
-                    current = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected)
+                    current = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
                     ref = 'refs/tags/' + tag
                     if current != before or ref not in current[1] or current[1][ref] != current[2].get(ref):
                         raise ValueError('tag verification failed')
@@ -324,23 +396,32 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 validate_source_latest(latest, releases, **validation_options)
 
             try:
-                mirror_releases(source, name, args.owner, src, adapter, upstream, adapter.target,
-                                source_marker(source, name), initializing=initializing, journal=journal,
-                                validate_snapshot=validate_snapshot)
+                if entry:
+                    old_owner, old_name = recovery_identity.rsplit('/', 2)[-2:]
+                    old_source = {**source, 'owner': old_owner}
+                    old_target = adapter.target.rsplit('/', 1)[0] + '/' + entry['legacy_destination_name']
+                    mirror_releases(source, source_name, args.owner, src, adapter, upstream, adapter.target,
+                                    source_marker(old_source, old_name), initializing=initializing, journal=journal,
+                                    validate_snapshot=validate_snapshot, recovery_target=old_target,
+                                    journal_source=old_source, journal_name=old_name)
+                else:
+                    mirror_releases(source, source_name, args.owner, src, adapter, upstream, adapter.target,
+                                    source_marker(source, source_name), initializing=initializing, journal=journal,
+                                    validate_snapshot=validate_snapshot)
             finally:
                 if previous_secret is None:
                     os.environ.pop('MIRROR_TIMESTAMP_SECRET', None)
                 else:
                     os.environ['MIRROR_TIMESTAMP_SECRET'] = previous_secret
             guard()
-            after = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected)
+            after = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
             guard()
             if after[0] != before[0] or after[1] != before[1]:
                 raise RuntimeError('source refs changed during sync')
             if after[2] != before[2]:
                 raise RuntimeError('Forgejo refs changed during sync')
             if initializing:
-                dest.complete_initialization(name, identity, expected=expected)
+                dest.complete_initialization(name, recovery_identity, expected=expected)
             print(f'{identity}: OK (Git refs synchronized)', flush=True)
         except Exception as exc:
             failures.append(identity)

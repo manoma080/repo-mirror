@@ -86,7 +86,29 @@ Example:
 
 The first entry creates `mirror-alice-project-one`. If two sources would create the same name, give them different prefixes. `"all"` means repositories the user owns, not repositories they starred.
 
-For the GitHub destination path, optional per-repository mappings can pin numeric repository identities, for example `"destinations": {"project-one": {"source_id": 123, "destination_id": 456}}`. Mapping keys are lowercase source names; IDs must be positive integers. A pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. Omitting either pin preserves existing behavior. The source clone URL check still applies. These are pre-write checks, not atomic protection against a repository changing after the check; they do not apply to the separate Forgejo destination workflow.
+For the GitHub destination path, optional per-repository mappings can pin numeric repository identities, for example `"destinations": {"project-one": {"source_id": 123, "destination_id": 456}}`. Mapping keys are lowercase source names; IDs must be positive integers. A pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. Omitting either pin preserves existing behavior. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check.
+
+### Explicit relocation bindings
+
+A reviewed relocation mapping preserves the **original** source marker and recovery target while using current names for Git and API operations. It does not verify the historical association for you. Before adding one, independently establish the old-to-current source and destination associations and IDs from trusted historical records; a redirect, matching current ID, or destination description alone is not that proof. GitHub IDs are scoped to GitHub; Forgejo IDs are scoped to the Forgejo instance. Treat these mappings as security-sensitive configuration and retain the original binding for as long as its signed drafts, pending releases, manifests or journals can exist. Never replace the original binding with an intermediate name on a later move.
+
+For a GitHub destination, use an explicit repository list and a mapping such as:
+
+```json
+{"type":"github", "base_url":"https://github.com", "owner":"new-owner", "repos":["new-repo"],
+ "destinations":{"new-repo":{"name":"mirror-new", "source_id":123, "destination_id":456,
+   "legacy":{"source_owner":"old-owner", "source_name":"old-repo", "destination_name":"mirror-old"}}}}
+```
+
+For the local Forgejo destination, the manifest continues to accept ordinary URL strings; an explicitly verified relocation may instead use:
+
+```json
+{"url":"https://forge.example/new-owner/new-repo", "source_id":123, "destination_id":456,
+ "destination_name":"mirror-new", "legacy_url":"https://forge.example/old-owner/old-repo",
+ "legacy_destination_name":"mirror-old"}
+```
+
+The old and current source must be on the same forge origin. These fields do not rename repositories or publish configuration. Coordinate and drain all writers, preserve signing keys and journals, verify complete release and draft inventories and both pins, then perform and read back the destination rename and configuration publication in a controlled window. A partial rename/config change requires reconciliation before resuming; it is not atomic. Legacy mappings with `repos: "all"` are rejected: configure that repository explicitly. Discovery of unpinned renamed repositories is not automatic identity verification. Forgejo's installed launcher must support the structured manifest before it is used. Real provider migration and recovery must be validated separately from unit tests.
 
 ## Set up the GitHub App
 

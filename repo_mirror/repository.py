@@ -16,16 +16,47 @@ from urllib.parse import quote, urlencode, urlparse
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
 from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
-from repo_mirror.github_api import SourceAPI as GitHubSourceAPI
+from repo_mirror.github_api import API as GitHubAPI, SourceAPI as GitHubSourceAPI
 from repo_mirror.github_api import not_found, same_file, transient_transfer_error, transfer_retry_delay
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
-from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker
+from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker, validate_source
 
 # Checksum file names accepted as a fallback source, any letter case:
 # SHA256SUM, SHA256SUMS, SHA256SUM.txt, SHA256SUMS.txt.
 CHECKSUM_FILE_NAME = re.compile(r"SHA256SUMS?(?:\.txt)?", re.I)
 IDENTITY_SENTINEL = "[repo-mirror:draft-identity:v1]"
+
+
+class _IdentityGuardedDestination:
+    """Check repository pins before each destination operation."""
+
+    def __init__(self, destination, check):
+        self._destination = destination
+        self._check = check
+
+    def __getattr__(self, name):
+        return getattr(self._destination, name)
+
+    def request(self, *args, **kwargs):
+        self._check()
+        return self._destination.request(*args, **kwargs)
+
+    def pages(self, url):
+        # Route the standard GitHub paginator through the guarded request so
+        # each page is checked, rather than only the first page.
+        if getattr(type(self._destination), "pages", None) is GitHubAPI.pages:
+            return GitHubAPI.pages(self, url)
+        self._check()
+        return self._destination.pages(url)
+
+    def download(self, *args, **kwargs):
+        self._check()
+        return self._destination.download(*args, **kwargs)
+
+    def upload(self, *args, **kwargs):
+        self._check()
+        return self._destination.upload(*args, **kwargs)
 
 
 def draft_identity_signature(secret, source, tag, target, release_id):
@@ -94,7 +125,7 @@ def draft_original_name(release):
     return name
 
 
-def find_tag_releases(dst, target, tag, source_name=None, *, releases=None, marker=None):
+def find_tag_releases(dst, target, tag, source_name=None, *, releases=None, marker=None, recovery_target=None):
     """Find an exact tag or an ID-bound, authenticated recovery draft.
 
     Names and GitHub's generated untagged-* tags are not identities. If an
@@ -117,7 +148,7 @@ def find_tag_releases(dst, target, tag, source_name=None, *, releases=None, mark
             try:
                 signature = body.split("\n" + IDENTITY_SENTINEL, 1)[1]
                 if type(item.get("id")) is int and item["id"] > 0 and hmac.compare_digest(
-                    signature, draft_identity_signature(secret, marker, tag, target, item["id"])
+                    signature, draft_identity_signature(secret, marker, tag, recovery_target or target, item["id"])
                 ):
                     verified.append(item)
                     continue
@@ -130,7 +161,7 @@ def find_tag_releases(dst, target, tag, source_name=None, *, releases=None, mark
             state = json.loads(body.split("\n" + sentinel, 1)[1])
             signature = state.pop("signature")
             payload = {"version": "v3", "source": marker, "tag": tag,
-                       "target": target, "release_id": item["id"], "state": state}
+                       "target": recovery_target or target, "release_id": item["id"], "state": state}
             encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()
             expected = hmac.new(secret.encode(), b"repo-mirror:release-recovery:v3\0" + encoded,
                                 hashlib.sha256).hexdigest()
@@ -145,7 +176,7 @@ def find_tag_releases(dst, target, tag, source_name=None, *, releases=None, mark
     return []
 
 
-def select_existing_releases(releases, destination, failed_tags, marker=None, target=None, known_draft_tags=None):
+def select_existing_releases(releases, destination, failed_tags, marker=None, target=None, known_draft_tags=None, recovery_target=None):
     """Select missing and pending releases without guessing draft identity."""
     by_tag = {}
     untagged = []
@@ -162,7 +193,7 @@ def select_existing_releases(releases, destination, failed_tags, marker=None, ta
                 candidates = [item for item in untagged if not known_draft_tags
                               or item.get("id") not in known_draft_tags
                               or known_draft_tags[item["id"]] == tag]
-                matches = find_tag_releases(None, target, tag, releases=candidates, marker=marker)
+                matches = find_tag_releases(None, target, tag, releases=candidates, marker=marker, recovery_target=recovery_target)
             except ValueError:
                 # Resolve ambiguity inside the per-release isolation boundary.
                 selected.append(release)
@@ -189,7 +220,18 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         flush=True,
     )
     dest_name = destination_name(source, name)
-    marker = source_marker(source, name)
+    settings = source.get("destinations", {}).get(name.lower(), {})
+    if "legacy" in settings:
+        validate_source(source)
+        legacy = settings["legacy"]
+        historical_source = {**source, "owner": legacy["source_owner"]}
+        historical_name = legacy["source_name"]
+        marker = source_marker(historical_source, historical_name)
+    else:
+        marker = source_marker(source, name)
+    for key in ("source_id", "destination_id"):
+        if key in settings and (type(settings[key]) is not int or settings[key] <= 0):
+            raise ValueError("invalid repository id pin")
     qowner, qname = quote(owner, safe=""), quote(dest_name, safe="")
     target = f"{GITHUB}/repos/{qowner}/{qname}"
     repo = get_existing(dst, target)
@@ -197,10 +239,6 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     initializing = repo is None or repo.get("description") == marker + " [repo-mirror:initializing:v1]"
     srcbase = source_api_base(source)
     upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(name, safe='')}"
-    settings = source.get("destinations", {}).get(name.lower(), {})
-    for key in ("source_id", "destination_id"):
-        if key in settings and (type(settings[key]) is not int or settings[key] <= 0):
-            raise ValueError("invalid repository id pin")
     if "destination_id" in settings and (not isinstance(repo, dict) or
             type(repo.get("id")) is not int or repo["id"] != settings["destination_id"]):
         raise ValueError("destination repository id mismatch or missing")
@@ -246,6 +284,21 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         or not clone_path_matches
     ):
         raise ValueError("source clone URL does not match source identity")
+    def recheck_pins():
+        # These API reads narrow, but cannot eliminate, the TOCTOU window.
+        if "source_id" in settings:
+            current_source = src.request("GET", upstream)
+            if (not isinstance(current_source, dict) or type(current_source.get("id")) is not int
+                    or current_source["id"] != settings["source_id"]):
+                raise ValueError("source repository id mismatch")
+        if "destination_id" in settings:
+            current = get_existing(dst, target)
+            if (not isinstance(current, dict) or type(current.get("id")) is not int
+                    or current["id"] != settings["destination_id"]):
+                raise ValueError("destination repository id mismatch or missing")
+            check_existing(current, marker)
+
+    recheck_pins()
     if repo is None:
         endpoint = "/user/repos" if account_type == "personal" else f"/orgs/{qowner}/repos"
         repo = dst.request(
@@ -298,6 +351,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         archive_target = GITHUB + "/repos/" + archive_path
         return archive, lambda ref: set_archive_default(dst, archive_target, ref)
 
+    recheck_pins()
     with timed("step git mirror"):
         mirror_git(
             clone_url,
@@ -311,14 +365,31 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 "switch_default": switch_default,
             },
         )
-    if "destination_id" in settings:
-        current = get_existing(dst, target)
-        if (not isinstance(current, dict) or type(current.get("id")) is not int
-                or current["id"] != settings["destination_id"]):
-            raise ValueError("destination repository id mismatch or missing")
-        check_existing(current, marker)
-    mirror_releases(source, name, owner, src, dst, upstream, target, marker,
-                    initializing=initializing, journal=journal)
+    recheck_pins()
+    if "source_id" in settings or "destination_id" in settings:
+        # Keep the raw destination captured by recheck_pins to avoid recursion.
+        raw_dst = dst
+        def check_release_pins():
+            if "source_id" in settings:
+                current_source = src.request("GET", upstream)
+                if (not isinstance(current_source, dict) or type(current_source.get("id")) is not int
+                        or current_source["id"] != settings["source_id"]):
+                    raise ValueError("source repository id mismatch")
+            if "destination_id" in settings:
+                current = get_existing(raw_dst, target)
+                if (not isinstance(current, dict) or type(current.get("id")) is not int
+                        or current["id"] != settings["destination_id"]):
+                    raise ValueError("destination repository id mismatch or missing")
+                check_existing(current, marker)
+        dst = _IdentityGuardedDestination(raw_dst, check_release_pins)
+    if "legacy" in settings:
+        historical_target = f"{GITHUB}/repos/{qowner}/{quote(legacy['destination_name'], safe='')}"
+        mirror_releases(source, name, owner, src, dst, upstream, target,
+                        source_marker(historical_source, historical_name), initializing=initializing, journal=journal,
+                        recovery_target=historical_target, journal_source=historical_source, journal_name=historical_name)
+    else:
+        mirror_releases(source, name, owner, src, dst, upstream, target, marker,
+                        initializing=initializing, journal=journal)
     if initializing:
         dst.request("PATCH", target, {"description": marker})
 
@@ -586,8 +657,11 @@ def verify_empty_body_converged(src, dst, upstream, target, release, *, empty_fo
 
 
 def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, initializing, journal=None,
-                    validate_snapshot=None):
+                    validate_snapshot=None, recovery_target=None, journal_source=None, journal_name=None):
     """Apply the release policy independently of repository and Git setup."""
+    recovery_target = recovery_target or target
+    journal_source = journal_source or source
+    journal_name = journal_name or name
     if source.get("type") == "github" and isinstance(src, GitHubSourceAPI):
         src = ForgejoSourceAdapter(source["owner"] + "/" + name, src.source_token, api=src)
         if upstream != src.base:
@@ -636,7 +710,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     if source_tag == item["tag_name"]:
                         continue
                     try:
-                        if find_tag_releases(None, target, source_tag, releases=[item], marker=marker):
+                        if find_tag_releases(None, target, source_tag, releases=[item], marker=marker, recovery_target=recovery_target):
                             authenticated.append(source_tag)
                     except ValueError:
                         pass
@@ -651,10 +725,10 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         failed_tags = {
             r["tag_name"]
             for r in releases
-            if journal and journal.key(source, name, owner, r["tag_name"], "")[:64] in failed_releases
+            if journal and journal.key(journal_source, journal_name, owner, r["tag_name"], "")[:64] in failed_releases
         }
         selected = select_existing_releases(
-            releases, get_destination_releases(), failed_tags, marker, target, known_draft_tags
+            releases, get_destination_releases(), failed_tags, marker, target, known_draft_tags, recovery_target
         )
     if latest:
         selected = [latest if r["tag_name"] == latest["tag_name"] else r for r in selected]
@@ -726,7 +800,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 if callable(validate_release_source):
                     if getattr(dst, "verify_empty_body_read_only", False) and release.get("body") in (None, "", " "):
                         failed = journal and any(
-                            key.split(":", 1)[0] == journal.key(source, name, owner, tag, "")[:64]
+                            key.split(":", 1)[0] == journal.key(journal_source, journal_name, owner, tag, "")[:64]
                             for key in journal.failures
                         )
                         converged = None if failed else verify_empty_body_converged(
@@ -749,7 +823,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         raise
                     e.close()
                     # The tag endpoint can omit drafts, which still need to be found.
-                    matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker)
+                    matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker, recovery_target=recovery_target)
                     if len(matches) > 1:
                         raise RuntimeError("multiple destination releases for tag")
                     existing = matches[0] if matches else None
@@ -778,7 +852,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         "version": "v3",
                         "source": marker,
                         "tag": tag,
-                        "target": target,
+                        "target": recovery_target,
                         "release_id": release_id,
                         "state": marker_state,
                     }
@@ -799,7 +873,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     if body.count(IDENTITY_SENTINEL) != 1 or "\n" + IDENTITY_SENTINEL not in body:
                         raise ReleaseRecoveryError("marker")
                     body, signature = body.split("\n" + IDENTITY_SENTINEL, 1)
-                    expected = draft_identity_signature(secret, marker, tag, target, existing["id"])
+                    expected = draft_identity_signature(secret, marker, tag, recovery_target, existing["id"])
                     if not hmac.compare_digest(signature, expected):
                         raise ReleaseRecoveryError("marker")
                     authenticated_draft = True
@@ -936,7 +1010,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 ):
                     # Provisional markers never authorize replacement. Bind only an
                     # unambiguous tag lookup to the immutable destination release ID.
-                    matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker)
+                    matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker, recovery_target=recovery_target)
                     if (
                         type(existing.get("id")) is not int
                         or existing["id"] <= 0
@@ -1426,7 +1500,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 first_upload_status = None
                 uploaded = updated = skipped = retried = 0
                 ordered_assets = (
-                    journal.retry_order(source, name, owner, tag, source_assets) if journal else source_assets
+                    journal.retry_order(journal_source, journal_name, owner, tag, source_assets) if journal else source_assets
                 )
                 for asset_index, asset in enumerate(ordered_assets, 1):
                     print(
@@ -1435,7 +1509,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         flush=True,
                     )
                     with timed(f"asset asset_name={safe_label(asset.get('name'))}"):
-                        key = journal.key(source, name, owner, tag, asset["name"]) if journal else None
+                        key = journal.key(journal_source, journal_name, owner, tag, asset["name"]) if journal else None
                         was_journaled = journal is not None and key in journal.failures
                         previous = by_name.get(asset["name"])
                         source_hash = asset.get("digest")
@@ -1805,7 +1879,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
 
                 if release.get("draft") is True:
                     final_body = logical_release_body(final_body) + "\n" + IDENTITY_SENTINEL + draft_identity_signature(
-                        secret, marker, tag, target, existing["id"]
+                        secret, marker, tag, recovery_target, existing["id"]
                     )
                     if len(final_body) > 125000:
                         raise ValueError("release body too long for draft identity")
@@ -1843,7 +1917,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     latest_read_only = False
                 if journal:
                     for asset_name in {asset["name"] for asset in source_assets} | observed_starter_names:
-                        key = journal.key(source, name, owner, tag, asset_name)
+                        key = journal.key(journal_source, journal_name, owner, tag, asset_name)
                         if key in journal.failures:
                             journal.set(key, False)
                 print(f"release {release_index}/{len(selected)} completed", file=sys.stderr, flush=True)
