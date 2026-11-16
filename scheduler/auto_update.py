@@ -41,6 +41,40 @@ def valid_source(source):
         return False
 
 
+def valid_manifest(sources):
+    """Validate the entire snapshot before running any downloaded scheduler."""
+    if not isinstance(sources, list) or not sources:
+        return False
+    identities, destinations = set(), set()
+    for item in sources:
+        if isinstance(item, str):
+            url, old = item, item
+            names = {url.rsplit('/', 1)[-1].lower()}
+        elif isinstance(item, dict) and set(item) == {'url', 'source_id', 'destination_id', 'destination_name',
+                                                     'legacy_url', 'legacy_destination_name'}:
+            url, old = item['url'], item['legacy_url']
+            if (not isinstance(url, str) or not isinstance(old, str)
+                    or any(type(item[k]) is not int or item[k] <= 0 for k in ('source_id', 'destination_id'))):
+                return False
+            for key in ('destination_name', 'legacy_destination_name'):
+                value = item[key]
+                if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', value) or value in ('.', '..') or len(value) > 100:
+                    return False
+            if url.rsplit('/', 2)[0].lower() != old.rsplit('/', 2)[0].lower():
+                return False
+            names = {item['destination_name'].lower(), item['legacy_destination_name'].lower()}
+        else:
+            return False
+        if not valid_source(url) or not valid_source(old):
+            return False
+        source_names = {url.lower(), old.lower()}
+        if source_names & identities or names & destinations:
+            return False
+        identities.update(source_names)
+        destinations.update(names)
+    return True
+
+
 def checked_process(command, *, cwd, env, lock_fd, quiet=True, scheduler=False):
     """Forward termination, allowing the scheduler time to clean up its workers."""
     pending = []
@@ -194,9 +228,7 @@ def main(argv=None):
                         tar.extract(member, snapshot, filter='data')
                 manifest = snapshot / 'config-forgejo.json'
                 sources = json.loads(manifest.read_text(encoding='utf-8'))
-                if (not isinstance(sources, list) or not sources or
-                    any(not valid_source(s) for s in sources) or
-                    len({s.rsplit('/', 1)[-1].lower() for s in sources}) != len(sources)):
+                if not valid_manifest(sources):
                     raise ValueError('invalid manifest')
                 if not (snapshot / 'repo_mirror' / 'forgejo_schedule.py').is_file():
                     raise ValueError('scheduler missing')

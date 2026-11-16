@@ -158,7 +158,11 @@ def main(argv=None):
             with timed(
                 f"step destination-preflight source_repo={safe_label(source.get('owner'))}/{safe_label(name)} target=destination"
             ):
-                check_existing(get_existing(dst, target), source_marker(source, name))
+                settings = source.get("destinations", {}).get(name.lower(), {})
+                legacy = settings.get("legacy")
+                marker = (source_marker({**source, "owner": legacy["source_owner"]}, legacy["source_name"])
+                          if legacy is not None else source_marker(source, name))
+                check_existing(get_existing(dst, target), marker)
             ready.append((repo_index, source_index, source, name))
         except Exception as exc:
             failures.append((repo_index, error_detail(exc)))

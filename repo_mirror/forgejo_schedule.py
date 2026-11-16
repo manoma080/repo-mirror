@@ -15,24 +15,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from repo_mirror.forgejo_sync import SAFE_REASONS, parse_source
+from repo_mirror.forgejo_sync import SAFE_REASONS, parse_manifest
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
 SOURCE = re.compile(r'https://github\.com/manoma080/mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*')
 
 
 def validate_sources(sources):
-    if not isinstance(sources, list) or not sources:
-        raise ValueError('invalid source manifest')
-    destinations = set()
-    for source in sources:
-        if not isinstance(source, str):
-            raise ValueError('invalid source manifest')
-        identity = parse_source(source)
-        destination = identity.rsplit('/', 1)[1].lower()
-        if destination in destinations:
-            raise ValueError('conflicting destination')
-        destinations.add(destination)
+    parse_manifest(sources)
 
 
 def main(argv=None):
@@ -118,6 +108,8 @@ def main(argv=None):
                             except StopIteration:
                                 exhausted = True
                                 break
+                            if isinstance(source, dict):
+                                source = source['url']
                             command = [args.sync_python, '-m', 'repo_mirror.forgejo_sync', '--config', str(snapshot),
                                        '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port),
                                        '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
