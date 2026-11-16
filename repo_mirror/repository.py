@@ -197,7 +197,16 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     initializing = repo is None or repo.get("description") == marker + " [repo-mirror:initializing:v1]"
     srcbase = source_api_base(source)
     upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(name, safe='')}"
+    settings = source.get("destinations", {}).get(name.lower(), {})
+    for key in ("source_id", "destination_id"):
+        if key in settings and (type(settings[key]) is not int or settings[key] <= 0):
+            raise ValueError("invalid repository id pin")
+    if "destination_id" in settings and (not isinstance(repo, dict) or
+            type(repo.get("id")) is not int or repo["id"] != settings["destination_id"]):
+        raise ValueError("destination repository id mismatch or missing")
     metadata = src.request("GET", upstream)
+    if "source_id" in settings and (type(metadata.get("id")) is not int or metadata["id"] != settings["source_id"]):
+        raise ValueError("source repository id mismatch")
     clone_url = metadata["clone_url"]
     base_url = source["base_url"]
     if not isinstance(clone_url, str) or not isinstance(base_url, str):
@@ -302,6 +311,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 "switch_default": switch_default,
             },
         )
+    if "destination_id" in settings:
+        current = get_existing(dst, target)
+        if (not isinstance(current, dict) or type(current.get("id")) is not int
+                or current["id"] != settings["destination_id"]):
+            raise ValueError("destination repository id mismatch or missing")
+        check_existing(current, marker)
     mirror_releases(source, name, owner, src, dst, upstream, target, marker,
                     initializing=initializing, journal=journal)
     if initializing:
