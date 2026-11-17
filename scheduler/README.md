@@ -1,4 +1,6 @@
-# Forgejo host schedule
+# Forgejo scheduler
+
+Explicit named destination profiles use `{"type":"forgejo","url":"http://127.0.0.1:3300","owner":"labadmin","auth":"forgejo-home"}`. The standalone updater, scheduler and sync worker each reject a mismatch with `--owner` or `--port` before starting mirroring; explicit profiles represent personal accounts and reject `--organization`. The `forgejo-home` alias means the supplied `--token-file`, not the Manobot GitHub source helper, and is not a secret or cryptographic proof of token identity. Provision the correct owner-only token file; destination API identity checks still apply. Legacy named profiles and list manifests retain their existing behavior.
 
 The templates in this repository are not automatically installed or enabled. Check the target host's actual service and timer state before making changes.
 

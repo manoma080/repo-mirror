@@ -12,7 +12,13 @@ def normalize_config(config):
     if not isinstance(destinations, dict) or len(destinations) != 1:
         raise ValueError('exactly one destination profile is supported')
     profile, settings = next(iter(destinations.items()))
-    if not isinstance(profile, str) or not profile or not isinstance(settings, dict) or set(settings) != {'account_type'} or settings['account_type'] not in ('personal', 'organization'):
+    if not isinstance(profile, str) or not profile or not isinstance(settings, dict):
+        raise ValueError('invalid destination profile')
+    explicit = 'type' in settings
+    if explicit:
+        from repo_mirror.destination_profile import validate_profile
+        validate_profile(settings, 'github')
+    elif set(settings) != {'account_type'} or settings['account_type'] not in ('personal', 'organization'):
         raise ValueError('invalid destination profile')
     repositories = config['repositories']
     if not isinstance(repositories, list):
@@ -46,4 +52,7 @@ def normalize_config(config):
             item['destinations'] = {name.lower(): mapping}
         validate_source(item)
         sources.append(item)
-    return {'destination_account_type': settings['account_type'], 'sources': sources}
+    result = {'destination_account_type': 'personal' if explicit else settings['account_type'], 'sources': sources}
+    if explicit:
+        result['destination_profile'] = settings.copy()
+    return result
