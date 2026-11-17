@@ -62,6 +62,7 @@ class Scenario:
 
     def request(self, method, path, payload=None):
         self.calls.append((method, path, payload))
+        if path == '/api/v1/user': return {'login': 'mirror'}
         if method == 'POST':
             assert payload is not None
             if self.failure == 'create':

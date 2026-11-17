@@ -535,7 +535,9 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             'https://github.com/manoma080/mirror-scarletnx-ScarletNX',
             'https://github.com/manoma080/mirror-Cor3Duo-kirikae',
         ]
-        actual = json.loads((ROOT / 'config-forgejo.json').read_text())
+        config = json.loads((ROOT / 'config-forgejo.json').read_text())
+        from repo_mirror.forgejo_sync import parse_manifest
+        actual = [entry['url'] for entry in parse_manifest(config)]
         self.assertEqual(actual, expected)
         self.assertEqual(len(actual), 11)
         self.assertEqual(len({url.lower() for url in actual}), 11)

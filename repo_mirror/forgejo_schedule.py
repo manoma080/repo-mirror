@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from repo_mirror.forgejo_sync import SAFE_REASONS, parse_manifest
+from repo_mirror.config_json import unique_pairs
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
 SOURCE = re.compile(r'https://github\.com/manoma080/mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*')
@@ -47,8 +48,13 @@ def main(argv=None):
     parser.add_argument('--private-key-file')
     args = parser.parse_args(argv)
     try:
-        sources = json.loads(Path(args.manifest).read_text(encoding='utf-8'))
+        sources = json.loads(Path(args.manifest).read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
         validate_sources(sources)
+        if isinstance(sources, dict):
+            settings = next(iter(sources['destinations'].values()))
+            if 'account_type' in settings and (settings['account_type'] == 'organization') != args.organization:
+                raise ValueError('destination account type mismatch')
+        entries = parse_manifest(sources)
         if not re.fullmatch(r'[0-9]+', args.installation) or not 1 <= args.port <= 65535 or not 1 <= args.jobs <= 64:
             raise ValueError('invalid installation or port')
         if not math.isfinite(args.repository_timeout) or args.repository_timeout <= 0:
@@ -88,7 +94,7 @@ def main(argv=None):
                 snapshot = Path(directory) / 'sources.json'
                 snapshot.write_text(json.dumps(sources), encoding='utf-8')
                 failures = 0
-                pending = iter(enumerate(sources, 1))
+                pending = iter(enumerate((entry['url'] for entry in entries), 1))
                 active = {}
                 interrupted = False
                 def terminate(signum, frame):
@@ -202,7 +208,7 @@ def main(argv=None):
                         signal.signal(sig, handler)
                 if interrupted:
                     raise KeyboardInterrupt
-                print(f'Batch: {len(sources) - failures} succeeded, {failures} failed', flush=True)
+                print(f'Batch: {len(entries) - failures} succeeded, {failures} failed', flush=True)
                 return 1 if failures else 0
     except KeyboardInterrupt:
         print('Batch interrupted; active processes stopped', file=sys.stderr)

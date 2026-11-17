@@ -46,6 +46,7 @@ def exercise_rewrites_and_deletes_using_shared_snapshot(tmp_path, wipe, archive_
         base_url = 'http://127.0.0.1:3300'
         def token(self): return 'local'
         def request(self, method, path, payload=None):
+            if path == '/api/v1/user': return {'login': 'mirror'}
             if method == 'POST':
                 state['writes'].append('POST')
                 archive_name = payload['name']

@@ -198,12 +198,23 @@ class AppTokenProvider:
             account_type,
         )
         self.token, self.expires = None, 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._verified = None
+
+    def verified_snapshot(self):
+        with self._lock:
+            token = self()
+            if self._verified is None or self._verified[0] != token:
+                raise RuntimeError("GitHub App token owner is unverifiable")
+            return self._verified
 
     def __call__(self):
         with self._lock:
             if not self.token or time.time() >= self.expires - 300:
+                verified_owner, verified_type = self.owner, self.account_type
                 token, expires = self._mint()
+                if (self.owner, self.account_type) != (verified_owner, verified_type):
+                    raise ValueError("GitHub App configuration changed during token mint")
                 if (
                     not isinstance(token, str)
                     or not token.strip()
@@ -213,6 +224,7 @@ class AppTokenProvider:
                 ):
                     raise ValueError("invalid GitHub App token response")
                 self.token, self.expires = token, expires
+                self._verified = (token, verified_owner, verified_type)
             return self.token
 
     def _mint(self):
@@ -398,6 +410,24 @@ class API:
             method, url, body, {"Accept": "application/vnd.github+json", "Content-Type": "application/json"}
         )
         return json.loads(raw) if raw else None
+
+    def create_personal_repository(self, owner, data):
+        # Pin the actual credential across identity verification and creation;
+        # dynamic providers may otherwise refresh between the two requests.
+        if type(self._token) is AppTokenProvider:
+            token, verified_owner, verified_type = self._token.verified_snapshot()
+            if verified_type != "personal" or verified_owner.lower() != owner.lower():
+                raise RuntimeError("GitHub App installation owner does not match configured destination")
+        else:
+            token = self.token
+        pinned = API(token)
+        pinned.opener = self.opener
+        if type(self._token) is not AppTokenProvider:
+            identity = pinned.request("GET", GITHUB + "/user")
+            login = identity.get("login") if isinstance(identity, dict) else None
+            if not isinstance(login, str) or not login or login.lower() != owner.lower():
+                raise RuntimeError("authenticated GitHub user does not match configured destination")
+        return pinned.request("POST", GITHUB + "/user/repos", data)
 
     def pages(self, url):
         result = []

@@ -47,6 +47,18 @@ def launch(tmp_path, repo, helper, extra=None):
 
 
 class AutoUpdateIntegrationTests(unittest.TestCase):
+    def test_named_manifest_passes_through_standalone_launcher(self):
+        tmp = self.tmp_path
+        repo, helper = fixture(tmp)
+        config = {'destinations': {'local': {}}, 'repositories': [
+            {'source': {'url': 'https://github.com/manoma080/mirror-one', 'id': 11},
+             'mirrors': {'local': {'name': 'mirror-one', 'id': 22}}}]}
+        (repo / 'config-forgejo.json').write_text(json.dumps(config))
+        git(repo, 'add', '.'); git(repo, 'commit', '-m', 'named config')
+        result = launch(tmp, repo, helper)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(json.loads((tmp / 'result').read_text())[0]), config)
+
     def test_rejects_invalid_or_conflicting_sources_before_scheduler(self):
         tmp = self.tmp_path
         repo, helper = fixture(tmp)

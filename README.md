@@ -61,32 +61,21 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 
 ## Configure sources
 
-Edit [`config.json`](config.json). Each entry copies chosen repositories, or all public repositories owned by one user or organization.
-
-| Setting | Meaning |
-| --- | --- |
-| `destination_account_type` | `personal` (your own account) or `organization`. |
-| `type` | `github` or `forgejo`. |
-| `base_url` | The source site's HTTPS address. |
-| `owner` | The source user or organization name. |
-| `repos` | A list of repository names, or `"all"`. |
-| `prefix` | Optional text added before each mirror name. Default: `mirror-OWNER-`. |
-
-Example:
+Edit [`config.json`](config.json). Named configuration lists each source repository and its mirror explicitly:
 
 ```json
 {
-  "destination_account_type": "personal",
-  "sources": [
-    {"type": "forgejo", "base_url": "https://code.example.org", "owner": "alice", "repos": ["project-one"]},
-    {"type": "github", "base_url": "https://github.com", "owner": "bob", "repos": "all", "prefix": "bob-"}
+  "destinations": {"github": {"account_type": "personal"}},
+  "repositories": [
+    {"source": {"url": "https://github.com/alice/project", "id": 123},
+     "mirrors": {"github": {"name": "mirror-alice-project", "id": 456, "visibility": "private"}}}
   ]
 }
 ```
 
-The first entry creates `mirror-alice-project-one`. If two sources would create the same name, give them different prefixes. `"all"` means repositories the user owns, not repositories they starred.
+Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Set `account_type` to `personal` or `organization`; the destination owner remains configured through `DESTINATION_OWNER`. Source URLs may point to GitHub or a public Forgejo instance. Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
 
-For the GitHub destination path, optional per-repository mappings can pin numeric repository identities, for example `"destinations": {"project-one": {"source_id": 123, "destination_id": 456}}`. Mapping keys are lowercase source names; IDs must be positive integers. A pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. Omitting either pin preserves existing behavior. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check.
+Legacy `destination_account_type` and `sources` configurations remain supported, including `repos: "all"` (owned public repositories, not stars), custom `prefix`, and per-repository `destinations` mappings using `source_id` and `destination_id`. Do not mix the formats.
 
 ### Explicit relocation bindings
 
@@ -95,8 +84,8 @@ A reviewed relocation mapping preserves the **original** source marker and recov
 For a GitHub destination, use an explicit repository list and a mapping such as:
 
 ```json
-{"type":"github", "base_url":"https://github.com", "owner":"new-owner", "repos":["new-repo"],
- "destinations":{"new-repo":{"name":"mirror-new", "source_id":123, "destination_id":456,
+{"source":{"url":"https://github.com/new-owner/new-repo", "id":123},
+ "mirrors":{"github":{"name":"mirror-new", "id":456,
    "legacy":{"source_owner":"old-owner", "source_name":"old-repo", "destination_name":"mirror-old",
              "signature":"<64-lowercase-hex-characters>"}}}}
 ```

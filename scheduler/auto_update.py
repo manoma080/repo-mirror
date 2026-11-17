@@ -24,6 +24,15 @@ FORGEJO_SOURCE = re.compile(r'https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9_][A-
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
 
 
+def unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON key')
+        result[key] = value
+    return result
+
+
 def valid_source(source):
     if not isinstance(source, str) or source.endswith('.git'):
         return False
@@ -43,6 +52,36 @@ def valid_source(source):
 
 def valid_manifest(sources):
     """Validate the entire snapshot before running any downloaded scheduler."""
+    named = isinstance(sources, dict)
+    if named:
+        if set(sources) != {'destinations', 'repositories'}:
+            return False
+        profiles, repos = sources['destinations'], sources['repositories']
+        if not isinstance(profiles, dict) or len(profiles) != 1 or not isinstance(repos, list) or not repos:
+            return False
+        profile, settings = next(iter(profiles.items()))
+        if not isinstance(profile, str) or not profile or settings not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
+            return False
+        converted = []
+        for repo in repos:
+            if not isinstance(repo, dict) or set(repo) != {'source', 'mirrors'}:
+                return False
+            source, mirrors = repo['source'], repo['mirrors']
+            if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id'} or not isinstance(mirrors, dict) or set(mirrors) != {profile}:
+                return False
+            mirror = mirrors[profile]
+            if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy'} or not isinstance(source['url'], str):
+                return False
+            item = {'url': source['url'], 'destination_name': mirror.get('name', source['url'].rsplit('/', 1)[-1])}
+            if 'id' in source: item['source_id'] = source['id']
+            if 'id' in mirror: item['destination_id'] = mirror['id']
+            if 'legacy' in mirror:
+                legacy = mirror['legacy']
+                if not isinstance(legacy, dict) or set(legacy) != {'url', 'name', 'signature'}:
+                    return False
+                item.update(legacy_url=legacy['url'], legacy_destination_name=legacy['name'], signature=legacy['signature'])
+            converted.append(item)
+        sources = converted
     if not isinstance(sources, list) or not sources:
         return False
     identities, destinations = set(), set()
@@ -50,6 +89,14 @@ def valid_manifest(sources):
         if isinstance(item, str):
             url, old = item, item
             names = {url.rsplit('/', 1)[-1].lower()}
+        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id'} and {'url', 'destination_name'} <= set(item):
+            url = old = item['url']
+            name = item['destination_name']
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', name) or name in ('.', '..') or len(name) > 100:
+                return False
+            if any(type(item[k]) is not int or item[k] <= 0 for k in ('source_id', 'destination_id') if k in item):
+                return False
+            names = {name.lower()}
         elif isinstance(item, dict) and set(item) == {'url', 'source_id', 'destination_id', 'destination_name',
                                                      'legacy_url', 'legacy_destination_name', 'signature'}:
             if not isinstance(item['signature'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['signature']):
@@ -229,7 +276,7 @@ def main(argv=None):
                             raise ValueError('unsafe snapshot')
                         tar.extract(member, snapshot, filter='data')
                 manifest = snapshot / 'config-forgejo.json'
-                sources = json.loads(manifest.read_text(encoding='utf-8'))
+                sources = json.loads(manifest.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
                 if not valid_manifest(sources):
                     raise ValueError('invalid manifest')
                 if not (snapshot / 'repo_mirror' / 'forgejo_schedule.py').is_file():

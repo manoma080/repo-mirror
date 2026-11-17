@@ -66,6 +66,36 @@ def _matches_owner(source, kind, base, owner):
 
 def add_to_config(config, source_urls, destination="", visibility=None):
     """Add URLs and optional per-repository destination settings."""
+    if 'repositories' in config or 'destinations' in config:
+        from repo_mirror.config_named import normalize_config
+        normalize_config(config)
+        import copy
+        candidate = copy.deepcopy(config)
+        profile = next(iter(candidate['destinations']))
+        parsed = [parse_repo_url(part.strip()) for part in source_urls.split(',')]
+        identities = [tuple(x.lower() for x in row) for row in parsed]
+        if len(set(identities)) != len(identities):
+            raise ValueError('duplicate source repository')
+        if visibility not in (None, 'private', 'public'):
+            raise ValueError('invalid visibility')
+        if destination and (len(parsed) != 1 or len(destination) > 100 or not NAME.fullmatch(destination) or destination in ('.', '..')):
+            raise ValueError('custom destination requires one URL and a valid repository name')
+        for (kind, base, owner, name), identity in zip(parsed, identities):
+            entry = next((e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'])) == identity), None)
+            if entry is None:
+                entry = {'source': {'url': base + '/' + owner + '/' + name}, 'mirrors': {profile: {}}}
+                candidate['repositories'].append(entry)
+            mirror = entry['mirrors'][profile]
+            if destination:
+                mirror['name'] = destination
+            if visibility is not None:
+                mirror['visibility'] = visibility
+        normalize_config(candidate)
+        changed = candidate != config
+        if changed:
+            config.clear()
+            config.update(candidate)
+        return changed
     parts = source_urls.split(",")
     parsed = [parse_repo_url(part.strip()) for part in parts]
     identities = [tuple(part.lower() for part in item) for item in parsed]
@@ -77,14 +107,16 @@ def add_to_config(config, source_urls, destination="", visibility=None):
         raise ValueError("custom destination requires one URL and a valid repository name")
     changed = False
     for source_type, base_url, owner, name in parsed:
-        match = next(
-            (
-                s
-                for s in config["sources"]
-                if _matches_owner(s, source_type, base_url, owner)
-            ),
-            None,
-        )
+        matching_owners = [s for s in config["sources"]
+                           if _matches_owner(s, source_type, base_url, owner)]
+        # Prefer the source that already owns this repository. Named configs
+        # normalize to one source per repo, including multiple entries per owner.
+        match = next((s for s in matching_owners
+                      if s["repos"] != "all" and name.lower() in {r.lower() for r in s["repos"]}), None)
+        if match is None:
+            match = next((s for s in matching_owners if s["repos"] == "all"), None)
+        if match is None:
+            match = next(iter(matching_owners), None)
         if match is None:
             match = _source_for(source_type, base_url, owner, name)
             config["sources"].append(match)
@@ -108,6 +140,15 @@ def add_to_config(config, source_urls, destination="", visibility=None):
 
 def remove_from_config(config, source_urls):
     """Remove explicit entries; refuse exclusions from dynamically discovered owners."""
+    if 'repositories' in config or 'destinations' in config:
+        from repo_mirror.config_named import normalize_config
+        normalize_config(config)
+        identities = {tuple(x.lower() for x in parse_repo_url(part.strip())) for part in source_urls.split(',')}
+        kept = [entry for entry in config['repositories'] if tuple(x.lower() for x in parse_repo_url(entry['source']['url'])) not in identities]
+        changed = len(kept) != len(config['repositories'])
+        if changed:
+            config['repositories'] = kept
+        return changed
     parsed = [parse_repo_url(part.strip()) for part in source_urls.split(",")]
     for kind, base, owner, name in parsed:
         for source in config["sources"]:
@@ -167,7 +208,8 @@ def main(argv=None):
     if args.remove and (args.destination or args.visibility not in ("private", "unchanged")):
         raise ValueError("remove cannot be combined with destination settings")
     with open(args.config, encoding="utf-8") as f:
-        config = json.load(f)
+        from repo_mirror.config_json import unique_pairs
+        config = json.load(f, object_pairs_hook=unique_pairs)
     changed = (remove_from_config(config, args.urls) if args.remove else
                add_to_config(config, args.urls, args.destination, None if args.visibility == "unchanged" else args.visibility))
     if changed and not args.remove:
@@ -176,7 +218,8 @@ def main(argv=None):
         seen = set()
         requested = [parse_repo_url(part.strip()) for part in args.urls.split(",")]
         github_api, other_api = SourceAPI(os.environ.get("GH_TOKEN")), API()
-        for source in config["sources"]:
+        from repo_mirror.config_named import normalize_config
+        for source in normalize_config(config)["sources"]:
             validate_source(source)
             names = discover(source, github_api if source["type"] == "github" else other_api)
             if source["repos"] == "all":

@@ -304,17 +304,22 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
 
     recheck_pins()
     if repo is None:
-        endpoint = "/user/repos" if account_type == "personal" else f"/orgs/{qowner}/repos"
-        repo = dst.request(
-            "POST",
-            GITHUB + endpoint,
-            {
-                "name": dest_name,
-                "private": source.get("destinations", {}).get(name.lower(), {}).get("visibility", "private") != "public",
-                "auto_init": False,
-                "description": marker + " [repo-mirror:initializing:v1]",
-            },
-        )
+        payload = {
+            "name": dest_name,
+            "private": source.get("destinations", {}).get(name.lower(), {}).get("visibility", "private") != "public",
+            "auto_init": False,
+            "description": marker + " [repo-mirror:initializing:v1]",
+        }
+        if account_type == "personal" and isinstance(dst, GitHubAPI):
+            repo = dst.create_personal_repository(owner, payload)
+        else:
+            if account_type == "personal":
+                identity = dst.request("GET", GITHUB + "/user")
+                login = identity.get("login") if isinstance(identity, dict) else None
+                if not isinstance(login, str) or not login or login.lower() != owner.lower():
+                    raise RuntimeError("authenticated GitHub user does not match configured destination")
+            endpoint = "/user/repos" if account_type == "personal" else f"/orgs/{qowner}/repos"
+            repo = dst.request("POST", GITHUB + endpoint, payload)
         if repo.get("full_name", "").lower() != (owner + "/" + dest_name).lower():
             raise RuntimeError("created repository owner does not match configured destination")
     dst.request("PUT", target + "/actions/permissions", {"enabled": False})

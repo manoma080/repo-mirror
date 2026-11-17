@@ -11,6 +11,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote
 
 from repo_mirror.adhoc import add_to_config, one_time_sources
+from repo_mirror.config_named import normalize_config
 from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
 from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
@@ -65,10 +66,14 @@ def main(argv=None):
     ):
         raise ValueError("GH_TOKEN and valid DESTINATION_OWNER are required")
     with open(args.config, encoding="utf-8") as f:
-        config = json.load(f)
-    if not isinstance(config, dict):
-        raise ValueError("config must be an object")
-    account_type = os.environ.get("DESTINATION_ACCOUNT_TYPE", config.get("destination_account_type"))
+        from repo_mirror.config_json import unique_pairs
+        config = json.load(f, object_pairs_hook=unique_pairs)
+    named_config = isinstance(config, dict) and ('destinations' in config or 'repositories' in config)
+    config = normalize_config(config)
+    environment_type = os.environ.get("DESTINATION_ACCOUNT_TYPE") or None
+    if named_config and environment_type is not None and environment_type != config['destination_account_type']:
+        raise ValueError("destination account type mismatch")
+    account_type = environment_type or config.get("destination_account_type")
     if account_type not in ("personal", "organization"):
         raise ValueError("destination_account_type must be personal or organization")
     if app_id or private_key:

@@ -64,6 +64,8 @@ class ProvisionTests(unittest.TestCase):
                 self.repo = None
 
             def request(self, method, path, payload=None):
+                if path == "/api/v1/user":
+                    return {"login": "MIRROR"}
                 if method == "POST":
                     self.repo = dict(payload, id=1, full_name="mirror/project", has_actions=False)
                     return self.repo
