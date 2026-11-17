@@ -106,11 +106,22 @@ def safe_reason(exc, *, configuration=False):
     return 'unexpected sync failure'
 
 
+GITHUB_SOURCE = re.compile(
+    r'https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9_.-]{1,100})')
+
+
 def parse_source(value):
-    match = re.fullmatch(r'https://github\.com/(manoma080)/(mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*)', value)
-    if match and not match.group(2).endswith('.git'):
+    """Return an owner/name identity for a public mirror source.
+
+    GitHub sources may belong to any account, matching the GitHub runner; the
+    repository must be public because the Forgejo destination mirrors anonymous
+    content. Forgejo sources keep the host-qualified form.
+    """
+    match = GITHUB_SOURCE.fullmatch(value) if isinstance(value, str) else None
+    if match and not match.group(2).endswith('.git') and match.group(2) not in ('.', '..'):
         return '/'.join(match.groups())
     return forgejo_source_identity(value)
+
 
 
 def normalize_named(sources):

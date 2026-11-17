@@ -62,8 +62,7 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
     def test_rejects_invalid_or_conflicting_sources_before_scheduler(self):
         tmp = self.tmp_path
         repo, helper = fixture(tmp)
-        for sources in [['https://github.com/other/repo'],
-                        ['https://forge.example:99999/a/b'],
+        for sources in [['https://forge.example:99999/a/b'],
                         ['https://github.com.evil.example/a/b'],
                         ['https://forge.example/-owner/repo'],
                         ['https://forge.example/owner/-repo'],
@@ -75,6 +74,18 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
                 (tmp / 'result').unlink(missing_ok=True)
                 self.assertEqual(launch(tmp, repo, helper).returncode, 2)
                 self.assertFalse((tmp / 'result').exists())
+
+    def test_github_sources_outside_the_mirror_account_are_accepted(self):
+        # Parity with the GitHub runner: any configured GitHub repository is a
+        # valid source, not only this account's mirror-* repositories.
+        tmp = self.tmp_path
+        repo, helper = fixture(tmp)
+        sources = ['https://github.com/other/repo', 'https://github.com/octocat/Hello-World']
+        (repo / 'config-forgejo.json').write_text(json.dumps(sources))
+        git(repo, 'add', '.'); git(repo, 'commit', '-m', 'third-party sources')
+        result = launch(tmp, repo, helper)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(json.loads((tmp / 'result').read_text())[0]), sources)
 
     def test_forgejo_url_passes_unmodified_to_fetched_scheduler(self):
         tmp = self.tmp_path

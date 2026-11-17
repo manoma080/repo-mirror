@@ -22,7 +22,7 @@ from repo_mirror.forgejo_sync import (RELOCATION_FIELDS, RELOCATION_PREFIX, SAFE
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
-SOURCE = re.compile(r'https://github\.com/manoma080/mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*')
+SOURCE = re.compile(r'https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}')
 MIGRATION_REASONS = frozenset({
     'invalid relocation report',
     'source relocation is not verified',
