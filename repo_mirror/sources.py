@@ -57,6 +57,32 @@ def source_api_base(source):
     return GITHUB if base == "https://github.com" else base
 
 
+def verified_source_identity(source, name, expected_id, metadata):
+    """Return a canonical source URL only when the pinned identity is proven.
+
+    The caller must obtain metadata from the configured source using an
+    origin-restricted client. This function does not follow redirects itself.
+    """
+    from repo_mirror.adhoc import parse_repo_url
+
+    if (type(expected_id) is not int or expected_id <= 0 or not isinstance(metadata, dict)
+            or type(metadata.get('id')) is not int or metadata['id'] != expected_id):
+        raise ValueError('source repository id mismatch or missing')
+    url = metadata.get('html_url')
+    try:
+        kind, base, owner, repo = parse_repo_url(url)
+        original_base = source['base_url'].rstrip('/')
+        if source['type'] == 'github' and original_base == GITHUB:
+            original_base = 'https://github.com'
+        full_name = metadata.get('full_name')
+        if (kind != source['type'] or base.lower() != original_base.lower()
+                or not isinstance(full_name, str) or full_name != owner + '/' + repo):
+            raise ValueError('source repository identity is not verified')
+    except (TypeError, KeyError, ValueError):
+        raise ValueError('source repository identity is not verified') from None
+    return base + '/' + owner + '/' + repo
+
+
 def discover(source, api):
     """List the source repositories that a source entry expands to."""
     if source["repos"] != "all":

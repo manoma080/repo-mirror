@@ -286,14 +286,55 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     check_existing(repo, marker)
     initializing = repo is None or repo.get("description") == marker + " [repo-mirror:initializing:v1]"
     srcbase = source_api_base(source)
-    upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(name, safe='')}"
+    configured_name = name
+    source_name = name
+    upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(source_name, safe='')}"
     if "destination_id" in settings and (not isinstance(repo, dict) or
             type(repo.get("id")) is not int or repo["id"] != settings["destination_id"]):
         raise ValueError("destination repository id mismatch or missing")
     metadata = src.request("GET", upstream)
     if "source_id" in settings and (type(metadata.get("id")) is not int or metadata["id"] != settings["source_id"]):
         raise ValueError("source repository id mismatch")
-    clone_url = validate_source_clone_url(source, name, metadata)
+    relocation = None
+    original_source = source
+    try:
+        clone_url = validate_source_clone_url(source, source_name, metadata)
+    except ValueError:
+        if source['type'] != 'github' or not {'source_id', 'destination_id'} <= settings.keys() or source['repos'] == 'all':
+            raise
+        from repo_mirror.sources import verified_source_identity
+        try:
+            canonical = verified_source_identity(source, source_name, settings['source_id'], metadata)
+        except ValueError:
+            raise ValueError('source clone URL does not match verified source identity') from None
+        canonical_owner, canonical_name = urlparse(canonical).path.strip('/').split('/')
+        moved_source = {**source, 'owner': canonical_owner}
+        clone_url = validate_source_clone_url(moved_source, canonical_name, metadata)
+        if (canonical_owner.lower(), canonical_name.lower()) == (source['owner'].lower(), source_name.lower()):
+            raise ValueError('source clone URL does not match source identity')
+        # The pinned source ID still resolves, so the same repository answered
+        # under a new canonical name. Mirror into the *existing* destination
+        # using the original provenance marker and recovery binding, and report
+        # the move so the batch can update configuration afterwards.
+        relocation = {
+            'source_origin': srcbase.rstrip('/'),
+            'source_id': settings['source_id'],
+            'original_owner': source['owner'],
+            'original_name': source_name,
+            'owner': canonical_owner,
+            'name': canonical_name,
+            'destination': {'profile': source.get('destination_profile'),
+                            'owner': owner, 'name': dest_name,
+                            'id': settings['destination_id']},
+        }
+        print(
+            f"source relocation detected source_id={settings['source_id']} target=destination",
+            file=sys.stderr,
+            flush=True,
+        )
+        source = moved_source
+        source_name = canonical_name
+        upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(source_name, safe='')}"
     def recheck_pins():
         # These API reads narrow, but cannot eliminate, the TOCTOU window.
         if "source_id" in settings:
@@ -399,14 +440,18 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         dst = _IdentityGuardedDestination(raw_dst, check_release_pins)
     if "legacy" in settings:
         historical_target = f"{GITHUB}/repos/{qowner}/{quote(legacy['destination_name'], safe='')}"
-        mirror_releases(source, name, owner, src, dst, upstream, target,
+        mirror_releases(source, source_name, owner, src, dst, upstream, target,
                         source_marker(historical_source, historical_name), initializing=initializing, journal=journal,
-                        recovery_target=historical_target, journal_source=historical_source, journal_name=historical_name)
+                        recovery_target=historical_target, journal_source=historical_source, journal_name=historical_name,
+                        settings_name=configured_name)
     else:
-        mirror_releases(source, name, owner, src, dst, upstream, target, marker,
-                        initializing=initializing, journal=journal)
+        mirror_releases(source, source_name, owner, src, dst, upstream, target, marker,
+                        initializing=initializing, journal=journal, settings_name=configured_name,
+                        journal_source=original_source if relocation else None,
+                        journal_name=configured_name if relocation else None)
     if initializing:
         dst.request("PATCH", target, {"description": marker})
+    return relocation
 
 
 def valid_source_release_tag(release):
@@ -672,11 +717,33 @@ def verify_empty_body_converged(src, dst, upstream, target, release, *, empty_fo
 
 
 def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, initializing, journal=None,
-                    validate_snapshot=None, recovery_target=None, journal_source=None, journal_name=None):
+                    validate_snapshot=None, recovery_target=None, journal_source=None, journal_name=None,
+                    journal_identity=None, settings_name=None):
     """Apply the release policy independently of repository and Git setup."""
     recovery_target = recovery_target or target
     journal_source = journal_source or source
     journal_name = journal_name or name
+    settings = source.get("destinations", {}).get((settings_name or name).lower(), {})
+    if journal_identity is None and {"source_id", "destination_id"} <= settings.keys():
+        parsed_target = urlparse(target)
+        journal_identity = (source["base_url"], settings["source_id"],
+                            f"{parsed_target.scheme}://{parsed_target.netloc}", settings["destination_id"])
+
+    def failure_keys(tag, asset):
+        legacy = journal.key(journal_source, journal_name, owner, tag, asset)
+        stable = journal.id_key(*journal_identity, tag, asset) if journal_identity else legacy
+        return legacy, stable
+
+    def failed_release(tag, failures):
+        prefixes = {key[:64] for key in failure_keys(tag, "")}
+        return any(key[:64] in prefixes for key in failures)
+
+    def asset_key(tag, asset):
+        legacy, stable = failure_keys(tag, asset)
+        if legacy != stable:
+            journal.migrate_failure(legacy, stable)
+        return stable
+
     if source.get("type") == "github" and isinstance(src, GitHubSourceAPI):
         src = ForgejoSourceAdapter(source["owner"] + "/" + name, src.source_token, api=src)
         if upstream != src.base:
@@ -736,11 +803,11 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
     if initializing or len(releases) <= 1:
         selected = list(releases)
     else:
-        failed_releases = {key.split(":", 1)[0] for key in journal.failures} if journal else set()
+        failures = journal.failures if journal else set()
         failed_tags = {
             r["tag_name"]
             for r in releases
-            if journal and journal.key(journal_source, journal_name, owner, r["tag_name"], "")[:64] in failed_releases
+            if journal and failed_release(r["tag_name"], failures)
         }
         selected = select_existing_releases(
             releases, get_destination_releases(), failed_tags, marker, target, known_draft_tags, recovery_target
@@ -814,10 +881,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 validate_release_source = getattr(dst, "validate_release_source", None)
                 if callable(validate_release_source):
                     if getattr(dst, "verify_empty_body_read_only", False) and release.get("body") in (None, "", " "):
-                        failed = journal and any(
-                            key.split(":", 1)[0] == journal.key(journal_source, journal_name, owner, tag, "")[:64]
-                            for key in journal.failures
-                        )
+                        failed = journal and failed_release(tag, journal.failures)
                         converged = None if failed else verify_empty_body_converged(
                             src, dst, upstream, target, release, empty_forgejo_target=empty_forgejo_target)
                         if converged is not None:
@@ -1514,9 +1578,12 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 upload_failures = 0
                 first_upload_status = None
                 uploaded = updated = skipped = retried = 0
-                ordered_assets = (
-                    journal.retry_order(journal_source, journal_name, owner, tag, source_assets) if journal else source_assets
-                )
+                if journal:
+                    keys = {asset["name"]: asset_key(tag, asset["name"]) for asset in source_assets}
+                    failures = journal.failures
+                    ordered_assets = sorted(source_assets, key=lambda asset: keys[asset["name"]] not in failures)
+                else:
+                    ordered_assets = source_assets
                 for asset_index, asset in enumerate(ordered_assets, 1):
                     print(
                         f"asset {asset_index}/{len(ordered_assets)} started asset_name={safe_label(asset.get('name'))}",
@@ -1524,7 +1591,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         flush=True,
                     )
                     with timed(f"asset asset_name={safe_label(asset.get('name'))}"):
-                        key = journal.key(journal_source, journal_name, owner, tag, asset["name"]) if journal else None
+                        key = keys[asset["name"]] if journal else None
                         was_journaled = journal is not None and key in journal.failures
                         previous = by_name.get(asset["name"])
                         source_hash = asset.get("digest")
@@ -1932,7 +1999,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     latest_read_only = False
                 if journal:
                     for asset_name in {asset["name"] for asset in source_assets} | observed_starter_names:
-                        key = journal.key(journal_source, journal_name, owner, tag, asset_name)
+                        key = asset_key(tag, asset_name)
                         if key in journal.failures:
                             journal.set(key, False)
                 print(f"release {release_index}/{len(selected)} completed", file=sys.stderr, flush=True)

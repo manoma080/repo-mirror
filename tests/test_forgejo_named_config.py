@@ -47,9 +47,10 @@ class NamedConfigTests(unittest.TestCase):
         source = Mock()
         source.request.return_value = {'id': 99, 'full_name': 'a/b', 'clone_url': identity + '.git'}
         destination = Mock()
-        with patch('repo_mirror.forgejo_sync.PublicForgejoSourceAdapter', return_value=source):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, patch('repo_mirror.forgejo_sync.PublicForgejoSourceAdapter', return_value=source):
             result = _sync_requested(SimpleNamespace(port=3300, owner='dest'), [identity], destination,
-                                     None, 'token', 'x' * 32, '/unused', mappings={identity: entry})
+                                     None, 'token', 'x' * 32, directory, mappings={identity: entry})
         self.assertEqual(result, 1)
         source.request.assert_called_once()
         destination.begin_initialization.assert_not_called()

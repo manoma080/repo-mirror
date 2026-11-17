@@ -31,6 +31,8 @@ class ForgejoSourceAdapter:
         self.base = f'https://api.github.com/repos/{owner}/{repo}'
         self.browser_prefix = f'/{owner}/{repo}/releases/download/'
         self.api = api if api is not None else SourceAPI(token)
+        if isinstance(self.api, SourceAPI):
+            self.api.restrict_origin('https://api.github.com')
         self.client = client if client is not None else GitHubReleases(owner_repo, token)
         if client is None:
             self.client.api.opener = build_opener(ProxyHandler({}), _AssetRedirect())

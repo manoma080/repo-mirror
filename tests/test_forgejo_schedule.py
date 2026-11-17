@@ -18,6 +18,35 @@ class ScheduleTest(unittest.TestCase):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 validate_sources(['https://localhost/ok/first', source])
 
+    def test_scheduler_reports_relocation_failure_without_losing_safe_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'; secret.write_text('x' * 32); secret.chmod(0o600)
+            journals = tmp / 'journals'; journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources'; manifest.write_text(json.dumps(['https://localhost/a/b']))
+            worker = tmp / 'worker'
+            worker.write_text('#!/bin/sh\nprintf "%s\\n" "FORGEJO_FAILURE: source relocation requires durable migration state and authoritative config publication" >&2\nexit 1\n')
+            worker.chmod(0o700)
+            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--sync-python', str(worker)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('source relocation requires durable migration state and authoritative config publication', result.stdout)
+
+    def test_scheduler_preserves_manifest_bytes_for_remote_cas(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'; secret.write_text('x' * 32); secret.chmod(0o600)
+            journals = tmp / 'journals'; journals.mkdir(mode=0o700)
+            original = b'[\n  "https://localhost/a/b"\n]\n'
+            manifest = tmp / 'sources'; manifest.write_bytes(original)
+            worker = tmp / 'worker'
+            worker.write_text('#!/bin/sh\nwhile [ "$1" != "--config" ]; do shift; done\ncp "$2" "$CAPTURE"\n')
+            worker.chmod(0o700)
+            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--sync-python', str(worker)]
+            result = subprocess.run(cmd, env={**os.environ, 'CAPTURE': str(tmp / 'capture')}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((tmp / 'capture').read_bytes(), original)
+
     def test_public_forgejo_worker_does_not_require_github_auth(self):
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
