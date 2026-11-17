@@ -84,7 +84,8 @@ if canonical:
 OLD = 'https://git.example/old/repo'
 NEW = 'https://git.example/new/renamed'
 SECRET = 'fixture-signing-secret-0123456789abcdef'
-MARKER = '[repo-mirror: forgejo:https://git.example/old/repo]'
+# Forgejo destinations carry the Forgejo marker format, not the GitHub one.
+MARKER = 'repo-mirror-source: git.example/old/repo'
 
 
 def document(mirror, url=OLD, source_id=11):

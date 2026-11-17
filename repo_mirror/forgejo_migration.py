@@ -29,10 +29,10 @@ import os
 from repo_mirror.config_json import unique_pairs
 from repo_mirror.forgejo_automatic_transition import prepare_source_transition
 from repo_mirror.forgejo_source_adapter import PublicForgejoSourceAdapter
+from repo_mirror.forgejo_git import _source_marker
 from repo_mirror.forgejo_sync import parse_manifest, verify_source_pin
 from repo_mirror.migrations import MigrationTransaction, blob_sha
 from repo_mirror.migrations_store import build_entry
-from repo_mirror.sources import check_existing, source_marker
 
 CONFIG_PATH = 'config-forgejo.json'
 
@@ -181,13 +181,21 @@ class _ForgejoPolicy:
                 or repo.get('private') is not True):
             raise MigrationRefused('destination identity mismatch')
         recovery = entry['recovery']
-        marker = source_marker({'type': _provider(recovery['source_origin']),
-                                'base_url': recovery['source_origin'],
-                                'owner': recovery['source_owner']}, recovery['source_name'])
-        try:
-            check_existing(repo, marker)
-        except RuntimeError:
-            raise MigrationRefused('destination identity mismatch') from None
+        # Forgejo destinations carry the Forgejo marker format
+        # ('repo-mirror-source: host/owner/repo'), built from the *original*
+        # recovery binding so a move never invalidates it.
+        if recovery['source_origin'].lower() == 'https://github.com':
+            marker_source = f"{recovery['source_owner']}/{recovery['source_name']}"
+        else:
+            marker_source = (f"{recovery['source_origin'].rstrip('/')}/"
+                             f"{recovery['source_owner']}/{recovery['source_name']}")
+        marker = _source_marker(marker_source)
+        # Forgejo keeps a third, post-initialization marker form that the shared
+        # GitHub check does not know about.
+        allowed = (marker, marker + ' [repo-mirror:initializing:v1]',
+                   marker + ' [repo-mirror:initialized:v1]')
+        if repo.get('description') not in allowed:
+            raise MigrationRefused('destination identity mismatch')
 
     def _current_name(self, repository, configuration, entry):
         """Return the name the pinned destination currently has, by ID."""
