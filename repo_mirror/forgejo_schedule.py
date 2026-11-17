@@ -15,15 +15,51 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from repo_mirror.forgejo_sync import SAFE_REASONS, parse_manifest
+from repo_mirror import forgejo_migration
 from repo_mirror.config_json import unique_pairs
+from repo_mirror.forgejo_sync import (RELOCATION_FIELDS, RELOCATION_PREFIX, SAFE_REASONS,
+                                      parse_manifest)
+from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
 SOURCE = re.compile(r'https://github\.com/manoma080/mirror-[A-Za-z0-9_][A-Za-z0-9_.-]*')
+MIGRATION_REASONS = frozenset({
+    'invalid relocation report',
+    'source relocation is not verified',
+    'source pin mismatch',
+    'destination missing',
+    'destination identity mismatch',
+    'destination collision',
+    'destination rename failed',
+    'configuration changed by another writer',
+    'configuration publication failed',
+    'configuration publication is not configured',
+    'migration record missing',
+    'migration state inconsistent',
+})
 
 
 def validate_sources(sources):
     parse_manifest(sources)
+
+
+def parse_relocation(raw):
+    """Accept only the exact relocation record the worker protocol defines."""
+    try:
+        value = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (not isinstance(value, dict) or set(value) != RELOCATION_FIELDS
+            or any(not isinstance(value[key], str) or not value[key] for key in ('url', 'canonical'))
+            or any(type(value[key]) is not int or value[key] <= 0 for key in ('source_id', 'destination_id'))):
+        return None
+    return value
+
+
+def refusal(exc):
+    """Report only allowlisted migration failure text."""
+    message = str(exc)
+    return message if isinstance(exc, forgejo_migration.MigrationRefused) and message in MIGRATION_REASONS else 'unexpected migration failure'
 
 
 def main(argv=None):
@@ -46,9 +82,13 @@ def main(argv=None):
     parser.add_argument('--installation', default='178997310')
     parser.add_argument('--app-id')
     parser.add_argument('--private-key-file')
+    parser.add_argument('--config-repo', metavar='OWNER/NAME',
+                        help='GitHub repository holding the authoritative config-forgejo.json')
+    parser.add_argument('--config-account-type', default='personal', choices=['personal', 'organization'])
     args = parser.parse_args(argv)
     try:
-        sources = json.loads(Path(args.manifest).read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
+        manifest_bytes = Path(args.manifest).read_bytes()
+        sources = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
         validate_sources(sources)
         if isinstance(sources, dict):
             settings = next(iter(sources['destinations'].values()))
@@ -66,6 +106,8 @@ def main(argv=None):
             raise ValueError('invalid repository timeout')
         if bool(args.app_id) != bool(args.private_key_file):
             raise ValueError('incomplete app credentials')
+        if args.config_repo and not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.config_repo):
+            raise ValueError('invalid configuration repository')
         secret_fd = os.open(args.timestamp_secret_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
         try:
             secret_info = os.fstat(secret_fd)
@@ -73,8 +115,15 @@ def main(argv=None):
                 raise ValueError('invalid recovery secret file')
             # Sync strips surrounding whitespace before using the UTF-8 secret.
             # Count the actual value, not a trailing newline from provisioning.
-            if len(os.read(secret_fd, 4096).strip()) < 32:
+            raw_secret = os.read(secret_fd, 4096)
+            if len(raw_secret.strip()) < 32:
                 raise ValueError('recovery secret too short')
+            try:
+                secret = raw_secret.strip().decode('utf-8')
+            except UnicodeDecodeError:
+                raise ValueError('invalid recovery secret file') from None
+            if '\x00' in secret:
+                raise ValueError('invalid recovery secret file')
             for other in (args.manifest, args.token_file, args.private_key_file):
                 if other and os.path.exists(other):
                     info = os.stat(other)
@@ -97,7 +146,41 @@ def main(argv=None):
                 return 75
             with tempfile.TemporaryDirectory(prefix='forgejo-schedule-') as directory:
                 snapshot = Path(directory) / 'sources.json'
-                snapshot.write_text(json.dumps(sources), encoding='utf-8')
+                # Preserve the validated bytes: remote configuration CAS compares
+                # against the original Git blob, not reserialized JSON.
+                snapshot.write_bytes(manifest_bytes)
+                try:
+                    recorded = MigrationsStore(FileMigrations(os.path.join(args.journal_dir, 'migrations.json')),
+                                               secret).pending()
+                except (OSError, ValueError, TypeError):
+                    print('Batch configuration or lock error', file=sys.stderr)
+                    return 2
+                migration = None
+                if args.config_repo:
+                    # Build lazily: an ordinary batch must not require the
+                    # configuration-publication credentials.
+                    migration = forgejo_migration.DeferredMigration(
+                        lambda: forgejo_migration.build_migration(args, secret))
+                resumed: list = []
+                published = None
+                if recorded:
+                    if migration is None:
+                        print('Migration: FAILED: configuration publication is not configured', flush=True)
+                        return 1
+                    try:
+                        resumed, published = migration.resume()
+                    except (forgejo_migration.MigrationRefused, OSError, ValueError) as exc:
+                        print(f'Migration: FAILED: {refusal(exc)}', flush=True)
+                        return 1
+                    except Exception:
+                        print('Migration: FAILED: unexpected migration failure', flush=True)
+                        return 1
+                # A resumed intent already synced its repository; do not repeat
+                # that sync against a configuration the transaction just changed.
+                resumed_keys = {(entry['source']['origin'].lower(), entry['source']['id'])
+                                for entry in resumed}
+                document = manifest_bytes if published is None else published
+                relocations = []
                 failures = 0
                 pending = iter(enumerate((entry['url'] for entry in entries), 1))
                 active = {}
@@ -121,6 +204,12 @@ def main(argv=None):
                                 break
                             if isinstance(source, dict):
                                 source = source['url']
+                            entry_meta = entries[index - 1]
+                            if (entry_meta.get('source_id') is not None
+                                    and (entry_meta['url'].rsplit('/', 2)[0].lower(),
+                                         entry_meta['source_id']) in resumed_keys):
+                                print(f'Repository {index}: OK (migration resumed)', flush=True)
+                                continue
                             command = [args.sync_python, '-m', 'repo_mirror.forgejo_sync', '--config', str(snapshot),
                                        '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port),
                                        '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
@@ -174,19 +263,33 @@ def main(argv=None):
                             except ProcessLookupError:
                                 pass
                             reason = 'helper or sync process failed; check helper configuration and credentials'
+                            relocation = None
+                            invalid_report = False
+                            reported = False
                             diagnostics.seek(0)
                             for line in diagnostics:
+                                if line.startswith(RELOCATION_PREFIX.encode('ascii')):
+                                    parsed = parse_relocation(line[len(RELOCATION_PREFIX):].rstrip(b'\r\n'))
+                                    if parsed is None:
+                                        invalid_report = True
+                                    else:
+                                        relocation = parsed
+                                    continue
                                 prefix = b'FORGEJO_FAILURE: '
-                                if line.startswith(prefix):
+                                if line.startswith(prefix) and not reported:
                                     candidate = line[len(prefix):].rstrip(b'\r\n').decode('utf-8', errors='replace')
                                     if candidate in SAFE_REASONS:
                                         reason = candidate
-                                        break
+                                        reported = True
                             diagnostics.close()
                             del active[process]
-                            ok = status == 0
+                            ok = status == 0 and not invalid_report
+                            if invalid_report:
+                                reason = 'invalid relocation report'
                             failures += not ok
                             print(f'Repository {index}: {"OK" if ok else "FAILED: " + reason}', flush=True)
+                            if ok and relocation is not None:
+                                relocations.append((index, relocation))
                         if active:
                             time.sleep(0.05)
                 finally:
@@ -213,6 +316,26 @@ def main(argv=None):
                         signal.signal(sig, handler)
                 if interrupted:
                     raise KeyboardInterrupt
+                if relocations:
+                    if migration is None:
+                        for index, _ in sorted(relocations):
+                            failures += 1
+                            print(f'Migration {index}: FAILED: configuration publication is not configured', flush=True)
+                    else:
+                        for index, relocation in sorted(relocations):
+                            if interrupted:
+                                raise KeyboardInterrupt
+                            try:
+                                document = migration.apply(document, relocation)
+                            except (forgejo_migration.MigrationRefused, OSError, ValueError) as exc:
+                                failures += 1
+                                print(f'Migration {index}: FAILED: {refusal(exc)}', flush=True)
+                                break
+                            except Exception:
+                                failures += 1
+                                print(f'Migration {index}: FAILED: unexpected migration failure', flush=True)
+                                break
+                            print(f'Migration {index}: OK', flush=True)
                 print(f'Batch: {len(entries) - failures} succeeded, {failures} failed', flush=True)
                 return 1 if failures else 0
     except KeyboardInterrupt:

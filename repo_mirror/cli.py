@@ -96,6 +96,8 @@ def main(argv=None):
     for source in sources:
         validate_source(source)
     github_src, other_src, dst = SourceAPI(token), API(), API(token)
+    if callable(getattr(github_src, 'restrict_origin', None)):
+        github_src.restrict_origin('https://api.github.com')
     seen = set()
     plan = []
     discovery_failures = 0
@@ -180,6 +182,7 @@ def main(argv=None):
         except Exception as exc:
             failures.append((repo_index, error_detail(exc)))
     succeeded = 0
+    relocations = []
     original_stdout, original_stderr = sys.stdout, sys.stderr
     stdout_router, stderr_router = _ThreadStream(original_stdout), _ThreadStream(original_stderr)
 
@@ -188,6 +191,7 @@ def main(argv=None):
         log = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         stdout_router.local.stream = stderr_router.local.stream = log
         src = github_src if source["type"] == "github" else other_src
+        relocation = None
         try:
             print(
                 f"\n\n===== Repository {repo_index}/{len(plan)}: {safe_label(source.get('owner'))}/{safe_label(name)} =====",
@@ -201,9 +205,11 @@ def main(argv=None):
             )
             try:
                 if journal is None:
-                    mirror_repository(source, name, owner, src, dst, token, account_type)
+                    relocation = mirror_repository(source, name, owner, src, dst, token, account_type)
                 else:
-                    mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
+                    relocation = mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
+                if isinstance(relocation, dict):
+                    print(f"repository {repo_index} source relocation detected; migration deferred", file=sys.stderr, flush=True)
                 detail = None
                 print(f"repository {repo_index}/{len(plan)} completed", file=sys.stderr, flush=True)
             except Exception as exc:
@@ -217,7 +223,7 @@ def main(argv=None):
             raise
         finally:
             del stdout_router.local.stream, stderr_router.local.stream
-        return repo_index, detail, log
+        return repo_index, detail, log, relocation
 
     sys.stdout, sys.stderr = stdout_router, stderr_router
     processing_started = time.monotonic()
@@ -231,7 +237,7 @@ def main(argv=None):
                 for future in completed:
                     item = pending.pop(future)
                     try:
-                        repo_index, detail, log = future.result()
+                        repo_index, detail, log, relocation = future.result()
                     except Exception as exc:
                         failures.append((item[0], error_detail(exc)))
                         item = next(items, None)
@@ -250,7 +256,13 @@ def main(argv=None):
                             log.close()
                         except Exception as exc:
                             detail = detail or error_detail(exc)
-                    if detail is None:
+                    if detail is None and isinstance(relocation, dict):
+                        # The copy succeeded; the configuration change is a
+                        # separate, deferred transaction that must be recorded
+                        # durably before any destination rename.
+                        relocations.append((repo_index, relocation))
+                        succeeded += 1
+                    elif detail is None:
                         succeeded += 1
                     else:
                         failures.append((repo_index, detail))
@@ -262,13 +274,58 @@ def main(argv=None):
         counter = REPOSITORY_TIME.get()
         if counter is not None and ready:
             counter[0] += time.monotonic() - processing_started
+    relocations.sort(key=lambda item: item[0])
+    # A detected move is only a plan: renaming the destination and publishing
+    # the updated configuration is a separate, journaled transaction that must
+    # be resumable after a crash. Without a durable management store nothing is
+    # renamed and the relocation stays reported.
+    migration_failures = []
+    deferral = 'management migration store unavailable'
+    transaction = None
+    if named_config:
+        try:
+            from repo_mirror.github_migration import transaction_from_environment
+            transaction = transaction_from_environment(os.environ, args.config, owner)
+        except Exception as exc:
+            if relocations:
+                migration_failures.append(f"migration store unavailable: {error_detail(exc)}")
+    else:
+        deferral = 'configuration format does not support automatic migration'
+    if transaction is None:
+        for repo_index, _ in relocations:
+            print(
+                f"repository {repo_index} migration deferred: {deferral}",
+                file=sys.stderr,
+                flush=True,
+            )
+    else:
+        try:
+            resumed = transaction.recover()
+            if resumed:
+                print(f"migration recovery resumed={resumed}", file=sys.stderr, flush=True)
+        except Exception as exc:
+            detail = error_detail(exc)
+            migration_failures.append(f"migration recovery failed: {detail}")
+            print(f"migration recovery failed: {detail}", file=sys.stderr, flush=True)
+        for repo_index, relocation in relocations:
+            try:
+                with timed(f"step migration source={repo_index}"):
+                    entry = transaction.migrate(relocation)
+                if entry is None:
+                    print(f"repository {repo_index} migration already applied", file=sys.stderr, flush=True)
+                else:
+                    print(f"repository {repo_index} migration completed", file=sys.stderr, flush=True)
+            except Exception as exc:
+                detail = error_detail(exc)
+                migration_failures.append(f"repository {repo_index} migration failed: {detail}")
+                print(f"repository {repo_index} migration failed: {detail}", file=sys.stderr, flush=True)
     print("\n===== Summary =====", file=sys.stderr, flush=True)
     print(
         f"summary sources={len(sources)} discovery_failed={discovery_failures} repositories={len(plan)} succeeded={succeeded} failed={len(failures)}",
         file=sys.stderr,
         flush=True,
     )
-    if failures or discovery_failures:
+    if failures or discovery_failures or migration_failures:
         for repo_index, kind in failures:
             source_index, source, name = plan[repo_index - 1]
             print(
@@ -276,4 +333,10 @@ def main(argv=None):
                 file=sys.stderr,
                 flush=True,
             )
-        raise RuntimeError(f"{discovery_failures} sources and {len(failures)} repositories failed")
+        for detail in migration_failures:
+            print(f"migration failed: {detail}", file=sys.stderr, flush=True)
+        raise RuntimeError(
+            f"{discovery_failures} sources and {len(failures)} repositories failed"
+            + (f" and {len(migration_failures)} migrations failed" if migration_failures else "")
+        )
+    return sorted(relocations, key=lambda item: item[0])

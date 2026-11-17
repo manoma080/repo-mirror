@@ -176,6 +176,8 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
     forgejo_clients = {}
     def source_client(source):
         if source['type'] == 'github':
+            if callable(getattr(github_source, 'restrict_origin', None)):
+                github_source.restrict_origin('https://api.github.com')
             return github_source
         if not isinstance(forgejo_source, API):
             return forgejo_source  # injected test/provider implementation
@@ -407,6 +409,8 @@ def main(argv=None):
         seen = set()
         requested = [parse_repo_url(part.strip()) for part in args.urls.split(",")]
         github_api, other_api = SourceAPI(os.environ.get("GH_TOKEN")), API()
+        if callable(getattr(github_api, 'restrict_origin', None)):
+            github_api.restrict_origin('https://api.github.com')
         from repo_mirror.config_named import normalize_config
         for source in normalize_config(config)["sources"]:
             validate_source(source)

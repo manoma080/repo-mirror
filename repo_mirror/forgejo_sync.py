@@ -68,6 +68,7 @@ SAFE_REASONS = CONFLICT_REASONS | GIT_REASONS | CONFIG_REASONS | frozenset({
     'Forgejo API request failed', 'remote API authentication or authorization failed',
     'remote API resource not found', 'remote API request failed',
     'network or API transport failure', 'unexpected sync failure',
+    'source relocation requires durable migration state and authoritative config publication',
 })
 
 
@@ -82,6 +83,8 @@ def safe_reason(exc, *, configuration=False):
             return errors[0].args[0]
         return 'unexpected sync failure'
     message = str(exc)
+    if type(exc) is ValueError and message == 'source relocation requires durable migration state and authoritative config publication':
+        return message
     if isinstance(exc, SyncConflict) and message in CONFLICT_REASONS:
         return message
     if type(exc) is RuntimeError and message in GIT_REASONS:
@@ -396,7 +399,8 @@ def main(argv=None):
                 with journal_lock(args.journal_dir, shared=True) as journal_dir:
                     if entry:
                         result |= _sync_requested(args, [identity], dest, token, local_token, secret, journal_dir,
-                                                  mappings={identity: entry})
+                                                  mappings={identity: entry},
+                                                  configured=configured if isinstance(configured, dict) else None)
                     else:
                         result |= _sync_requested(args, [identity], dest, token, local_token, secret, journal_dir)
         return result
@@ -405,31 +409,97 @@ def main(argv=None):
         return 2
 
 
-def _sync_requested(args, requested, dest, token, local_token, secret, journal_dir, *, mappings=None):
+RELOCATION_PREFIX = 'FORGEJO_RELOCATION: '
+RELOCATION_FIELDS = frozenset({'url', 'canonical', 'source_id', 'destination_id'})
+
+
+def report_relocation(relocation):
+    """Emit the machine-readable relocation report the scheduler consumes."""
+    if (not isinstance(relocation, dict) or set(relocation) != RELOCATION_FIELDS
+            or any(not isinstance(relocation[key], str) or not relocation[key] for key in ('url', 'canonical'))
+            or any(type(relocation[key]) is not int or relocation[key] <= 0 for key in ('source_id', 'destination_id'))):
+        raise ValueError('invalid relocation report')
+    print(RELOCATION_PREFIX + json.dumps(relocation, sort_keys=True), file=sys.stderr, flush=True)
+
+
+def source_pipeline(url, token):
+    """Return (source, source token, adapter, repository name) for one source URL."""
+    base, owner, name = url.rsplit('/', 2)
+    if base.lower() == 'https://github.com':
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': owner}
+        source_api = SourceAPI(token)
+        source_api.restrict_origin('https://api.github.com')
+        return source, token, ForgejoSourceAdapter(f'{owner}/{name}', token, api=source_api), name
+    source = {'type': 'forgejo', 'base_url': base, 'owner': owner, 'repos': [name]}
+    return source, None, PublicForgejoSourceAdapter(url, api=SourceAPI(None)), name
+
+
+def _source_url(identity, entry):
+    if entry is not None:
+        return entry['url']
+    return identity if identity.startswith('https://') else 'https://github.com/' + identity
+
+
+def resolve_relocation(configured, identity, metadata, port, owner, secret):
+    """Validate a live pinned move; return (effective entry, canonical identity, report).
+
+    The destination keeps its configured name so the worker can keep mirroring
+    into the *existing* repository; only an auto-derived name follows the source.
+    Publication of the signed candidate is the scheduler's job, never the worker's.
+    """
+    from repo_mirror.forgejo_automatic_transition import prepare_source_transition
+    entries = parse_manifest(configured)
+    indexes = [index for index, item in enumerate(entries) if item['identity'] == identity]
+    failure = ValueError('source relocation requires durable migration state and authoritative config publication')
+    if len(indexes) != 1:
+        raise failure
+    index = indexes[0]
+    current = entries[index]
+    try:
+        candidate = prepare_source_transition(configured, index, metadata, port, owner, secret)
+        moved = parse_manifest(candidate)[index]
+    except ValueError:
+        raise failure from None
+    if moved['url'] == current['url'] or 'legacy_identity' not in moved:
+        raise failure
+    effective = {**moved, 'destination_name': current['destination_name']}
+    report = {'url': current['url'], 'canonical': moved['url'],
+              'source_id': current['source_id'], 'destination_id': current['destination_id']}
+    return effective, moved['url'], report
+
+
+def _sync_requested(args, requested, dest, token, local_token, secret, journal_dir, *, mappings=None, configured=None):
     failures = []
     for identity in requested:
         entry = (mappings or {}).get(identity)
         name = entry['destination_name'] if entry else identity.rsplit('/', 1)[-1]
-        source_name = identity.rsplit('/', 1)[-1]
         recovery_identity = entry.get('legacy_identity', identity) if entry else identity
+        relocation = None
         try:
             if entry and 'legacy_identity' in entry:
                 from repo_mirror.migration_attestation import forgejo_claim, verify
                 verify(forgejo_claim(entry, args.port, args.owner), entry.get('signature'), secret)
             journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{recovery_identity.lower()}'.encode()).hexdigest()
             journal = FailureJournal(os.path.join(journal_dir, journal_id + '.json'))
-            if identity.startswith('https://'):
-                base, source_owner, _ = identity.rsplit('/', 2)
-                source = {'type': 'forgejo', 'base_url': base, 'owner': source_owner, 'repos': [source_name]}
-                source_token = None
-                src = PublicForgejoSourceAdapter(identity, api=SourceAPI(None))
-            else:
-                source = {'type': 'github', 'base_url': 'https://github.com', 'owner': identity.split('/')[0]}
-                source_token = token
-                src = ForgejoSourceAdapter(identity, token, api=SourceAPI(token))
+            source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token)
             upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
             if entry and 'source_id' in entry:
-                verify_source_pin(identity, src.request('GET', upstream), entry['source_id'])
+                metadata = src.request('GET', upstream)
+                try:
+                    verify_source_pin(identity, metadata, entry['source_id'])
+                except ValueError:
+                    if configured is None or 'destination_id' not in entry:
+                        raise
+                    # The pinned ID still answers under a new canonical name. Such
+                    # a move is only actionable with a durable journal and an
+                    # authoritative configuration write, so report it instead of
+                    # failing closed and mirror into the existing destination.
+                    entry, identity, relocation = resolve_relocation(
+                        configured, identity, metadata, args.port, args.owner, secret)
+                    name = entry['destination_name']
+                    recovery_identity = entry['legacy_identity']
+                    source, source_token, src, source_name = source_pipeline(entry['url'], token)
+                    upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
             source_releases = src.pages(upstream + '/releases')
             validation_options = {'allow_empty_target': True} if source['type'] == 'forgejo' else {}
             validate_source_release_listing(source_releases, **validation_options)
@@ -465,6 +535,10 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 validate_source_release_listing(releases, **validation_options)
                 validate_source_latest(latest, releases, **validation_options)
 
+            journal_options = {}
+            if entry and 'source_id' in entry and 'destination_id' in entry:
+                journal_options['journal_identity'] = (source['base_url'], entry['source_id'],
+                                                       f'http://127.0.0.1:{args.port}', entry['destination_id'])
             try:
                 if entry and 'legacy_identity' in entry:
                     old_owner, old_name = recovery_identity.rsplit('/', 2)[-2:]
@@ -473,11 +547,11 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                     mirror_releases(source, source_name, args.owner, src, adapter, upstream, adapter.target,
                                     source_marker(old_source, old_name), initializing=initializing, journal=journal,
                                     validate_snapshot=validate_snapshot, recovery_target=old_target,
-                                    journal_source=old_source, journal_name=old_name)
+                                    journal_source=old_source, journal_name=old_name, **journal_options)
                 else:
                     mirror_releases(source, source_name, args.owner, src, adapter, upstream, adapter.target,
                                     source_marker(source, source_name), initializing=initializing, journal=journal,
-                                    validate_snapshot=validate_snapshot)
+                                    validate_snapshot=validate_snapshot, **journal_options)
             finally:
                 if previous_secret is None:
                     os.environ.pop('MIRROR_TIMESTAMP_SECRET', None)
@@ -492,6 +566,8 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 raise RuntimeError('Forgejo refs changed during sync')
             if initializing:
                 dest.complete_initialization(name, recovery_identity, expected=expected)
+            if relocation is not None:
+                report_relocation(relocation)
             print(f'{identity}: OK (Git refs synchronized)', flush=True)
         except Exception as exc:
             failures.append(identity)
