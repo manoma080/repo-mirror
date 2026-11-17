@@ -563,7 +563,6 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             'https://github.com/manoma080/mirror-Gezine-CivSwitch',
             'https://github.com/manoma080/mirror-scarletnx-ScarletNX',
             'https://github.com/manoma080/mirror-Cor3Duo-kirikae',
-            'https://github.com/manoma080/mirror-helloano420-test-repo',
         ]
         config = json.loads((ROOT / 'config-forgejo.json').read_text())
         from repo_mirror.forgejo_sync import parse_manifest

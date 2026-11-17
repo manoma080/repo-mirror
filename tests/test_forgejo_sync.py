@@ -300,8 +300,28 @@ class RunnerTests(unittest.TestCase):
 
 
 class SourceTests(unittest.TestCase):
-    def test_source_validation_preserves_name(self):
-        self.assertEqual(forgejo_sync.parse_source('https://github.com/manoma080/mirror-Gezine-CivSwitch'), 'manoma080/mirror-Gezine-CivSwitch')
-        for invalid in ('https://github.com.evil/manoma080/mirror-x', 'https://github.com/manoma080/mirror-x.git', 'https://github.com/manoma080/mirror-x?x=1', 'https://github.com/other/mirror-x', 'https://github.com/manoma080/foo'):
+    def test_any_github_repository_is_accepted(self):
+        # Parity with the GitHub runner: any configured GitHub source works, not
+        # only the mirror-* repositories owned by the mirror account.
+        cases = {
+            'https://github.com/manoma080/mirror-Gezine-CivSwitch': 'manoma080/mirror-Gezine-CivSwitch',
+            'https://github.com/other/mirror-x': 'other/mirror-x',
+            'https://github.com/octocat/Hello-World': 'octocat/Hello-World',
+            'https://github.com/some-user/repo.name_1': 'some-user/repo.name_1',
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(forgejo_sync.parse_source(url), expected)
+
+    def test_forgejo_sources_keep_the_host_qualified_identity(self):
+        self.assertEqual(forgejo_sync.parse_source('https://git.example/owner/repo'),
+                         'https://git.example/owner/repo')
+
+    def test_malformed_sources_are_rejected(self):
+        for invalid in ('https://github.com.evil/owner/repo', 'https://github.com/owner/repo.git',
+                        'https://github.com/owner/repo?x=1', 'https://github.com/owner/repo/extra',
+                        'https://github.com/owner', 'http://github.com/owner/repo',
+                        'https://user:pw@github.com/owner/repo', 'https://github.com/owner/',
+                        'https://github.com/owner/..'):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 forgejo_sync.parse_source(invalid)
