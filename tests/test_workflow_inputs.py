@@ -169,6 +169,20 @@ class WorkflowInputTests(unittest.TestCase):
                     adhoc.main(["--config", path, "--urls", "https://github.com/b/y", "--destination", "mirror-a-x"])
             with open(path) as f: self.assertEqual(json.load(f), original)
 
+    def test_unchanged_add_still_validates_dynamic_discovery(self):
+        import json, os, tempfile
+        from unittest.mock import patch
+        original = {"sources": [{"type": "github", "base_url": "https://github.com", "owner": "a", "repos": "all"}]}
+        with tempfile.TemporaryDirectory() as temp:
+            path = os.path.join(temp, "config.json")
+            with open(path, "w") as f:
+                json.dump(original, f)
+            with patch("repo_mirror.sources.discover", return_value=[]):
+                with self.assertRaisesRegex(ValueError, "not discovered"):
+                    adhoc.main(["--config", path, "--urls", "https://github.com/a/missing"])
+            with open(path) as f:
+                self.assertEqual(json.load(f), original)
+
     def test_discovery_failure_leaves_config_unchanged(self):
         import json, tempfile, os
         from unittest.mock import patch

@@ -147,6 +147,159 @@ def add_to_config(config, source_urls, destination="", visibility=None, *, prote
     return changed
 
 
+def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst, *, owner, account_type, destination='', visibility=None):
+    """Stage additions, verify identities and create missing mirrors before committing config.
+
+    Failed operations can leave initializing repositories remotely. Existing
+    unpinned destinations require manual reconciliation, not marker adoption.
+    """
+    import copy
+    from urllib.parse import quote
+    from repo_mirror.config_named import normalize_config
+    from repo_mirror.constants import GITHUB
+    from repo_mirror.repository import GitHubAPI, validate_source_clone_url
+    from repo_mirror.sources import (check_existing, destination_name, discover, get_existing,
+                                     source_api_base, source_marker, validate_source)
+
+    candidate = copy.deepcopy(config)
+    add_to_config(candidate, source_urls, destination, visibility)
+    normalized = normalize_config(candidate)
+    profile = normalized.get('destination_profile')
+    if profile and (profile['url'] != 'https://github.com' or profile['owner'].lower() != owner.lower()):
+        raise ValueError('destination profile runtime mismatch')
+    if account_type not in ('personal', 'organization') or not isinstance(owner, str) or not NAME.fullmatch(owner):
+        raise ValueError('invalid destination account')
+    requested = [tuple(x.lower() for x in parse_repo_url(part.strip())) for part in source_urls.split(',')]
+    # A separate anonymous client per Forgejo origin binds both direct requests
+    # and every redirect, including discovery and subsequent identity rechecks.
+    from repo_mirror.github_api import API, SourceAPI
+    forgejo_clients = {}
+    def source_client(source):
+        if source['type'] == 'github':
+            return github_source
+        if not isinstance(forgejo_source, API):
+            return forgejo_source  # injected test/provider implementation
+        base = source['base_url']
+        if base not in forgejo_clients:
+            client = SourceAPI(None)
+            client.restrict_origin(base)
+            forgejo_clients[base] = client
+        return forgejo_clients[base]
+
+    selected, seen = [], set()
+    for source in normalized['sources']:
+        validate_source(source)
+        names = discover(source, source_client(source))
+        for name in names:
+            target_name = destination_name(source, name)
+            if target_name.lower() in seen:
+                raise ValueError('duplicate destination repository')
+            seen.add(target_name.lower())
+            for identity in requested:
+                if _matches_owner(source, *identity[:3]) and name.lower() == identity[3]:
+                    selected.append((source, name, target_name))
+    if len(selected) != len(requested):
+        raise ValueError('selected repository not discovered in config')
+    # Validate all source IDs before making any destination writes.
+    prepared = []
+    for source, name, target_name in selected:
+        settings = source.get('destinations', {}).get(name.lower(), {})
+        if 'legacy' in settings:
+            from repo_mirror.migration_attestation import github_claim, verify
+            verify(github_claim(source, name, owner), settings['legacy']['signature'], os.environ.get('MIRROR_TIMESTAMP_SECRET', ''))
+            legacy = settings['legacy']
+            marker = source_marker({**source, 'owner': legacy['source_owner']}, legacy['source_name'])
+        else:
+            marker = source_marker(source, name)
+        api = source_client(source)
+        upstream = source_api_base(source) + '/repos/' + quote(source['owner'], safe='') + '/' + quote(name, safe='')
+        metadata = api.request('GET', upstream)
+        validate_source_clone_url(source, name, metadata)
+        sid = metadata.get('id') if isinstance(metadata, dict) else None
+        if type(sid) is not int or sid <= 0:
+            raise ValueError('invalid source repository id')
+        if 'source_id' in settings and sid != settings['source_id']:
+            raise ValueError('source repository id mismatch')
+        target = GITHUB + '/repos/' + quote(owner, safe='') + '/' + quote(target_name, safe='')
+        repo = get_existing(dst, target)
+        check_existing(repo, marker)
+        if repo is not None and ('destination_id' not in settings or 'source_id' not in settings):
+            raise ValueError('unpinned existing destination requires manual reconciliation')
+        if 'destination_id' in settings and (not isinstance(repo, dict) or repo.get('id') != settings['destination_id'] or type(repo.get('id')) is not int):
+            raise ValueError('destination repository id mismatch or missing')
+        prepared.append((source, name, target_name, settings, marker, api, upstream, sid, target, repo))
+    verified_destinations = []
+    for source, name, target_name, settings, marker, api, upstream, sid, target, repo in prepared:
+        if repo is None:
+            payload = {'name': target_name, 'private': settings.get('visibility', 'private') != 'public',
+                       'auto_init': False, 'description': marker + ' [repo-mirror:initializing:v1]'}
+            if account_type == 'personal' and isinstance(dst, GitHubAPI):
+                created = dst.create_personal_repository(owner, payload)
+            else:
+                if account_type == 'personal':
+                    identity = dst.request('GET', GITHUB + '/user')
+                    if not isinstance(identity, dict) or str(identity.get('login', '')).lower() != owner.lower():
+                        raise RuntimeError('authenticated GitHub user does not match configured destination')
+                endpoint = '/user/repos' if account_type == 'personal' else '/orgs/' + quote(owner, safe='') + '/repos'
+                created = dst.request('POST', GITHUB + endpoint, payload)
+            if not isinstance(created, dict) or str(created.get('full_name', '')).lower() != (owner + '/' + target_name).lower():
+                raise RuntimeError('created repository owner does not match configured destination')
+            created_id = created.get('id')
+            if type(created_id) is not int or created_id <= 0:
+                raise ValueError('invalid created destination repository id')
+            current = api.request('GET', upstream)
+            if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != sid:
+                raise ValueError('source repository id changed')
+            validate_source_clone_url(source, name, current)
+
+            def verify_created(repo):
+                if (not isinstance(repo, dict) or type(repo.get('id')) is not int
+                        or repo['id'] != created_id
+                        or str(repo.get('full_name', '')).lower() != (owner + '/' + target_name).lower()):
+                    raise ValueError('created destination repository identity not verified')
+                check_existing(repo, marker)
+
+            verify_created(get_existing(dst, target))
+            dst.request('PUT', target + '/actions/permissions', {'enabled': False})
+            permissions = dst.request('GET', target + '/actions/permissions')
+            if not isinstance(permissions, dict) or permissions.get('enabled') is not False:
+                raise ValueError('destination Actions not verified disabled')
+            repo = get_existing(dst, target)
+            verify_created(repo)
+        check_existing(repo, marker)
+        did = repo.get('id') if isinstance(repo, dict) else None
+        if type(did) is not int or did <= 0:
+            raise ValueError('invalid destination repository id')
+        verified_destinations.append((target, marker, did))
+        current = api.request('GET', upstream)
+        if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != sid:
+            raise ValueError('source repository id changed')
+        if 'repositories' in candidate:
+            entry = next(e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'])) == (source['type'], source['base_url'].lower(), source['owner'].lower(), name.lower()))
+            entry['source']['id'] = sid
+            entry['mirrors'][next(iter(candidate['destinations']))]['id'] = did
+        else:
+            # Normalization returns the original legacy structure.
+            source.setdefault('destinations', {}).setdefault(name.lower(), {}).update(source_id=sid, destination_id=did)
+    # Re-read every destination after the batch, including pre-existing pins.
+    for target, marker, expected in verified_destinations:
+        current = get_existing(dst, target)
+        check_existing(current, marker)
+        if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != expected:
+            raise ValueError('destination repository id changed')
+    for source, name, _, _, _, api, upstream, sid, _, _ in prepared:
+        current = api.request('GET', upstream)
+        if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != sid:
+            raise ValueError('source repository id changed')
+        validate_source_clone_url(source, name, current)
+    normalize_config(candidate)
+    changed = candidate != config
+    if changed:
+        config.clear()
+        config.update(candidate)
+    return changed
+
+
 def remove_from_config(config, source_urls):
     """Remove explicit entries; refuse exclusions from dynamically discovered owners."""
     if 'repositories' in config or 'destinations' in config:
@@ -209,6 +362,7 @@ def main(argv=None):
     parser.add_argument("--config", required=True)
     parser.add_argument("--urls", required=True)
     parser.add_argument("--remove", action="store_true")
+    parser.add_argument("--auto-pin", action="store_true")
     parser.add_argument("--destination", default="")
     parser.add_argument("--visibility", choices=("private", "public", "unchanged"), default="unchanged")
     args = parser.parse_args(argv)
@@ -219,9 +373,35 @@ def main(argv=None):
     with open(args.config, encoding="utf-8") as f:
         from repo_mirror.config_json import unique_pairs
         config = json.load(f, object_pairs_hook=unique_pairs)
-    changed = (remove_from_config(config, args.urls) if args.remove else
-               add_to_config(config, args.urls, args.destination, None if args.visibility == "unchanged" else args.visibility))
-    if changed and not args.remove:
+    if args.auto_pin and not args.remove:
+        from repo_mirror.github_api import API, SourceAPI, AppTokenProvider
+        from repo_mirror.config_named import normalize_config
+        from repo_mirror.destination_profile import validate_runtime
+        runtime = normalize_config(config)
+        owner = os.environ.get('DESTINATION_OWNER', '')
+        account_type = runtime.get('destination_account_type')
+        configured_type = os.environ.get('DESTINATION_ACCOUNT_TYPE')
+        if configured_type and account_type and configured_type != account_type:
+            raise ValueError('destination account type mismatch')
+        account_type = configured_type or account_type
+        if account_type not in ('personal', 'organization'):
+            raise ValueError('destination_account_type must be personal or organization')
+        if runtime.get('destination_profile'):
+            validate_runtime(runtime['destination_profile'], 'github', 'https://github.com', owner, 'mirrorbot')
+        app_id = os.environ.get('MIRROR_APP_ID', '')
+        private_key = os.environ.pop('MIRROR_APP_PRIVATE_KEY', None)
+        if not app_id or not private_key:
+            raise ValueError('mirrorbot app credentials required')
+        token = AppTokenProvider(app_id, private_key, owner, account_type)
+        changed = add_to_config_pinned(config, args.urls, SourceAPI(token), API(), API(token),
+                                       owner=owner,
+                                       account_type=account_type,
+                                       destination=args.destination,
+                                       visibility=None if args.visibility == 'unchanged' else args.visibility)
+    else:
+        changed = (remove_from_config(config, args.urls) if args.remove else
+                   add_to_config(config, args.urls, args.destination, None if args.visibility == "unchanged" else args.visibility))
+    if not args.remove and not args.auto_pin:
         from repo_mirror.sources import destination_name, validate_source, discover
         from repo_mirror.github_api import API, SourceAPI
         seen = set()

@@ -189,6 +189,8 @@ While a release is being copied, its notes get a `[repo-mirror:pending:v3]` mark
 - Malformed or conflicting markers, and changed source file lists, need manual review.
 - After the copy, the source's title and notes are restored subject to the empty-note policy above. Very long notes may leave no room for the marker.
 - A new mirror stays in "initializing" mode until its full history is copied.
+- Auto-pinning checks source and newly created destination identities before disabling Actions and checks the destination again afterward. These name-based API requests are not atomic: a repository can be replaced between the last identity check and the Actions update, so the update could affect a replacement. Post-update checks can detect a change but cannot undo an incorrect update; inspect affected repositories and Actions settings manually.
+- Automatic pinning refuses any existing destination without both saved source and destination ID pins, even if its description has an initializing or completed mirror marker. Names and markers do not prove identity. A failed batch can leave newly created remote repositories while leaving config unchanged; Actions disabling may also have failed. Inspect each repository and its Actions settings manually. After independently verifying ownership and contents, remove an unwanted partial repository and retry, or follow your organization's manual reconciliation process to establish trustworthy ID-bound pins. Do not blindly delete repositories or adopt their markers. Identity checks reduce but cannot eliminate races: repositories can change after the last API check and before the configuration is written or used.
 
 ### Starter files
 
