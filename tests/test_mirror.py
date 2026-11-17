@@ -237,7 +237,7 @@ class SafetyTests(unittest.TestCase):
                 mirror.mirror_repository(source, "demo", "dest", API(), API(), "token")
             git.assert_not_called()
 
-    def test_personal_creation_never_queries_user(self):
+    def test_personal_creation_verifies_user(self):
         import io
         from urllib.error import HTTPError
 
@@ -247,6 +247,8 @@ class SafetyTests(unittest.TestCase):
 
             def request(self, method, url, data=None):
                 self.calls.append((method, url, data))
+                if method == "GET" and url.endswith("/user"):
+                    return {"login": "DEST"}
                 if method == "GET":
                     raise HTTPError(url, 404, "not found", {}, io.BytesIO())
                 if method == "POST":
@@ -272,7 +274,7 @@ class SafetyTests(unittest.TestCase):
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(source, "demo", "dest", Source(), dst, "token", "personal")
         self.assertTrue(any(method == "POST" and url.endswith("/user/repos") for method, url, _ in dst.calls))
-        self.assertFalse(any(method == "GET" and url.endswith("/user") for method, url, _ in dst.calls))
+        self.assertTrue(any(method == "GET" and url.endswith("/user") for method, url, _ in dst.calls))
 
     def test_asset_same_size_different_bytes_fails_without_deletion(self):
         source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "repos": ["demo"]}

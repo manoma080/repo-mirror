@@ -23,6 +23,7 @@ from repo_mirror.journal import FailureJournal
 from repo_mirror.repository import (ReleaseAggregateError, mirror_releases, validate_source_release_listing,
                                     fetch_source_latest, validate_source_latest)
 from repo_mirror.sources import source_marker, source_api_base
+from repo_mirror.config_json import unique_pairs
 from repo_mirror.forgejo_local import forgejo_source_identity
 from repo_mirror.forgejo_source_adapter import PublicForgejoSourceAdapter
 from repo_mirror.github_api import AppTokenProvider
@@ -109,8 +110,42 @@ def parse_source(value):
     return forgejo_source_identity(value)
 
 
+def normalize_named(sources):
+    if not isinstance(sources, dict) or set(sources) != {'destinations', 'repositories'}:
+        raise ValueError('invalid named manifest')
+    destinations, repositories = sources['destinations'], sources['repositories']
+    if not isinstance(destinations, dict) or len(destinations) != 1 or not isinstance(repositories, list) or not repositories:
+        raise ValueError('invalid named manifest')
+    destination = next(iter(destinations))
+    if not isinstance(destination, str) or not destination or destinations[destination] not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
+        raise ValueError('invalid destination')
+    result = []
+    for repo in repositories:
+        if not isinstance(repo, dict) or set(repo) != {'source', 'mirrors'}:
+            raise ValueError('invalid repository')
+        source, mirrors = repo['source'], repo['mirrors']
+        if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id'} or not isinstance(mirrors, dict) or set(mirrors) != {destination}:
+            raise ValueError('unsupported repository mapping')
+        mirror = mirrors[destination]
+        if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy'} or not isinstance(source['url'], str):
+            raise ValueError('unsupported mirror mapping')
+        item = {'url': source['url'], 'destination_name': mirror.get('name', source['url'].rsplit('/', 1)[-1])}
+        if 'id' in source: item['source_id'] = source['id']
+        if 'id' in mirror: item['destination_id'] = mirror['id']
+        if 'legacy' in mirror:
+            legacy = mirror['legacy']
+            if not isinstance(legacy, dict) or set(legacy) != {'url', 'name', 'signature'}:
+                raise ValueError('invalid legacy mapping')
+            item.update(legacy_url=legacy['url'], legacy_destination_name=legacy['name'], signature=legacy['signature'])
+        result.append(item)
+    return result
+
+
 def parse_manifest(sources):
     """Validate every source and its pinned relocation mapping before any worker starts."""
+    named = isinstance(sources, dict)
+    if named:
+        sources = normalize_named(sources)
     if not isinstance(sources, list) or not sources:
         raise ValueError('invalid source manifest')
     entries, identities, destinations, legacy_identities = [], set(), set(), set()
@@ -119,6 +154,17 @@ def parse_manifest(sources):
             url = item
             identity = parse_source(url)
             entry = {'url': url, 'identity': identity, 'destination_name': identity.rsplit('/', 1)[-1]}
+        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id'} and {'url', 'destination_name'} <= set(item):
+            if not isinstance(item['url'], str):
+                raise ValueError('invalid source URL')
+            identity = parse_source(item['url'])
+            name = item['destination_name']
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', name) or name in ('.', '..') or len(name) > 100:
+                raise ValueError('invalid destination name')
+            for key in ('source_id', 'destination_id'):
+                if key in item and (type(item[key]) is not int or item[key] <= 0):
+                    raise ValueError('invalid repository ID')
+            entry = {**item, 'identity': identity}
         elif isinstance(item, dict) and set(item) == {'url', 'source_id', 'destination_id', 'destination_name',
                                                      'legacy_url', 'legacy_destination_name', 'signature'}:
             if not isinstance(item['signature'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['signature']):
@@ -272,7 +318,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         with open(args.config, encoding='utf-8') as stream:
-            configured = json.load(stream)
+            configured = json.load(stream, object_pairs_hook=unique_pairs)
         entries = parse_manifest(configured)
         by_url = {entry['url']: entry for entry in entries}
         requested = [parse_source(s) for s in args.source]
@@ -280,7 +326,11 @@ def main(argv=None):
             raise ValueError('duplicate requested source')
         if any(s not in by_url for s in args.source):
             raise ValueError('requested source not exactly configured')
-        mappings = {entry['identity']: entry for entry in entries if 'source_id' in entry}
+        if isinstance(configured, dict):
+            settings = next(iter(configured['destinations'].values()))
+            if 'account_type' in settings and (settings['account_type'] == 'organization') != args.organization:
+                raise ValueError('destination account type mismatch')
+        mappings = {entry['identity']: entry for entry in entries if isinstance(configured, dict) or 'source_id' in entry}
         secret, secret_id = read_secure_file(args.timestamp_secret_file)
         secret = secret.strip()
         if not secret or any(c in secret for c in ('\n', '\r', '\x00')):
@@ -289,7 +339,8 @@ def main(argv=None):
             raise ValueError('recovery secret too short')
         from repo_mirror.migration_attestation import forgejo_claim, verify
         for entry in mappings.values():
-            verify(forgejo_claim(entry, args.port, args.owner), entry['signature'], secret)
+            if 'legacy_identity' in entry:
+                verify(forgejo_claim(entry, args.port, args.owner), entry['signature'], secret)
         local_token, local_id = read_secure_file(args.token_file)
         local_token = local_token.strip()
         if local_id == secret_id:
@@ -329,7 +380,7 @@ def main(argv=None):
         result = 0
         for identity in requested:
             entry = mappings.get(identity)
-            lock_targets = ([entry['destination_name'], entry['legacy_destination_name']] if entry else [identity])
+            lock_targets = ([entry['destination_name'], entry.get('legacy_destination_name', entry['destination_name'])] if entry else [identity])
             with destination_locks(args.port, args.owner, lock_targets):
                 with journal_lock(args.journal_dir, shared=True) as journal_dir:
                     if entry:
@@ -349,9 +400,9 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
         entry = (mappings or {}).get(identity)
         name = entry['destination_name'] if entry else identity.rsplit('/', 1)[-1]
         source_name = identity.rsplit('/', 1)[-1]
-        recovery_identity = entry['legacy_identity'] if entry else identity
+        recovery_identity = entry.get('legacy_identity', identity) if entry else identity
         try:
-            if entry:
+            if entry and 'legacy_identity' in entry:
                 from repo_mirror.migration_attestation import forgejo_claim, verify
                 verify(forgejo_claim(entry, args.port, args.owner), entry.get('signature'), secret)
             journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{recovery_identity.lower()}'.encode()).hexdigest()
@@ -366,7 +417,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 source_token = token
                 src = ForgejoSourceAdapter(identity, token, api=SourceAPI(token))
             upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
-            if entry:
+            if entry and 'source_id' in entry:
                 verify_source_pin(identity, src.request('GET', upstream), entry['source_id'])
             source_releases = src.pages(upstream + '/releases')
             validation_options = {'allow_empty_target': True} if source['type'] == 'forgejo' else {}
@@ -375,15 +426,15 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
             # This preflight cannot prevent the source changing immediately
             # afterwards; mirror_releases fetches and checks it again.
             initializing = (dest.begin_initialization(name, recovery_identity, expected_id=entry['destination_id'])
-                            if entry else dest.begin_initialization(name, identity))
+                            if entry and 'destination_id' in entry else dest.begin_initialization(name, recovery_identity))
             expected = dest.run_pin
             def guard():
-                if entry:
+                if entry and 'source_id' in entry:
                     verify_source_pin(identity, src.request('GET', upstream), entry['source_id'])
                 if expected is not None:
                     dest.revalidate(name, recovery_identity, expected)
             guard()
-            recovery_options = {'recovery_identity': recovery_identity} if entry else {}
+            recovery_options = {'recovery_identity': recovery_identity} if entry and 'legacy_identity' in entry else {}
             sync_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
             guard()
             before = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
@@ -404,7 +455,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 validate_source_latest(latest, releases, **validation_options)
 
             try:
-                if entry:
+                if entry and 'legacy_identity' in entry:
                     old_owner, old_name = recovery_identity.rsplit('/', 2)[-2:]
                     old_source = {**source, 'owner': old_owner}
                     old_target = adapter.target.rsplit('/', 1)[0] + '/' + entry['legacy_destination_name']

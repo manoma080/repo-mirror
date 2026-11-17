@@ -3,6 +3,7 @@
 import http.client
 import hashlib
 from datetime import datetime, timezone
+from functools import partial
 import json
 import os
 import re
@@ -93,7 +94,7 @@ class LocalForgejoAPI:
             if fd != -1:
                 os.close(fd)
 
-    def request(self, method, path, payload=None):
+    def request(self, method, path, payload=None, *, token=None):
         if (
             method not in ("GET", "POST", "PATCH")
             or not re.fullmatch(r"/api/v1/[A-Za-z0-9_./-]+", path)
@@ -107,7 +108,7 @@ class LocalForgejoAPI:
                 method,
                 path,
                 body=body,
-                headers={"Authorization": "token " + self.token(), "Content-Type": "application/json"},
+                headers={"Authorization": "token " + (self.token() if token is None else token), "Content-Type": "application/json"},
             )
             response = conn.getresponse()
             data = response.read()
@@ -139,8 +140,16 @@ class ForgejoDestination:
                 raise
             if expected_id is not None:
                 raise RuntimeError("pinned Forgejo destination missing") from None
+            request = self.api.request
+            if not self.organization:
+                if isinstance(self.api, LocalForgejoAPI):
+                    request = partial(request, token=self.api.token())
+                identity = request("GET", "/api/v1/user")
+                login = identity.get("login") if isinstance(identity, dict) else None
+                if not isinstance(login, str) or not login or login.lower() != self.owner.lower():
+                    raise RuntimeError("authenticated Forgejo user does not match configured destination")
             endpoint = f"/api/v1/orgs/{self.owner}/repos" if self.organization else "/api/v1/user/repos"
-            created = self.api.request(
+            created = request(
                 "POST",
                 endpoint,
                 {

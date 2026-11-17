@@ -63,6 +63,7 @@ class RunnerTests(unittest.TestCase):
                 self.repo = None
             def token(self): return 'token'
             def request(self, method, path, payload=None):
+                if path == '/api/v1/user': return {'login': 'local'}
                 if method == 'POST':
                     self.repo = dict(payload, id=1, full_name='local/mirror-Gezine-CivSwitch')
                 elif method == 'PATCH':
