@@ -138,8 +138,15 @@ class GitHubRepositories:
         return repo
 
 
-def transaction_from_environment(environ, config_path, destination_owner, api=None):
-    """Build a GitHub migration transaction, or ``None`` when unavailable."""
+def transaction_from_environment(environ, config_path, destination_owner, api=None,
+                                 destination_api=None):
+    """Build a GitHub migration transaction, or ``None`` when unavailable.
+
+    ``api`` reads and writes the management repository. ``destination_api`` must
+    be the credential that can see and rename the mirror repositories; the
+    workflow token is scoped to the management repository and would see every
+    destination as missing.
+    """
     slug = environ.get('MIRROR_MANAGEMENT_REPOSITORY') or environ.get('GITHUB_REPOSITORY')
     token = (environ.get('MIRROR_MANAGEMENT_TOKEN') or environ.get('MANAGEMENT_TOKEN')
              or environ.get('GH_TOKEN'))
@@ -156,6 +163,6 @@ def transaction_from_environment(environ, config_path, destination_owner, api=No
     api = api or API(token)
     store = MigrationsStore(GitHubMigrations(api, owner, repo), secret)
     configuration = GitHubConfigFile(api, owner, repo, path)
-    repositories = GitHubRepositories(api, destination_owner)
+    repositories = GitHubRepositories(destination_api or api, destination_owner)
     return MigrationTransaction(store, repositories, configuration,
                                 secret=secret, config_path=path)

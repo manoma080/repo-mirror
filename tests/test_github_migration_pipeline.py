@@ -167,9 +167,11 @@ def run_cli(directory, api, move=None, environment=None, mirror=None):
     config_path.write_bytes(api.config())
     environment = dict(ENVIRONMENT if environment is None else environment)
     stderr = io.StringIO()
+    # The second API instance is the destination credential: the one that can
+    # see and rename the mirror repositories.
     with patch.dict('os.environ', environment, clear=True), \
             patch.object(cli, 'SourceAPI'), \
-            patch.object(cli, 'API', side_effect=[Mock(), Mock()]), \
+            patch.object(cli, 'API', side_effect=[Mock(), api]), \
             patch.object(cli, 'get_existing', return_value=None), \
             patch.object(cli, 'mirror_repository', side_effect=mirror or only_moved(move)), \
             patch('repo_mirror.github_migration.API', return_value=api), \

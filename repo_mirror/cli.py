@@ -285,7 +285,7 @@ def main(argv=None):
     if named_config:
         try:
             from repo_mirror.github_migration import transaction_from_environment
-            transaction = transaction_from_environment(os.environ, args.config, owner)
+            transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
         except Exception as exc:
             if relocations:
                 migration_failures.append(f"migration store unavailable: {error_detail(exc)}")
