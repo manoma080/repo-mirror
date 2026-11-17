@@ -115,19 +115,25 @@ def destination_plan(relocation, document):
     """
     destination = relocation['destination']
     profile, mirror, repository = _destination_mirror(document, destination['id'])
+    kind, base, owner, name = _source_of(repository)
+    # An entry created by automatic pinning may store only the immutable ID; the
+    # worker then used the derived name, so that derivation is what was
+    # configured. Any explicit name must match what the worker reported.
+    derived_before = destination_name(
+        {'type': kind, 'base_url': base, 'owner': owner, 'repos': [name]}, name)
     configured = mirror.get('name')
-    if not isinstance(configured, str) or not configured:
+    if configured is None:
+        configured = derived_before
+    elif not isinstance(configured, str) or not configured:
         raise ValueError('migration destination name mismatch')
     if configured.lower() != str(destination['name']).lower():
         raise ValueError('migration destination name mismatch')
-    kind, base, owner, name = _source_of(repository)
     if canonical_origin(base).lower() != canonical_origin(relocation['source_origin']).lower():
         raise ValueError('migration source identity mismatch')
     if (owner.lower(), name.lower()) != (str(relocation['original_owner']).lower(),
                                          str(relocation['original_name']).lower()):
         raise ValueError('migration source identity mismatch')
-    derived = destination_name({'type': kind, 'base_url': base, 'owner': owner, 'repos': [name]}, name)
-    if configured.lower() != derived.lower():
+    if configured.lower() != derived_before.lower():
         return profile, mirror, repository, configured, configured
     target = destination_name(
         {'type': kind, 'base_url': base, 'owner': relocation['owner'], 'repos': [relocation['name']]},
