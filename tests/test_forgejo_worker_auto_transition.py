@@ -68,7 +68,8 @@ class WorkerAutomaticTransitionTests(unittest.TestCase):
         self.assertEqual(result, 0, stderr)
         # The worker keeps the configured destination and the original binding.
         dest.begin_initialization.assert_called_once_with('copy', OLD, expected_id=22)
-        self.assertEqual(sync.call_args.args[2], NEW)
+        # Git operations take an owner/name identity; the canonical form is a URL.
+        self.assertEqual(sync.call_args.args[2], 'new/renamed')
         self.assertEqual(sync.call_args.kwargs['recovery_identity'], OLD)
         call = releases.call_args
         self.assertEqual(call.args[7], '[repo-mirror: forgejo:https://git.example/old/repo]')

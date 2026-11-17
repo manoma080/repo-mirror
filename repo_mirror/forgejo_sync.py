@@ -483,6 +483,9 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
             journal = FailureJournal(os.path.join(journal_dir, journal_id + '.json'))
             source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token)
             upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
+            # Git operations take an owner/name identity, not a URL: the GitHub
+            # form of a relocated source is a plain https URL.
+            git_source = f"{source['owner']}/{source_name}"
             if entry and 'source_id' in entry:
                 metadata = src.request('GET', upstream)
                 try:
@@ -500,6 +503,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                     recovery_identity = entry['legacy_identity']
                     source, source_token, src, source_name = source_pipeline(entry['url'], token)
                     upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
+                    git_source = f"{source['owner']}/{source_name}"
             source_releases = src.pages(upstream + '/releases')
             validation_options = {'allow_empty_target': True} if source['type'] == 'forgejo' else {}
             validate_source_release_listing(source_releases, **validation_options)
@@ -516,14 +520,14 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                     dest.revalidate(name, recovery_identity, expected)
             guard()
             recovery_options = {'recovery_identity': recovery_identity} if entry and 'legacy_identity' in entry else {}
-            sync_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
+            sync_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)
             guard()
-            before = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
+            before = snapshot_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)
             guard()
             adapter = ForgejoDestinationAdapter(f'{args.owner}/{name}', local_token, args.port, guard=guard)
             if source['type'] == 'forgejo':
                 def verify_source_tag(tag):
-                    current = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
+                    current = snapshot_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)
                     ref = 'refs/tags/' + tag
                     if current != before or ref not in current[1] or current[1][ref] != current[2].get(ref):
                         raise ValueError('tag verification failed')
@@ -558,7 +562,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 else:
                     os.environ['MIRROR_TIMESTAMP_SECRET'] = previous_secret
             guard()
-            after = snapshot_refs(dest, name, identity, source_token=source_token, expected=expected, **recovery_options)
+            after = snapshot_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)
             guard()
             if after[0] != before[0] or after[1] != before[1]:
                 raise RuntimeError('source refs changed during sync')
