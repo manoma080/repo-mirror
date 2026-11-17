@@ -211,45 +211,9 @@ def select_existing_releases(releases, destination, failed_tags, marker=None, ta
     return selected
 
 
-@timed_repository
-def mirror_repository(source, name, owner, src, dst, token, account_type="organization", journal=None):
-    """Mirror one source repository to its destination: branches, tags, releases and assets."""
-    print(
-        f"repository started source_repo={safe_label(source.get('owner'))}/{safe_label(name)} target=destination",
-        file=sys.stderr,
-        flush=True,
-    )
-    dest_name = destination_name(source, name)
-    settings = source.get("destinations", {}).get(name.lower(), {})
-    if "legacy" in settings:
-        validate_source(source)
-        from repo_mirror.migration_attestation import github_claim, verify
-        verify(github_claim(source, name, owner), settings["legacy"].get("signature"), os.environ.get("MIRROR_TIMESTAMP_SECRET", ""))
-    if "legacy" in settings:
-        validate_source(source)
-        legacy = settings["legacy"]
-        historical_source = {**source, "owner": legacy["source_owner"]}
-        historical_name = legacy["source_name"]
-        marker = source_marker(historical_source, historical_name)
-    else:
-        marker = source_marker(source, name)
-    for key in ("source_id", "destination_id"):
-        if key in settings and (type(settings[key]) is not int or settings[key] <= 0):
-            raise ValueError("invalid repository id pin")
-    qowner, qname = quote(owner, safe=""), quote(dest_name, safe="")
-    target = f"{GITHUB}/repos/{qowner}/{qname}"
-    repo = get_existing(dst, target)
-    check_existing(repo, marker)
-    initializing = repo is None or repo.get("description") == marker + " [repo-mirror:initializing:v1]"
-    srcbase = source_api_base(source)
-    upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(name, safe='')}"
-    if "destination_id" in settings and (not isinstance(repo, dict) or
-            type(repo.get("id")) is not int or repo["id"] != settings["destination_id"]):
-        raise ValueError("destination repository id mismatch or missing")
-    metadata = src.request("GET", upstream)
-    if "source_id" in settings and (type(metadata.get("id")) is not int or metadata["id"] != settings["source_id"]):
-        raise ValueError("source repository id mismatch")
-    clone_url = metadata["clone_url"]
+def validate_source_clone_url(source, name, metadata):
+    """Validate that metadata points to the configured source identity."""
+    clone_url = metadata.get("clone_url") if isinstance(metadata, dict) else None
     base_url = source["base_url"]
     if not isinstance(clone_url, str) or not isinstance(base_url, str):
         raise ValueError("invalid source clone URL")
@@ -288,6 +252,48 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         or not clone_path_matches
     ):
         raise ValueError("source clone URL does not match source identity")
+    return clone_url
+
+
+@timed_repository
+def mirror_repository(source, name, owner, src, dst, token, account_type="organization", journal=None):
+    """Mirror one source repository to its destination: branches, tags, releases and assets."""
+    print(
+        f"repository started source_repo={safe_label(source.get('owner'))}/{safe_label(name)} target=destination",
+        file=sys.stderr,
+        flush=True,
+    )
+    dest_name = destination_name(source, name)
+    settings = source.get("destinations", {}).get(name.lower(), {})
+    if "legacy" in settings:
+        validate_source(source)
+        from repo_mirror.migration_attestation import github_claim, verify
+        verify(github_claim(source, name, owner), settings["legacy"].get("signature"), os.environ.get("MIRROR_TIMESTAMP_SECRET", ""))
+    if "legacy" in settings:
+        validate_source(source)
+        legacy = settings["legacy"]
+        historical_source = {**source, "owner": legacy["source_owner"]}
+        historical_name = legacy["source_name"]
+        marker = source_marker(historical_source, historical_name)
+    else:
+        marker = source_marker(source, name)
+    for key in ("source_id", "destination_id"):
+        if key in settings and (type(settings[key]) is not int or settings[key] <= 0):
+            raise ValueError("invalid repository id pin")
+    qowner, qname = quote(owner, safe=""), quote(dest_name, safe="")
+    target = f"{GITHUB}/repos/{qowner}/{qname}"
+    repo = get_existing(dst, target)
+    check_existing(repo, marker)
+    initializing = repo is None or repo.get("description") == marker + " [repo-mirror:initializing:v1]"
+    srcbase = source_api_base(source)
+    upstream = f"{srcbase}/repos/{quote(source['owner'], safe='')}/{quote(name, safe='')}"
+    if "destination_id" in settings and (not isinstance(repo, dict) or
+            type(repo.get("id")) is not int or repo["id"] != settings["destination_id"]):
+        raise ValueError("destination repository id mismatch or missing")
+    metadata = src.request("GET", upstream)
+    if "source_id" in settings and (type(metadata.get("id")) is not int or metadata["id"] != settings["source_id"]):
+        raise ValueError("source repository id mismatch")
+    clone_url = validate_source_clone_url(source, name, metadata)
     def recheck_pins():
         # These API reads narrow, but cannot eliminate, the TOCTOU window.
         if "source_id" in settings:
