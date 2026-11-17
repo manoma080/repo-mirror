@@ -70,6 +70,11 @@ def main(argv=None):
         config = json.load(f, object_pairs_hook=unique_pairs)
     named_config = isinstance(config, dict) and ('destinations' in config or 'repositories' in config)
     config = normalize_config(config)
+    if 'destination_profile' in config:
+        from repo_mirror.destination_profile import validate_runtime
+        validate_runtime(config['destination_profile'], 'github', 'https://github.com', owner, 'mirrorbot')
+        if not app_id or not private_key:
+            raise ValueError('mirrorbot app credentials required')
     environment_type = os.environ.get("DESTINATION_ACCOUNT_TYPE") or None
     if named_config and environment_type is not None and environment_type != config['destination_account_type']:
         raise ValueError("destination account type mismatch")
@@ -85,7 +90,7 @@ def main(argv=None):
     custom = os.environ.get("MIRROR_DESTINATION_NAME", "")
     visibility = os.environ.get("MIRROR_VISIBILITY") or "unchanged"
     if selected_urls and selected_urls.strip():
-        add_to_config(config, selected_urls, custom, None if visibility == "unchanged" else visibility)
+        add_to_config(config, selected_urls, custom, None if visibility == "unchanged" else visibility, protect_pins=False)
     elif custom or visibility not in ("private", "unchanged"):
         raise ValueError("destination settings require source URLs")
     for source in sources:

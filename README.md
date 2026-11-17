@@ -55,7 +55,7 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 
 ### Destination and removal options
 
-- **destination_name** optionally replaces `mirror-<owner>-<repo>` for exactly one URL. Names must be valid GitHub repository names and must not collide with another destination. A pre-existing repository is used only if its source marker matches; visibility is never changed implicitly.
+- **destination_name** optionally replaces `mirror-<owner>-<repo>` for exactly one URL. Names must be valid GitHub repository names and must not collide with another destination. A pre-existing repository is used only if its source marker matches; visibility is never changed implicitly. Manual config updates reject changing a pinned destination name; use the explicit reconciliation procedure instead.
 - **visibility** defaults to unchanged, preserving saved settings; new destinations default to private. Select private or public to explicitly override a saved setting; public exposes mirrored contents. It applies only on creation, not to existing destinations. With add selected, settings are persisted per source repository for scheduled runs; otherwise they apply only to this run.
 - **remove_from_config** requires one or more URLs, commits only the config removal and skips the entire mirror job, including journal writes. It does not delete repositories. It cannot be combined with add, custom name or public visibility. Individual URLs covered by a `repos: "all"` source cannot be removed this way; edit the configuration explicitly instead.
 
@@ -65,7 +65,7 @@ Edit [`config.json`](config.json). Named configuration lists each source reposit
 
 ```json
 {
-  "destinations": {"github": {"account_type": "personal"}},
+  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "manoma080", "auth": "mirrorbot"}},
   "repositories": [
     {"source": {"url": "https://github.com/alice/project", "id": 123},
      "mirrors": {"github": {"name": "mirror-alice-project", "id": 456, "visibility": "private"}}}
@@ -73,7 +73,7 @@ Edit [`config.json`](config.json). Named configuration lists each source reposit
 }
 ```
 
-Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Set `account_type` to `personal` or `organization`; the destination owner remains configured through `DESTINATION_OWNER`. Source URLs may point to GitHub or a public Forgejo instance. Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
+Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to Mirrorbot. The workflow uses those app secrets, while the Forgejo scheduler's separate Manobot helper authenticates GitHub source access. Legacy named profiles with `account_type` (`personal` or `organization`) remain supported with their previous behavior. Source URLs may point to GitHub or a public Forgejo instance. Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
 
 Legacy `destination_account_type` and `sources` configurations remain supported, including `repos: "all"` (owned public repositories, not stars), custom `prefix`, and per-repository `destinations` mappings using `source_id` and `destination_id`. Do not mix the formats.
 

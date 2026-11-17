@@ -117,7 +117,13 @@ def normalize_named(sources):
     if not isinstance(destinations, dict) or len(destinations) != 1 or not isinstance(repositories, list) or not repositories:
         raise ValueError('invalid named manifest')
     destination = next(iter(destinations))
-    if not isinstance(destination, str) or not destination or destinations[destination] not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
+    settings = destinations[destination]
+    if not isinstance(destination, str) or not destination or not isinstance(settings, dict):
+        raise ValueError('invalid destination')
+    if 'type' in settings:
+        from repo_mirror.destination_profile import validate_profile
+        validate_profile(settings, 'forgejo')
+    elif settings not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
         raise ValueError('invalid destination')
     result = []
     for repo in repositories:
@@ -328,6 +334,11 @@ def main(argv=None):
             raise ValueError('requested source not exactly configured')
         if isinstance(configured, dict):
             settings = next(iter(configured['destinations'].values()))
+            if 'type' in settings:
+                from repo_mirror.destination_profile import validate_runtime
+                validate_runtime(settings, 'forgejo', f'http://127.0.0.1:{args.port}', args.owner, 'forgejo-home')
+                if args.organization:
+                    raise ValueError('destination account type mismatch')
             if 'account_type' in settings and (settings['account_type'] == 'organization') != args.organization:
                 raise ValueError('destination account type mismatch')
         mappings = {entry['identity']: entry for entry in entries if isinstance(configured, dict) or 'source_id' in entry}

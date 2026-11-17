@@ -50,6 +50,21 @@ def valid_source(source):
         return False
 
 
+def valid_profile(settings):
+    """Standalone copy: the fetched checkout is not trusted before validation."""
+    if not isinstance(settings, dict) or set(settings) != {'type', 'url', 'owner', 'auth'}:
+        return False
+    if settings.get('type') != 'forgejo' or not all(isinstance(settings[k], str) and settings[k] for k in ('url', 'owner', 'auth')):
+        return False
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', settings['owner']) or settings['owner'] in ('.', '..') or not re.fullmatch(r'[a-z][a-z0-9-]*', settings['auth']):
+        return False
+    try:
+        u = urlsplit(settings['url'])
+        return bool(u.scheme in ('http', 'https') and u.hostname and not u.username and not u.password and not u.path and not u.query and not u.fragment and u.port != 0)
+    except ValueError:
+        return False
+
+
 def valid_manifest(sources):
     """Validate the entire snapshot before running any downloaded scheduler."""
     named = isinstance(sources, dict)
@@ -60,7 +75,12 @@ def valid_manifest(sources):
         if not isinstance(profiles, dict) or len(profiles) != 1 or not isinstance(repos, list) or not repos:
             return False
         profile, settings = next(iter(profiles.items()))
-        if not isinstance(profile, str) or not profile or settings not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
+        if not isinstance(profile, str) or not profile or not isinstance(settings, dict):
+            return False
+        if 'type' in settings:
+            if not valid_profile(settings):
+                return False
+        elif settings not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
             return False
         converted = []
         for repo in repos:
@@ -279,6 +299,10 @@ def main(argv=None):
                 sources = json.loads(manifest.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
                 if not valid_manifest(sources):
                     raise ValueError('invalid manifest')
+                if isinstance(sources, dict):
+                    settings = next(iter(sources['destinations'].values()))
+                    if 'type' in settings and (settings['url'] != f"http://127.0.0.1:{seen.get('--port', '3300')}" or settings['owner'].lower() != seen.get('--owner', '').lower() or settings['auth'] != 'forgejo-home' or '--organization' in seen):
+                        raise ValueError('destination profile runtime mismatch')
                 if not (snapshot / 'repo_mirror' / 'forgejo_schedule.py').is_file():
                     raise ValueError('scheduler missing')
                 print(f'Updater fetched commit: {commit}', file=sys.stderr, flush=True)

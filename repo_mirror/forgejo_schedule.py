@@ -52,6 +52,11 @@ def main(argv=None):
         validate_sources(sources)
         if isinstance(sources, dict):
             settings = next(iter(sources['destinations'].values()))
+            if 'type' in settings:
+                from repo_mirror.destination_profile import validate_runtime
+                validate_runtime(settings, 'forgejo', f'http://127.0.0.1:{args.port}', args.owner, 'forgejo-home')
+                if args.organization:
+                    raise ValueError('destination account type mismatch')
             if 'account_type' in settings and (settings['account_type'] == 'organization') != args.organization:
                 raise ValueError('destination account type mismatch')
         entries = parse_manifest(sources)

@@ -64,7 +64,7 @@ def _matches_owner(source, kind, base, owner):
             and str(source.get("owner", "")).lower() == owner.lower())
 
 
-def add_to_config(config, source_urls, destination="", visibility=None):
+def add_to_config(config, source_urls, destination="", visibility=None, *, protect_pins=True):
     """Add URLs and optional per-repository destination settings."""
     if 'repositories' in config or 'destinations' in config:
         from repo_mirror.config_named import normalize_config
@@ -87,6 +87,10 @@ def add_to_config(config, source_urls, destination="", visibility=None):
                 candidate['repositories'].append(entry)
             mirror = entry['mirrors'][profile]
             if destination:
+                _, _, saved_owner, saved_name = parse_repo_url(entry['source']['url'])
+                current_name = mirror.get('name', 'mirror-' + saved_owner + '-' + saved_name)
+                if 'id' in mirror and destination != current_name:
+                    raise ValueError('cannot rename pinned destination without explicit reconciliation')
                 mirror['name'] = destination
             if visibility is not None:
                 mirror['visibility'] = visibility
@@ -127,6 +131,11 @@ def add_to_config(config, source_urls, destination="", visibility=None):
         if destination or visibility is not None:
             mappings = match.setdefault("destinations", {})
             old = mappings.get(name.lower(), {})
+            if protect_pins and destination and 'destination_id' in old:
+                from repo_mirror.sources import destination_name
+                saved_name = next((r for r in match['repos'] if r.lower() == name.lower()), name) if match['repos'] != 'all' else name
+                if destination != destination_name(match, saved_name):
+                    raise ValueError('cannot rename pinned destination without explicit reconciliation')
             new = dict(old)
             if visibility is not None:
                 new["visibility"] = visibility
