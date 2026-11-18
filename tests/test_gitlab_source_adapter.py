@@ -150,3 +150,23 @@ class GitLabAdapterTest(unittest.TestCase):
             mirror_releases({'type': 'gitlab', 'owner': 'group'}, 'project', 'team', adapter, dst,
                             'unused', dst.target, 'marker', initializing=True)
         self.assertEqual(api.release['body'], 'Notes')
+
+
+class LightweightTagTests(unittest.TestCase):
+    def test_empty_message_is_lightweight(self):
+        from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
+        tag = 'v1'
+        adapter = GitLabSourceAdapter('https://gitlab.com', 'g/p', 1)
+
+        class Dst:
+            def request(self, method, url):
+                return {'ref': 'refs/tags/' + tag, 'object': {'sha': 'a' * 40, 'type': 'commit'}}
+
+        def fake_get(url):
+            if url.endswith('/repository/tags/' + tag):
+                return {'name': tag, 'target': 'a' * 40, 'message': '',
+                        'commit': {'id': 'a' * 40}}, {}
+            return {'id': 1, 'visibility': 'public', 'path_with_namespace': 'g/p',
+                    'http_url_to_repo': 'https://gitlab.com/g/p.git'}, {}
+        adapter._get = fake_get
+        self.assertEqual(adapter.verify_release_tag(tag, Dst(), 't'), ('commit', 'a' * 40))

@@ -227,7 +227,9 @@ class GitLabSourceAdapter:
             raise ValueError('tag verification failed')
         if message is not None and not isinstance(message, str):
             raise ValueError('tag verification failed')
-        kind = 'commit' if message is None else 'tag'
+        # GitLab returns an empty string (not null) for lightweight tags;
+        # only a non-empty message indicates an annotated tag object.
+        kind = 'tag' if isinstance(message, str) and message else 'commit'
         if kind == 'commit' and (not isinstance(obj.get('commit'), dict) or obj['commit'].get('id') != sha):
             raise ValueError('tag verification failed')
         ref = dst.request('GET', target + '/git/ref/tags/' + quote(tag, safe=''))
