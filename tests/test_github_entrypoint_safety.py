@@ -56,7 +56,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(runner, 'push', 'origin', 'HEAD:main')
             env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
                    'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output'),
-                   'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': '', 'MIRROR_OUTCOME': 'success', 'JOB_CANCELLED': 'false'}
+                   'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': '', 'MIRROR_OUTCOME': 'success'}
             def run(step):
                 return subprocess.run(['bash', '-e', '-c', workflow_step(step)], cwd=runner, env=env, capture_output=True, text=True)
             self.assertEqual(run('Refresh failure journal').returncode, 0)
@@ -80,7 +80,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(runner, 'push', 'origin', 'HEAD:main')
             env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
                    'GITHUB_OUTPUT': str(root / 'output'), 'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': '',
-                   'MIRROR_OUTCOME': 'success', 'JOB_CANCELLED': 'false'}
+                   'MIRROR_OUTCOME': 'success'}
             def run(step):
                 return subprocess.run(['bash', '-e', '-c', workflow_step(step)], cwd=runner, env=env, capture_output=True, text=True)
             self.assertEqual(run('Refresh failure journal').returncode, 0)
@@ -98,9 +98,11 @@ class EntrypointSafetyTests(unittest.TestCase):
     def test_cancelled_or_ambiguous_run_keeps_fence(self):
         text = (Path(__file__).resolve().parents[1] / '.github/workflows/mirror.yml').read_text()
         self.assertIn('MIRROR_OUTCOME: ${{ steps.mirror-run.outcome }}', text)
-        self.assertIn('JOB_CANCELLED: ${{ cancelled() }}', text)
-        for outcome, cancelled in [('cancelled', 'false'), ('success', 'true'), ('', 'false')]:
-            with self.subTest(outcome=outcome, cancelled=cancelled), tempfile.TemporaryDirectory() as directory:
+        # GitHub rejects cancelled() outside `if:` contexts, so the fence
+        # decision must rely on the step outcome alone.
+        self.assertNotIn('cancelled()', text)
+        for outcome in ('cancelled', ''):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 git(root, 'init', '--bare', '--initial-branch=main', 'remote.git')
                 git(root, 'clone', 'remote.git', 'runner')
@@ -111,7 +113,7 @@ class EntrypointSafetyTests(unittest.TestCase):
                 git(runner, 'push', 'origin', 'HEAD:main')
                 env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
                        'GITHUB_OUTPUT': str(root / 'output'), 'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': '',
-                       'MIRROR_OUTCOME': outcome, 'JOB_CANCELLED': cancelled}
+                       'MIRROR_OUTCOME': outcome}
                 def run(step):
                     return subprocess.run(['bash', '-e', '-c', workflow_step(step)], cwd=runner, env=env, capture_output=True, text=True)
                 self.assertEqual(run('Refresh failure journal').returncode, 0)
@@ -155,7 +157,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(runner, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial')
             git(runner, 'push', 'origin', 'HEAD:main')
             env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
-                   'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': 'true', 'MIRROR_OUTCOME': 'failure', 'JOB_CANCELLED': 'false'}
+                   'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': 'true', 'MIRROR_OUTCOME': 'failure', 'MIRROR_OUTCOME': 'success'}
             refresh = subprocess.run(['bash', '-e', '-c', workflow_step('Refresh failure journal')], cwd=runner, env=env, capture_output=True, text=True)
             self.assertEqual(refresh.returncode, 0, refresh.stderr)
             git(root, 'clone', 'remote.git', 'api')
@@ -226,7 +228,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             api = root / 'api'
             env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
                    'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output'),
-                   'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': 'true', 'MIRROR_OUTCOME': 'failure', 'JOB_CANCELLED': 'false'}
+                   'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': 'true', 'MIRROR_OUTCOME': 'failure', 'MIRROR_OUTCOME': 'success'}
             def run(step):
                 return subprocess.run(['bash', '-e', '-c', workflow_step(step)], cwd=runner, env=env, capture_output=True, text=True)
             self.assertEqual(run('Refresh failure journal').returncode, 0)
