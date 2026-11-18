@@ -392,7 +392,18 @@ class API:
                     if limited:
                         rate_limited = True
                     e.close()
-                except URLError:
+                except URLError as e:
+                    # Keep the operation on the escaping error so public
+                    # diagnostics can name it without the raw exception text.
+                    setattr(
+                        e,
+                        "mirror_operation",
+                        (
+                            self.role,
+                            "API",
+                            method if method in ("GET", "POST", "PUT", "PATCH", "DELETE") else "request",
+                        ),
+                    )
                     if method not in ("GET", "PUT", "PATCH", "DELETE") or attempt == 3:
                         raise
             print(f"request retry {attempt + 1}/3", file=sys.stderr, flush=True)
