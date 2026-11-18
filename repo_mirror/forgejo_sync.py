@@ -110,13 +110,17 @@ GITHUB_SOURCE = re.compile(
     r'https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9_.-]{1,100})')
 
 
-def parse_source(value):
+def parse_source(value, source_type=None):
     """Return an owner/name identity for a public mirror source.
 
     GitHub sources may belong to any account, matching the GitHub runner; the
     repository must be public because the Forgejo destination mirrors anonymous
     content. Forgejo sources keep the host-qualified form.
     """
+    from repo_mirror.adhoc import parse_repo_url
+    kind, base, owner, name = parse_repo_url(value, source_type=source_type, allow_forgejo_port=True)
+    if kind == 'gitlab':
+        return f'{base}/{owner}/{name}'
     match = GITHUB_SOURCE.fullmatch(value) if isinstance(value, str) else None
     if match and not match.group(2).endswith('.git') and match.group(2) not in ('.', '..'):
         return '/'.join(match.groups())
@@ -144,12 +148,13 @@ def normalize_named(sources):
         if not isinstance(repo, dict) or set(repo) != {'source', 'mirrors'}:
             raise ValueError('invalid repository')
         source, mirrors = repo['source'], repo['mirrors']
-        if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id'} or not isinstance(mirrors, dict) or set(mirrors) != {destination}:
+        if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id', 'type'} or not isinstance(mirrors, dict) or set(mirrors) != {destination}:
             raise ValueError('unsupported repository mapping')
         mirror = mirrors[destination]
         if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy'} or not isinstance(source['url'], str):
             raise ValueError('unsupported mirror mapping')
         item = {'url': source['url'], 'destination_name': mirror.get('name', source['url'].rsplit('/', 1)[-1])}
+        if 'type' in source: item['source_type'] = source['type']
         if 'id' in source: item['source_id'] = source['id']
         if 'id' in mirror: item['destination_id'] = mirror['id']
         if 'legacy' in mirror:
@@ -174,10 +179,10 @@ def parse_manifest(sources):
             url = item
             identity = parse_source(url)
             entry = {'url': url, 'identity': identity, 'destination_name': identity.rsplit('/', 1)[-1]}
-        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id'} and {'url', 'destination_name'} <= set(item):
+        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id', 'source_type'} and {'url', 'destination_name'} <= set(item):
             if not isinstance(item['url'], str):
                 raise ValueError('invalid source URL')
-            identity = parse_source(item['url'])
+            identity = parse_source(item['url'], item.get('source_type'))
             name = item['destination_name']
             if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', name) or name in ('.', '..') or len(name) > 100:
                 raise ValueError('invalid destination name')
@@ -322,6 +327,16 @@ def destination_locks(port, owner, requested):
             sock.close()
 
 
+def parse_asset_max_bytes(value):
+    from repo_mirror.constants import MAX_ASSET_SIZE
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9]+', value):
+        raise ValueError('invalid Forgejo asset byte limit')
+    limit = int(value)
+    if not 1 <= limit <= MAX_ASSET_SIZE:
+        raise ValueError('invalid Forgejo asset byte limit')
+    return limit
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, help='JSON array of permitted GitHub mirror URLs')
@@ -332,16 +347,23 @@ def main(argv=None):
     parser.add_argument('--owner', required=True, help='local Forgejo account')
     parser.add_argument('--organization', action='store_true')
     parser.add_argument('--port', type=int, default=3300)
+    parser.add_argument('--asset-max-bytes', help='operator-selected per-asset byte limit for this Forgejo destination')
     parser.add_argument('--app-id')
     parser.add_argument('--private-key-file')
     parser.add_argument('--use-github-token', action='store_true', help='explicitly use GITHUB_TOKEN (not refreshable)')
     args = parser.parse_args(argv)
     try:
+        if args.asset_max_bytes is not None:
+            parse_asset_max_bytes(args.asset_max_bytes)
         with open(args.config, encoding='utf-8') as stream:
             configured = json.load(stream, object_pairs_hook=unique_pairs)
         entries = parse_manifest(configured)
         by_url = {entry['url']: entry for entry in entries}
-        requested = [parse_source(s) for s in args.source]
+        if args.asset_max_bytes is None and any(
+                s in by_url and (by_url[s].get('source_type') == 'gitlab' or s.startswith('https://gitlab.com/'))
+                for s in args.source):
+            raise ValueError('Forgejo asset byte limit must be configured')
+        requested = [parse_source(s, by_url[s].get('source_type')) if s in by_url else parse_source(s) for s in args.source]
         if len(set(x.lower() for x in requested)) != len(requested):
             raise ValueError('duplicate requested source')
         if any(s not in by_url for s in args.source):
@@ -398,6 +420,10 @@ def main(argv=None):
         print(f'FORGEJO_FAILURE: {safe_reason(exc, configuration=True)}', file=sys.stderr)
         return 2
     try:
+        if args.asset_max_bytes is not None:
+            os.environ['MIRROR_FORGEJO_ASSET_MAX_BYTES'] = args.asset_max_bytes
+        else:
+            os.environ.pop('MIRROR_FORGEJO_ASSET_MAX_BYTES', None)
         # A journal name encodes the source, instance and owner, so every run
         # sharing a journal also shares the corresponding destination lock.
         # The shared directory lock remains compatible with legacy exclusive
@@ -433,8 +459,36 @@ def report_relocation(relocation):
     print(RELOCATION_PREFIX + json.dumps(relocation, sort_keys=True), file=sys.stderr, flush=True)
 
 
-def source_pipeline(url, token):
+def gitlab_tag_verifier(src, verify_ref):
+    """Bridge GitLab tag validation to the already verified Git ref snapshot."""
+    from urllib.parse import quote
+    original = src.verify_release_tag
+
+    def verify(tag, destination, target):
+        class RefView:
+            def request(self, method, url):
+                if method != 'GET' or url != target + '/git/ref/tags/' + quote(tag, safe=''):
+                    raise ValueError('tag verification failed')
+                _, sha = verify_ref(tag)
+                obj, _ = src._get(src.pinned_base + '/repository/tags/' + quote(tag, safe=''))
+                if not isinstance(obj, dict) or obj.get('name') != tag or obj.get('target') != sha or 'message' not in obj:
+                    raise ValueError('tag verification failed')
+                kind = 'commit' if obj['message'] is None else 'tag'
+                return {'ref': 'refs/tags/' + tag, 'object': {'sha': sha, 'type': kind}}
+        return original(tag, RefView(), target)
+    return verify
+
+
+def source_pipeline(url, token, *, source_type=None, source_id=None):
     """Return (source, source token, adapter, repository name) for one source URL."""
+    from repo_mirror.adhoc import parse_repo_url
+    kind, base, owner, name = parse_repo_url(url, source_type=source_type, allow_forgejo_port=True)
+    if kind == 'gitlab':
+        if type(source_id) is not int or source_id <= 0:
+            raise ValueError('source repository ID mismatch')
+        from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
+        source = {'type': 'gitlab', 'base_url': base, 'owner': owner, 'repos': [name]}
+        return source, None, GitLabSourceAdapter(base, owner + '/' + name, source_id), name
     base, owner, name = url.rsplit('/', 2)
     if base.lower() == 'https://github.com':
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': owner}
@@ -492,12 +546,27 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 verify(forgejo_claim(entry, args.port, args.owner), entry.get('signature'), secret)
             journal_id = hashlib.sha256(f'{args.port}:{args.owner.lower()}:{recovery_identity.lower()}'.encode()).hexdigest()
             journal = FailureJournal(os.path.join(journal_dir, journal_id + '.json'))
-            source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token)
-            upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
+            from repo_mirror.adhoc import parse_repo_url
+            kind = parse_repo_url(_source_url(identity, entry), source_type=entry.get('source_type') if entry else None, allow_forgejo_port=True)[0]
+            if kind == 'gitlab':
+                source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token, source_type='gitlab', source_id=entry.get('source_id') if entry else None)
+            elif entry and entry.get('source_type'):
+                source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token, source_type=entry['source_type'])
+            else:
+                source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token)
+            upstream = (src.pinned_base if source['type'] == 'gitlab' else
+                        f"{source_api_base(source)}/repos/{source['owner']}/{source_name}")
             # GitHub uses its historical owner/name form; Forgejo needs its origin.
             git_source = (f"{source['owner']}/{source_name}" if source['type'] == 'github'
                           else _source_url(identity, entry))
-            if entry and 'source_id' in entry:
+            if source['type'] == 'gitlab':
+                from repo_mirror.sources import verified_source_identity
+                def verify_gitlab():
+                    metadata = src.project()
+                    if verified_source_identity(source, source_name, entry['source_id'], metadata) != identity:
+                        raise ValueError('canonical source identity mismatch')
+                verify_gitlab()
+            elif entry and 'source_id' in entry:
                 metadata = src.request('GET', upstream)
                 try:
                     verify_source_pin(identity, metadata, entry['source_id'])
@@ -516,17 +585,24 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                     upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
                     git_source = (f"{source['owner']}/{source_name}" if source['type'] == 'github'
                                   else entry['url'])
-            source_releases = src.pages(upstream + '/releases')
-            validation_options = {'allow_empty_target': True} if source['type'] == 'forgejo' else {}
-            validate_source_release_listing(source_releases, **validation_options)
-            validate_source_latest(fetch_source_latest(src, upstream), source_releases, **validation_options)
+            validation_options = {'allow_empty_target': True} if source['type'] in ('forgejo', 'gitlab') else {}
+            if source['type'] == 'gitlab':
+                source_releases = src.list_releases()
+                from repo_mirror.repository import select_tag_source_latest
+                select_tag_source_latest(source_releases)
+            else:
+                source_releases = src.pages(upstream + '/releases')
+                validate_source_release_listing(source_releases, **validation_options)
+                validate_source_latest(fetch_source_latest(src, upstream), source_releases, **validation_options)
             # This preflight cannot prevent the source changing immediately
             # afterwards; mirror_releases fetches and checks it again.
             initializing = (dest.begin_initialization(name, recovery_identity, expected_id=entry['destination_id'])
                             if entry and 'destination_id' in entry else dest.begin_initialization(name, recovery_identity))
             expected = dest.run_pin
             def guard():
-                if entry and 'source_id' in entry:
+                if source['type'] == 'gitlab':
+                    verify_gitlab()
+                elif entry and 'source_id' in entry:
                     verify_source_pin(identity, src.request('GET', upstream), entry['source_id'])
                 if expected is not None:
                     dest.revalidate(name, recovery_identity, expected)
@@ -537,7 +613,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
             before = snapshot_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)
             guard()
             adapter = ForgejoDestinationAdapter(f'{args.owner}/{name}', local_token, args.port, guard=guard)
-            if source['type'] == 'forgejo':
+            if source['type'] in ('forgejo', 'gitlab'):
                 def verify_source_tag(tag):
                     current = snapshot_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)
                     ref = 'refs/tags/' + tag
@@ -545,9 +621,13 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                         raise ValueError('tag verification failed')
                     return ('git-ref', current[1][ref])
                 adapter.verify_source_tag = verify_source_tag
+                if source['type'] == 'gitlab':
+                    src.verify_release_tag = gitlab_tag_verifier(src, verify_source_tag)
             previous_secret = os.environ.get('MIRROR_TIMESTAMP_SECRET')
             os.environ['MIRROR_TIMESTAMP_SECRET'] = secret
             def validate_snapshot(releases, latest):
+                if source['type'] == 'gitlab':
+                    return
                 validate_source_release_listing(releases, **validation_options)
                 validate_source_latest(latest, releases, **validation_options)
 

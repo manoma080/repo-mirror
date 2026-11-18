@@ -33,12 +33,17 @@ def unique_pairs(pairs):
     return result
 
 
-def valid_source(source):
+def valid_source(source, source_type=None):
     if not isinstance(source, str) or source.endswith('.git'):
         return False
     if SOURCE.fullmatch(source):
         return True
-    if not FORGEJO_SOURCE.fullmatch(source):
+    if source_type == 'gitlab' or source.startswith('https://gitlab.com/'):
+        if not re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]+)?(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){2,}', source):
+            return False
+        if any(part in ('.', '..') for part in urlsplit(source).path.split('/')[1:]):
+            return False
+    elif not FORGEJO_SOURCE.fullmatch(source):
         return False
     try:
         parsed = urlsplit(source)
@@ -69,6 +74,38 @@ def valid_manifest(sources):
     """Validate the entire snapshot before running any downloaded scheduler."""
     named = isinstance(sources, dict)
     if named:
+        if set(sources) == {'destinations', 'repositories', 'groups'}:
+            groups = sources['groups']
+            if not isinstance(groups, list) or not groups:
+                return False
+            seen_groups = set()
+            for g in groups:
+                if not isinstance(g, dict) or set(g) != {'type', 'base_url', 'owner', 'id', 'repos'}:
+                    return False
+                base, owner = g['base_url'], g['owner']
+                if not isinstance(base, str) or not isinstance(owner, str):
+                    return False
+                try:
+                    u = urlsplit(base)
+                    if (g['type'] != 'gitlab' or g['repos'] != 'all' or type(g['id']) is not int or g['id'] <= 0
+                            or u.scheme != 'https' or not u.hostname or u.username is not None or u.password is not None
+                            or u.path or u.query or u.fragment or u.port == 0
+                            or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]+)?', u.netloc)
+                            or any(not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', x) or x in ('.', '..') for x in owner.split('/'))):
+                        return False
+                except ValueError:
+                    return False
+                key = (base.lower(), g['id'])
+                if key in seen_groups:
+                    return False
+                seen_groups.add(key)
+            # Reuse the existing strict named-repository checks, permitting a
+            # group-only declaration via a harmless validation sentinel.
+            sources = dict(sources)
+            del sources['groups']
+            if sources['repositories'] == []:
+                profile = next(iter(sources['destinations']), None) if isinstance(sources['destinations'], dict) else None
+                sources['repositories'] = [{'source': {'url': 'https://github.com/check/check'}, 'mirrors': {profile: {}}}]
         if set(sources) != {'destinations', 'repositories'}:
             return False
         profiles, repos = sources['destinations'], sources['repositories']
@@ -87,12 +124,15 @@ def valid_manifest(sources):
             if not isinstance(repo, dict) or set(repo) != {'source', 'mirrors'}:
                 return False
             source, mirrors = repo['source'], repo['mirrors']
-            if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id'} or not isinstance(mirrors, dict) or set(mirrors) != {profile}:
+            if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id', 'type'} or not isinstance(mirrors, dict) or set(mirrors) != {profile}:
+                return False
+            if source.get('type') not in (None, 'github', 'forgejo', 'gitlab'):
                 return False
             mirror = mirrors[profile]
             if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy'} or not isinstance(source['url'], str):
                 return False
             item = {'url': source['url'], 'destination_name': mirror.get('name', source['url'].rsplit('/', 1)[-1])}
+            if 'type' in source: item['source_type'] = source['type']
             if 'id' in source: item['source_id'] = source['id']
             if 'id' in mirror: item['destination_id'] = mirror['id']
             if 'legacy' in mirror:
@@ -109,7 +149,7 @@ def valid_manifest(sources):
         if isinstance(item, str):
             url, old = item, item
             names = {url.rsplit('/', 1)[-1].lower()}
-        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id'} and {'url', 'destination_name'} <= set(item):
+        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id', 'source_type'} and {'url', 'destination_name'} <= set(item):
             url = old = item['url']
             name = item['destination_name']
             if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', name) or name in ('.', '..') or len(name) > 100:
@@ -134,7 +174,8 @@ def valid_manifest(sources):
             names = {item['destination_name'].lower(), item['legacy_destination_name'].lower()}
         else:
             return False
-        if not valid_source(url) or not valid_source(old):
+        source_type = item.get('source_type') if isinstance(item, dict) else None
+        if not valid_source(url, source_type) or not valid_source(old, source_type):
             return False
         source_names = {url.lower(), old.lower()}
         if source_names & identities or names & destinations:
@@ -223,7 +264,7 @@ def main(argv=None):
         valued = {'--token-file', '--timestamp-secret-file', '--journal-dir', '--owner',
                   '--port', '--jobs', '--repository-timeout', '--lock', '--helper',
                   '--helper-python', '--sync-python', '--installation', '--app-id',
-                  '--private-key-file', '--config-repo', '--config-account-type'}
+                  '--private-key-file', '--config-repo', '--config-account-type', '--asset-max-bytes'}
         seen = {}
         i = 0
         while i < len(extra):
@@ -244,6 +285,11 @@ def main(argv=None):
                     raise ValueError('invalid scheduler option value')
                 seen[name] = value
             i += 1
+        if '--config-repo' in seen:
+            authority = seen['--config-repo']
+            match = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?', args.remote, re.IGNORECASE)
+            if not match or authority.lower() != (match.group(1) + '/' + match.group(2)).lower():
+                raise ValueError('remote and configuration authority mismatch')
         locks = [seen['--lock']] if '--lock' in seen else []
         if len(locks) != 1 or os.path.realpath(locks[0]) == os.path.realpath(args.job_lock):
             raise ValueError('distinct scheduler lock required')
@@ -305,6 +351,11 @@ def main(argv=None):
                 stage = 'manifest validation'
                 manifest = snapshot / 'config-forgejo.json'
                 sources = json.loads(manifest.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
+                if isinstance(sources, dict) and isinstance(sources.get('sources'), list) and any(
+                        isinstance(s, dict) and s.get('type') == 'gitlab' and s.get('repos') == 'all'
+                        for s in sources['sources']):
+                    print('GitLab group discovery is not supported by the Forgejo scheduler', file=sys.stderr)
+                    return 2
                 if not valid_manifest(sources):
                     raise ValueError('invalid manifest')
                 if isinstance(sources, dict):

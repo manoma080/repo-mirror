@@ -54,6 +54,15 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - name: Validate management branch
+        env:
+          MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$MANAGEMENT_BRANCH" != main ]; then
+            echo 'Management default branch must be main' >&2; exit 1
+          fi
       - name: Validate manual options
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
@@ -133,10 +142,9 @@ jobs:
         with:
           ref: ${{ needs.test.outputs.tested-sha }}
           persist-credentials: false
-      - name: Refresh migration journal
-        # migrations.json is the durable intent of any unfinished destination
-        # rename. Read the newest published copy before the rename phase so the
-        # local file and the Contents API agree on what is pending.
+      - name: Refresh failure journal
+        # Migration intents are managed by the Contents API. Refresh the
+        # failure journal separately before the CLI reads it.
         env:
           MANAGEMENT_TOKEN: ${{ github.token }}
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -148,10 +156,40 @@ jobs:
           export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
           export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:$MANAGEMENT_TOKEN" | base64 -w0)"
           git fetch --no-tags origin "$MANAGEMENT_BRANCH"
-          if git cat-file -e "origin/$MANAGEMENT_BRANCH:migrations.json" 2>/dev/null; then
-            git show "origin/$MANAGEMENT_BRANCH:migrations.json" > migrations.json
+          # Publish a durable fence BEFORE any mirror side effects. A canceled
+          # runner, failed upload, or failed save leaves it for operator recovery.
+          current=$(git rev-parse "origin/$MANAGEMENT_BRANCH")
+          # Admission checks the tested blob at the fetched branch tip. Writers
+          # that do not honor this fence can still change config after admission.
+          tested_config=$(git rev-parse 'HEAD:config.json')
+          current_config=$(git rev-parse "$current:config.json")
+          if [ "$tested_config" != "$current_config" ]; then
+            echo 'Config changed since testing; refusing mirror' >&2; exit 1
+          fi
+          if git cat-file -e "$current:.failure-journal-in-progress" 2>/dev/null; then
+            echo 'Unresolved failure journal run; reconcile before mirroring' >&2; exit 1
+          fi
+          marker=$(printf '%s/%s\n' "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-1}" | git hash-object -w --stdin)
+          printf '%s\n' "$marker" > "$RUNNER_TEMP/failure-journal-marker"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/failure-journal-acquire-index"
+          rm -f "$GIT_INDEX_FILE"
+          git read-tree "$current"
+          git update-index --add --cacheinfo "100644,$marker,.failure-journal-in-progress"
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'Fence mirror failure journal' | git -c user.name=repo-mirror -c user.email=repo-mirror@users.noreply.github.com commit-tree "$tree" -p "$current")
+          git -c core.hooksPath=/dev/null push --force-with-lease="refs/heads/$MANAGEMENT_BRANCH:$current" origin "$commit:refs/heads/$MANAGEMENT_BRANCH"
+          unset GIT_INDEX_FILE
+          # Use the exact journal at the fenced revision as our base.
+          test ! -L failures.json
+          if git cat-file -e "origin/$MANAGEMENT_BRANCH:failures.json" 2>/dev/null; then
+            git show "origin/$MANAGEMENT_BRANCH:failures.json" > failures.json
+            git rev-parse "origin/$MANAGEMENT_BRANCH:failures.json" > "$RUNNER_TEMP/failure-journal-base"
+          else
+            rm -f failures.json
+            printf '%s\n' missing > "$RUNNER_TEMP/failure-journal-base"
           fi
       - name: Mirror
+        id: mirror-run
         env:
           DESTINATION_OWNER: ${{ vars.MIRROR_OWNER }}
           MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}
@@ -166,43 +204,90 @@ jobs:
           MIRROR_MANAGEMENT_REPOSITORY: ${{ github.repository }}
           MIRROR_MANAGEMENT_TOKEN: ${{ github.token }}
         run: python mirror.py --config config.json --failures failures.json
-      - name: Save migration journal
-        if: ${{ always() }}
-        env:
-          MANAGEMENT_TOKEN: ${{ github.token }}
-          MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
+      # Migration transactions publish their journal directly through the API;
+      # never push a stale local migrations.json over that authoritative state.
+      - name: Prepare failure journal recovery
+        id: prepare-journal
+        if: ${{ always() && steps.mirror-run.outcome != 'skipped' && steps.mirror-run.outcome != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          test ! -L migrations.json
-          if [ ! -f migrations.json ]; then exit 0; fi
-          git check-ref-format "refs/heads/$MANAGEMENT_BRANCH"
-          base=$(git rev-parse HEAD)
-          git -c core.hooksPath=/dev/null add -- migrations.json
-          if git diff --cached --quiet; then exit 0; fi
-          git -c core.hooksPath=/dev/null -c user.name=repo-mirror -c user.email=repo-mirror@localhost commit -m 'Update mirror migration journal'
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:$MANAGEMENT_TOKEN" | base64 -w0)"
-          # Lease-checked: this only lands if the branch is still at the commit
-          # the run started from. A concurrent writer's journal is never
-          # overwritten; the run fails instead of losing a pending rename.
-          git -c core.hooksPath=/dev/null push --force-with-lease="refs/heads/$MANAGEMENT_BRANCH:$base" origin "HEAD:refs/heads/$MANAGEMENT_BRANCH"
+          # Snapshot just the regular journal, before any fallible git operation.
+          # Artifacts are readable by repository readers, like the journal itself.
+          python -c 'import os, stat, shutil
+          try:
+              fd = os.open("failures.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+          except FileNotFoundError:
+              raise SystemExit(0)
+          with os.fdopen(fd, "rb") as src:
+              if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
+                  raise SystemExit("failure journal is not a regular file")
+              directory = os.path.join(os.environ["RUNNER_TEMP"], "failure-journal-recovery")
+              os.mkdir(directory, 0o700)
+              with open(os.path.join(directory, "failures.json"), "xb") as dst:
+                  shutil.copyfileobj(src, dst)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("present=true\n")'
       - name: Save failure journal
+        id: save-journal
         if: ${{ always() }}
         env:
           MANAGEMENT_TOKEN: ${{ github.token }}
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
+          PREPARE_OUTCOME: ${{ steps.prepare-journal.outcome }}
+          JOURNAL_PRESENT: ${{ steps.prepare-journal.outputs.present }}
+          MIRROR_OUTCOME: ${{ steps.mirror-run.outcome }}
+          JOB_CANCELLED: ${{ cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          test ! -L failures.json
-          if [ ! -f failures.json ]; then exit 0; fi
+          # Cancellation or an unknown outcome can interrupt journal writes.
+          if [ "${JOB_CANCELLED:-}" != false ] || { [ "${MIRROR_OUTCOME:-}" != success ] && [ "${MIRROR_OUTCOME:-}" != failure ]; }; then
+            echo 'Mirror canceled or outcome unknown; retaining fence' >&2; exit 1
+          fi
+          if [ "${PREPARE_OUTCOME:-}" != success ]; then exit 0; fi
           git check-ref-format "refs/heads/$MANAGEMENT_BRANCH"
-          git -c core.hooksPath=/dev/null add -- failures.json
-          if git diff --cached --quiet; then exit 0; fi
-          git -c core.hooksPath=/dev/null -c user.name=repo-mirror -c user.email=repo-mirror@users.noreply.github.com commit -m 'Update asset failure journal'
+          base=$(<"$RUNNER_TEMP/failure-journal-base")
+          if [ "${JOURNAL_PRESENT:-false}" = true ]; then
+            local_blob=$(git hash-object -w -- "$RUNNER_TEMP/failure-journal-recovery/failures.json")
+          elif [ "$base" != missing ]; then
+            echo 'Existing failure journal disappeared; retaining fence' >&2; exit 1
+          fi
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$MANAGEMENT_TOKEN" | base64 -w0)"
-          git -c core.hooksPath=/dev/null push origin "HEAD:refs/heads/$MANAGEMENT_BRANCH"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' 'x-access-token:'"$MANAGEMENT_TOKEN" | base64 -w0)"
+          git fetch --no-tags origin "$MANAGEMENT_BRANCH"
+          current=$(git rev-parse "origin/$MANAGEMENT_BRANCH")
+          if git cat-file -e "$current:failures.json" 2>/dev/null; then
+            remote_blob=$(git rev-parse "$current:failures.json")
+          else
+            remote_blob=missing
+          fi
+          if [ "$remote_blob" != "$base" ]; then
+            echo 'Failure journal changed concurrently; refusing overwrite' >&2; exit 1
+          fi
+          marker=$(<"$RUNNER_TEMP/failure-journal-marker")
+          if [ "$(git rev-parse "$current:.failure-journal-in-progress" 2>/dev/null || :)" != "$marker" ]; then
+            echo 'Failure journal fence changed; refusing overwrite' >&2; exit 1
+          fi
+          # Build on the freshly fetched tree without touching the tested checkout.
+          export GIT_INDEX_FILE="$RUNNER_TEMP/failure-journal-index"
+          rm -f "$GIT_INDEX_FILE"
+          git read-tree "$current"
+          if [ "${JOURNAL_PRESENT:-false}" = true ]; then
+            git update-index --add --cacheinfo "100644,$local_blob,failures.json"
+          fi
+          git update-index --force-remove .failure-journal-in-progress
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'Update asset failure journal' | git -c user.name=repo-mirror -c user.email=repo-mirror@users.noreply.github.com commit-tree "$tree" -p "$current")
+          git -c core.hooksPath=/dev/null push --force-with-lease="refs/heads/$MANAGEMENT_BRANCH:$current" origin "$commit:refs/heads/$MANAGEMENT_BRANCH"
+      # A lost runner may never upload an artifact. Reconcile destination state
+      # and the durable journal manually before removing an unresolved fence.
+      - name: Upload failure journal recovery
+        if: ${{ always() && steps.save-journal.outcome == 'failure' && steps.prepare-journal.outputs.present == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failure-journal-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-journal-recovery/failures.json
+          if-no-files-found: error
+          retention-days: 7

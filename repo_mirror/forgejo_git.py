@@ -36,7 +36,16 @@ def _name(value):
 
 def _source(source):
     if isinstance(source, str) and source.startswith("https://"):
-        source = forgejo_source_identity(source).split("/", 3)[3]
+        from repo_mirror.adhoc import parse_repo_url
+        _, base, owner, repo = parse_repo_url(source, source_type='gitlab', allow_forgejo_port=True)
+        host = urlsplit(base).hostname
+        if (not host or host.startswith('github.com.') or not all(
+                re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label)
+                for label in host.split('.'))):
+            raise ValueError('invalid source URL')
+        if repo.endswith('.git'):
+            raise ValueError("source identity must not have .git suffix")
+        return owner, repo
     if not isinstance(source, str) or source.count("/") != 1:
         raise ValueError("invalid source identity")
     owner, repo = source.split("/")
@@ -50,7 +59,10 @@ def _source(source):
 def _source_url(source):
     owner, repo = _source(source)
     if source.startswith("https://"):
-        return forgejo_source_identity(source) + ".git"
+        parsed = urlsplit(source)
+        if '/' not in owner and parsed.hostname != 'gitlab.com':
+            return forgejo_source_identity(source) + '.git'
+        return source + ".git"
     return f"https://github.com/{owner}/{repo}.git"
 
 

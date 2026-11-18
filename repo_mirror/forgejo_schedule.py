@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from repo_mirror import forgejo_migration
 from repo_mirror.config_json import unique_pairs
 from repo_mirror.forgejo_sync import (RELOCATION_FIELDS, RELOCATION_PREFIX, SAFE_REASONS,
-                                      parse_manifest)
+                                      parse_asset_max_bytes, parse_manifest)
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
@@ -72,6 +72,7 @@ def main(argv=None):
     parser.add_argument('--owner', required=True)
     parser.add_argument('--organization', action='store_true')
     parser.add_argument('--port', type=int, default=3300)
+    parser.add_argument('--asset-max-bytes', help='operator-selected per-asset byte limit for this Forgejo destination')
     parser.add_argument('--jobs', type=int, default=4, help='maximum concurrent syncs (default: 4)')
     parser.add_argument('--repository-timeout', type=float, default=3600, metavar='SECONDS',
                         help='maximum runtime per repository in seconds (default: 3600)')
@@ -87,9 +88,31 @@ def main(argv=None):
     parser.add_argument('--config-account-type', default='personal', choices=['personal', 'organization'])
     args = parser.parse_args(argv)
     try:
+        if args.asset_max_bytes is not None:
+            parse_asset_max_bytes(args.asset_max_bytes)
         manifest_bytes = Path(args.manifest).read_bytes()
         sources = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
-        validate_sources(sources)
+        if isinstance(sources, dict) and isinstance(sources.get('sources'), list) and any(
+                isinstance(s, dict) and s.get('type') == 'gitlab' and s.get('repos') == 'all'
+                for s in sources['sources']):
+            print('GitLab group discovery is not supported by the Forgejo scheduler', file=sys.stderr)
+            return 2
+        groups = sources.get('groups') if isinstance(sources, dict) else None
+        if groups is not None:
+            from repo_mirror.gitlab_onboarding_forgejo import validate_groups
+            validate_groups(groups)
+            if set(sources) != {'destinations', 'repositories', 'groups'} or not args.config_repo or args.asset_max_bytes is None:
+                raise ValueError('group onboarding requires authoritative config and asset limit')
+            worker_manifest = {k: v for k, v in sources.items() if k != 'groups'}
+            if worker_manifest.get('repositories'):
+                validate_sources(worker_manifest)
+            else:
+                # Validate destination profile even for a group-only document.
+                if not isinstance(worker_manifest.get('destinations'), dict) or len(worker_manifest['destinations']) != 1:
+                    raise ValueError('invalid destination')
+        else:
+            worker_manifest = sources
+            validate_sources(sources)
         if isinstance(sources, dict):
             settings = next(iter(sources['destinations'].values()))
             if 'type' in settings:
@@ -99,7 +122,16 @@ def main(argv=None):
                     raise ValueError('destination account type mismatch')
             if 'account_type' in settings and (settings['account_type'] == 'organization') != args.organization:
                 raise ValueError('destination account type mismatch')
-        entries = parse_manifest(sources)
+        entries = parse_manifest(worker_manifest) if not groups or worker_manifest.get('repositories') else []
+        if not groups and isinstance(worker_manifest, dict):
+            # The generated namespace remains reserved even if its group was
+            # removed entirely; retained pins alone do not authorize a sync.
+            entries = [entry for entry in entries if not (
+                entry.get('source_type') == 'gitlab' and
+                re.fullmatch(r'gitlab-[0-9a-f]{24}', entry.get('destination_name', '')))]
+        if args.asset_max_bytes is None and any(
+                e.get('source_type') == 'gitlab' or e['url'].startswith('https://gitlab.com/') for e in entries):
+            raise ValueError('Forgejo asset byte limit must be configured')
         if not re.fullmatch(r'[0-9]+', args.installation) or not 1 <= args.port <= 65535 or not 1 <= args.jobs <= 64:
             raise ValueError('invalid installation or port')
         if not math.isfinite(args.repository_timeout) or args.repository_timeout <= 0:
@@ -175,6 +207,37 @@ def main(argv=None):
                     except Exception:
                         print('Migration: FAILED: unexpected migration failure', flush=True)
                         return 1
+                if groups:
+                    if recorded:
+                        print('Group onboarding: FAILED: pending migration requires reconciliation', flush=True)
+                        return 1
+                    try:
+                        from repo_mirror.gitlab_onboarding_forgejo import AnonymousGroupAPI, PartialOnboarding, onboard
+                        from repo_mirror.forgejo_git import LocalForgejoAPI
+                        transaction = forgejo_migration.build_migration(args, secret)
+                        destination_api = LocalForgejoAPI(f'http://127.0.0.1:{args.port}', args.token_file)
+                        source_api = AnonymousGroupAPI({g['base_url'] for g in groups})
+                        active_bindings = set()
+                        manifest_bytes = onboard(manifest_bytes, source_api, destination_api, transaction.cas, args.owner,
+                                                 organization=args.organization, active_bindings=active_bindings)
+                        expanded = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
+                        worker_manifest = {k: v for k, v in expanded.items() if k != 'groups'}
+                        profile = next(iter(expanded['destinations']))
+                        def scheduled(repo):
+                            source = repo['source']
+                            name = repo['mirrors'][profile].get('name', '')
+                            if source.get('type') == 'gitlab' and re.fullmatch(r'gitlab-[0-9a-f]{24}', name):
+                                return (source.get('url'), source.get('id'), name) in active_bindings
+                            return True
+                        worker_manifest['repositories'] = [r for r in worker_manifest['repositories'] if scheduled(r)]
+                        entries = parse_manifest(worker_manifest) if worker_manifest['repositories'] else []
+                        snapshot.write_text(json.dumps(worker_manifest), encoding='utf-8')
+                    except PartialOnboarding as exc:
+                        print('Group onboarding: FAILED: ' + str(exc), flush=True)
+                        return 1
+                    except Exception:
+                        print('Group onboarding: FAILED: discovery or publication refused', flush=True)
+                        return 1
                 # A resumed intent already synced its repository; do not repeat
                 # that sync against a configuration the transaction just changed.
                 resumed_keys = {(entry['source']['origin'].lower(), entry['source']['id'])
@@ -213,6 +276,8 @@ def main(argv=None):
                             command = [args.sync_python, '-m', 'repo_mirror.forgejo_sync', '--config', str(snapshot),
                                        '--token-file', args.token_file, '--owner', args.owner, '--port', str(args.port),
                                        '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
+                            if args.asset_max_bytes is not None:
+                                command += ['--asset-max-bytes', args.asset_max_bytes]
                             if SOURCE.fullmatch(source):
                                 if args.app_id:
                                     command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
