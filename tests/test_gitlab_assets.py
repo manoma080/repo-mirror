@@ -482,3 +482,39 @@ class GitLabAssetTokenTests(unittest.TestCase):
             self.module._open = original
         self.assertEqual(calls[0][1].get("PRIVATE-TOKEN"), "glpat-x")
         self.assertNotIn("PRIVATE-TOKEN", calls[1][1])
+
+
+class GitLabDownloadThrottleTests(unittest.TestCase):
+    def test_short_rate_limit_is_retried(self):
+        from repo_mirror import gitlab_assets as a
+        calls = []
+
+        def opening(url, timeout):
+            calls.append(url)
+            if len(calls) == 1:
+                return Response(status=429, headers={"Retry-After": "0"}), lambda: None
+            return Response(b"data"), lambda: None
+
+        original = a._open
+        a._open = opening
+        try:
+            with a.download_asset("https://example.com/file", 10) as result:
+                self.assertEqual(result.file.read(), b"data")
+        finally:
+            a._open = original
+        self.assertEqual(len(calls), 2)
+
+    def test_long_rate_limit_fails_visibly(self):
+        from repo_mirror import gitlab_assets as a
+
+        def opening(url, timeout):
+            return Response(status=429, headers={"Retry-After": "900"}), lambda: None
+
+        original = a._open
+        a._open = opening
+        try:
+            with self.assertRaisesRegex(a.AssetError, "rate limited"):
+                with a.download_asset("https://example.com/file", 10):
+                    pass
+        finally:
+            a._open = original

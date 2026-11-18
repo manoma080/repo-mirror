@@ -292,6 +292,15 @@ def download_asset(url, max_bytes, *, directory=None, timeout=None, max_redirect
                         raise UnsafeAsset('unsafe redirect')
                     current = target
                     continue
+                if response.status == 429:
+                    # GitLab throttles upload/download paths per IP even with a
+                    # token. Honor a short Retry-After; otherwise fail visibly.
+                    raw = response.getheader("Retry-After", "")
+                    wait = int(raw) if raw.isdigit() else None
+                    if wait is None or wait > 120 or hop > 0:
+                        raise AssetError("asset server rate limited")
+                    time.sleep(wait)
+                    continue
                 if response.status != 200:
                     raise AssetError("asset server returned an error")
                 encoding = response.getheader("Content-Encoding", "identity").lower()
