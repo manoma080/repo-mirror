@@ -264,7 +264,7 @@ def main(argv=None):
         valued = {'--token-file', '--timestamp-secret-file', '--journal-dir', '--owner',
                   '--port', '--jobs', '--repository-timeout', '--lock', '--helper',
                   '--helper-python', '--sync-python', '--installation', '--app-id',
-                  '--private-key-file', '--config-repo', '--config-account-type', '--asset-max-bytes'}
+                  '--private-key-file', '--config-repo', '--config-account-type', '--asset-max-bytes', '--gitlab-token-file'}
         seen = {}
         i = 0
         while i < len(extra):

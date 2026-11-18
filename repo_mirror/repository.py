@@ -296,7 +296,8 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     if source["type"] == "gitlab":
         if "source_id" not in settings:
             raise ValueError("GitLab source repository id pin required")
-        src = GitLabSourceAdapter(source["base_url"], source["owner"] + "/" + source_name, settings["source_id"])
+        src = GitLabSourceAdapter(source["base_url"], source["owner"] + "/" + source_name, settings["source_id"],
+                                  token=os.environ.get("MIRROR_GITLAB_TOKEN"))
         upstream = src.base
         project = src.project()
         metadata = {**project, "clone_url": project.get("http_url_to_repo")}

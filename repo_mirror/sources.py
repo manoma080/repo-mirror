@@ -1,5 +1,6 @@
 """sources: see README for an overview."""
 
+import os
 import re
 from urllib.error import HTTPError
 from urllib.parse import quote, urlparse
@@ -93,7 +94,14 @@ def discover_gitlab_projects(source, api):
 
     url = f"{source_api_base(source)}/groups/{quote(source['owner'], safe='')}/projects?include_subgroups=false&with_shared=false"
     projects = {}
-    for project in api.pages(url):
+    listing = api.pages(url)
+    if os.environ.get("MIRROR_GITLAB_TOKEN"):
+        # Authenticated discovery keeps group listings inside the same quota as
+        # the rest of the reads; the adapter ignores it for self-hosted origins.
+        from repo_mirror.gitlab_source_adapter import fetch_group_projects
+        listing = fetch_group_projects(source['base_url'], source['owner'],
+                                       os.environ.get("MIRROR_GITLAB_TOKEN"))
+    for project in listing:
         if not isinstance(project, dict):
             raise ValueError('invalid GitLab project discovery')
         if project.get('visibility') in ('private', 'internal'):

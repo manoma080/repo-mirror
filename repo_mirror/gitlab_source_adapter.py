@@ -25,20 +25,70 @@ def _origin(url):
     return (p.scheme, p.hostname.lower(), p.port or 443)
 
 
+def _api_headers(token):
+    headers = {'Accept': 'application/json'}
+    if token:
+        headers['PRIVATE-TOKEN'] = token
+    return headers
+
+
+def fetch_group_projects(origin, group_path, token=None, *, handlers=()):
+    """List direct projects of a group; token is accepted for gitlab.com only."""
+    origin_url = origin.rstrip('/')
+    expected = _origin(origin_url)
+    if token and origin_url.lower() != 'https://gitlab.com':
+        token = None
+    if token is not None and (not isinstance(token, str) or not token.strip()
+                              or any(ch.isspace() for ch in token)):
+        raise ValueError('invalid GitLab token')
+    url = (origin_url + '/api/v4/groups/' + quote(group_path, safe='') +
+           '/projects?include_subgroups=false&with_shared=false&per_page=100&page=1')
+    opener = build_opener(ProxyHandler({}), _NoRedirect(), *handlers)
+    result = []
+    seen = set()
+    for _ in range(10001):
+        if _origin(url) != expected:
+            raise ValueError('cross-origin API request')
+        with opener.open(Request(url, headers=_api_headers(token)), timeout=30) as response:
+            if _origin(response.geturl()) != expected:
+                raise ValueError('cross-origin API response')
+            batch = json.load(response)
+            next_page = response.headers.get('X-Next-Page', '')
+        if not isinstance(batch, list):
+            raise ValueError('invalid GitLab project listing')
+        result.extend(batch)
+        if not next_page:
+            return result
+        if not next_page.isascii() or not next_page.isdigit() or next_page in seen:
+            raise ValueError('invalid GitLab pagination')
+        seen.add(next_page)
+        url = (origin_url + '/api/v4/groups/' + quote(group_path, safe='') +
+               '/projects?include_subgroups=false&with_shared=false&per_page=100&page=' + next_page)
+    raise ValueError('GitLab pagination limit exceeded')
+
+
 class GitLabSourceAdapter:
     release_identity_kind = 'tag'
 
-    def __init__(self, origin, project_path, project_id, *, handlers=()):
+    def __init__(self, origin, project_path, project_id, *, handlers=(), token=None):
         p = urlsplit(origin)
         self.origin = _origin(origin)
         if p.path not in ('', '/') or p.query:
             raise ValueError('origin must not include a path')
-        if (not isinstance(project_path, str) or len(project_path.split('/')) < 2 or
-                any(not part or part in ('.', '..') for part in project_path.split('/'))):
+        if not isinstance(project_path, str) or len(project_path.split('/')) < 2 or any(
+                not part or part in ('.', '..') for part in project_path.split('/')):
             raise ValueError('invalid project path')
         if type(project_id) is not int or project_id <= 0:
             raise ValueError('invalid project ID')
         self.origin_url = origin.rstrip('/')
+        # Authenticated reads exist only for gitlab.com; self-hosted instances
+        # stay anonymous until their operators opt in explicitly.
+        if token is not None and (not isinstance(token, str) or not token.strip()
+                                  or any(ch.isspace() for ch in token)):
+            raise ValueError('invalid GitLab token')
+        if token and self.origin_url.lower() != 'https://gitlab.com':
+            token = None
+        self.token = token
         self.project_path = project_path
         self.project_id = project_id
         self.release_scope = (self.origin_url, project_id)
@@ -47,11 +97,16 @@ class GitLabSourceAdapter:
         self.opener = build_opener(ProxyHandler({}), _NoRedirect(), *handlers)
 
     def _get(self, url):
+        headers = {'Accept': 'application/json'}
+        if self.token:
+            # The token rides only on API requests to this adapter's origin;
+            # asset downloads never receive it.
+            headers['PRIVATE-TOKEN'] = self.token
         for _ in range(6):
             if _origin(url) != self.origin:
                 raise ValueError('cross-origin API request')
             try:
-                with self.opener.open(Request(url, headers={'Accept': 'application/json'}), timeout=30) as response:
+                with self.opener.open(Request(url, headers=headers), timeout=30) as response:
                     if _origin(response.geturl()) != self.origin:
                         raise ValueError('cross-origin API response')
                     return json.load(response), response.headers

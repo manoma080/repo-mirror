@@ -262,6 +262,14 @@ def read_private_key(path):
     return read_secure_file(path)[0]
 
 
+def read_owner_secret(path, label):
+    """Read a single-line owner-only credential, rejecting whitespace tricks."""
+    value = read_secure_file(path)[0].strip()
+    if not value or '\n' in value or '\r' in value or any(ch.isspace() for ch in value):
+        raise ValueError(f'invalid {label}')
+    return value
+
+
 @contextmanager
 def journal_lock(path, *, shared=False):
     # Lock the directory inode itself: no replaceable lock file, symlink or
@@ -348,6 +356,7 @@ def main(argv=None):
     parser.add_argument('--organization', action='store_true')
     parser.add_argument('--port', type=int, default=3300)
     parser.add_argument('--asset-max-bytes', help='operator-selected per-asset byte limit for this Forgejo destination')
+    parser.add_argument('--gitlab-token-file', help='optional owner-only gitlab.com read token file')
     parser.add_argument('--app-id')
     parser.add_argument('--private-key-file')
     parser.add_argument('--use-github-token', action='store_true', help='explicitly use GITHUB_TOKEN (not refreshable)')
@@ -355,6 +364,8 @@ def main(argv=None):
     try:
         if args.asset_max_bytes is not None:
             parse_asset_max_bytes(args.asset_max_bytes)
+        if args.gitlab_token_file is not None:
+            os.environ['MIRROR_GITLAB_TOKEN'] = read_owner_secret(args.gitlab_token_file, 'GitLab token')
         with open(args.config, encoding='utf-8') as stream:
             configured = json.load(stream, object_pairs_hook=unique_pairs)
         entries = parse_manifest(configured)
@@ -479,7 +490,7 @@ def gitlab_tag_verifier(src, verify_ref):
     return verify
 
 
-def source_pipeline(url, token, *, source_type=None, source_id=None):
+def source_pipeline(url, token, *, source_type=None, source_id=None, gitlab_token=None):
     """Return (source, source token, adapter, repository name) for one source URL."""
     from repo_mirror.adhoc import parse_repo_url
     kind, base, owner, name = parse_repo_url(url, source_type=source_type, allow_forgejo_port=True)
@@ -488,7 +499,8 @@ def source_pipeline(url, token, *, source_type=None, source_id=None):
             raise ValueError('source repository ID mismatch')
         from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
         source = {'type': 'gitlab', 'base_url': base, 'owner': owner, 'repos': [name]}
-        return source, None, GitLabSourceAdapter(base, owner + '/' + name, source_id), name
+        extra = {'token': gitlab_token} if gitlab_token else {}
+        return source, None, GitLabSourceAdapter(base, owner + '/' + name, source_id, **extra), name
     base, owner, name = url.rsplit('/', 2)
     if base.lower() == 'https://github.com':
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': owner}
@@ -549,7 +561,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
             from repo_mirror.adhoc import parse_repo_url
             kind = parse_repo_url(_source_url(identity, entry), source_type=entry.get('source_type') if entry else None, allow_forgejo_port=True)[0]
             if kind == 'gitlab':
-                source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token, source_type='gitlab', source_id=entry.get('source_id') if entry else None)
+                source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token, source_type='gitlab', source_id=entry.get('source_id') if entry else None, gitlab_token=os.environ.get('MIRROR_GITLAB_TOKEN'))
             elif entry and entry.get('source_type'):
                 source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), token, source_type=entry['source_type'])
             else:
