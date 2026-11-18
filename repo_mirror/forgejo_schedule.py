@@ -73,6 +73,7 @@ def main(argv=None):
     parser.add_argument('--organization', action='store_true')
     parser.add_argument('--port', type=int, default=3300)
     parser.add_argument('--asset-max-bytes', help='operator-selected per-asset byte limit for this Forgejo destination')
+    parser.add_argument('--gitlab-token-file', help='optional owner-only gitlab.com read token file')
     parser.add_argument('--jobs', type=int, default=4, help='maximum concurrent syncs (default: 4)')
     parser.add_argument('--repository-timeout', type=float, default=3600, metavar='SECONDS',
                         help='maximum runtime per repository in seconds (default: 3600)')
@@ -278,6 +279,8 @@ def main(argv=None):
                                        '--timestamp-secret-file', args.timestamp_secret_file, '--journal-dir', args.journal_dir]
                             if args.asset_max_bytes is not None:
                                 command += ['--asset-max-bytes', args.asset_max_bytes]
+                            if args.gitlab_token_file is not None:
+                                command += ['--gitlab-token-file', args.gitlab_token_file]
                             if SOURCE.fullmatch(source):
                                 if args.app_id:
                                     command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
