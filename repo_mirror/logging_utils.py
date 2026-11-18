@@ -1,8 +1,11 @@
 """logging_utils: see README for an overview."""
 
+import http.client
 import math
 import os
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -174,6 +177,53 @@ SAFE_ERROR_MESSAGES = frozenset(
 )
 
 
+def _safe_operation(exc):
+    """Return the sanitized ``(target, operation, method)`` label, or None."""
+    operation = getattr(exc, "mirror_operation", None)
+    if (
+        type(operation) is tuple
+        and len(operation) == 3
+        and all(type(part) is str for part in operation)
+        and (
+            operation == ("destination", "release", "create")
+            or (
+                operation[0] == "destination"
+                and operation[1] == "app authentication"
+                and operation[2] in ("GET", "POST")
+            )
+            or (
+                operation[0] in ("source", "destination")
+                and operation[1] in ("API", "asset")
+                and operation[2] in ("GET", "POST", "PUT", "PATCH", "DELETE", "request")
+            )
+        )
+    ):
+        return operation
+    return None
+
+
+def _network_reason(exc):
+    """Map a transport failure to a fixed, public-safe cause label.
+
+    Only the exception *type* selects the label; the exception message is never
+    emitted because it can carry host names, ports or credentials.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return "timeout"
+    if isinstance(reason, socket.gaierror):
+        return "dns failure"
+    if isinstance(reason, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(reason, ConnectionResetError):
+        return "connection reset"
+    if isinstance(reason, (ssl.SSLError, ssl.CertificateError)):
+        return "tls failure"
+    if isinstance(reason, (http.client.HTTPException, OSError)):
+        return "connection failure"
+    return "transport failure"
+
+
 def error_detail(exc):
     # Never emit arbitrary exception text, URLs, response bodies or class names.
     """Build a short, redacted description of an exception for public logs."""
@@ -200,25 +250,8 @@ def error_detail(exc):
     if isinstance(exc, HTTPError):
         if type(exc.code) is int and 100 <= exc.code <= 599:
             detail = f"HTTP {exc.code}"
-            operation = getattr(exc, "mirror_operation", None)
-            if (
-                type(operation) is tuple
-                and len(operation) == 3
-                and all(type(part) is str for part in operation)
-                and (
-                    operation == ("destination", "release", "create")
-                    or (
-                        operation[0] == "destination"
-                        and operation[1] == "app authentication"
-                        and operation[2] in ("GET", "POST")
-                    )
-                    or (
-                        operation[0] in ("source", "destination")
-                        and operation[1] in ("API", "asset")
-                        and operation[2] in ("GET", "POST", "PUT", "PATCH", "DELETE", "request")
-                    )
-                )
-            ):
+            operation = _safe_operation(exc)
+            if operation is not None:
                 rate = None
                 if exc.code == 403:
                     try:
@@ -229,6 +262,15 @@ def error_detail(exc):
                 detail += f" ({operation[0]} {operation[1]} {operation[2]}{suffix})"
             return detail
         return "HTTPError"
+    if isinstance(exc, URLError):
+        # Transport failures previously reported only the class name, which made
+        # a source-host outage indistinguishable from any other error.
+        detail = f"URLError ({_network_reason(exc)})"
+        operation = _safe_operation(exc)
+        if operation is not None:
+            detail += f" ({operation[0]} {operation[1]} {operation[2]})"
+        return detail
+
     if type(exc) is RuntimeError and exc.args == ("release asset uploads failed",):
         status = getattr(exc, "mirror_upload_status", None)
         if type(status) is int and 100 <= status <= 599:
