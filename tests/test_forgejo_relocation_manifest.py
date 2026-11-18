@@ -49,8 +49,8 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
             result = _sync_requested(SimpleNamespace(port=3300, owner='dest'), [identity], dest,
                                      None, 'token', 'fixture-signing-secret-0123456789abcdef', '/tmp', mappings={identity: entry})
         self.assertEqual(result, 0)
-        # Git operations receive an owner/name identity, never the canonical URL.
-        git_identity = 'new/repo'
+        # Git operations use the current forge origin; provenance remains legacy.
+        git_identity = identity
         self.assertEqual(sync.call_args.args[2], git_identity)
         self.assertEqual(sync.call_args.kwargs['recovery_identity'], old)
         self.assertTrue(all(c.args[2] == git_identity and c.kwargs['recovery_identity'] == old

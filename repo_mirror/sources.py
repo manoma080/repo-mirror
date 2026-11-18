@@ -70,7 +70,7 @@ def verified_source_identity(source, name, expected_id, metadata):
         raise ValueError('source repository id mismatch or missing')
     url = metadata.get('html_url')
     try:
-        kind, base, owner, repo = parse_repo_url(url)
+        kind, base, owner, repo = parse_repo_url(url, allow_forgejo_port=source['type'] == 'forgejo')
         original_base = source['base_url'].rstrip('/')
         if source['type'] == 'github' and original_base == GITHUB:
             original_base = 'https://github.com'

@@ -266,6 +266,22 @@ sys.exit(0 if status == 143 else 1)
         self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertFalse((tmp_path / 'result').exists())
 
+    def test_failure_diagnostics_identify_stage_without_helper_output(self):
+        tmp = self.tmp_path
+        repo, helper = fixture(tmp)
+        helper.write_text('import sys\nprint("sensitive-token", file=sys.stderr)\nraise SystemExit(1)\n')
+        result = launch(tmp, repo, helper)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Updater failed: fetch', result.stderr)
+        self.assertNotIn('sensitive-token', result.stderr)
+        helper.write_text('import os, sys\na=sys.argv[sys.argv.index("--")+1:]\nos.execvp(a[0], a)\n')
+        (repo / 'config-forgejo.json').write_text('["https://evil.invalid/repo"]')
+        git(repo, 'add', '.'); git(repo, 'commit', '-m', 'invalid')
+        result = launch(tmp, repo, helper)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Updater failed: manifest validation', result.stderr)
+        self.assertFalse((tmp / 'result').exists())
+
     def test_invalid_manifest_fails_before_scheduler(self):
         tmp_path = self.tmp_path
         repo, helper = fixture(tmp_path)

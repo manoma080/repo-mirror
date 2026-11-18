@@ -19,8 +19,8 @@ from repo_mirror.constants import NAME
 from repo_mirror.source_filter import entry_urls
 
 
-def parse_repo_url(url):
-    """Return (source_type, base_url, owner, name) for an exact repository URL."""
+def parse_repo_url(url, *, allow_forgejo_port=False):
+    """Parse an exact repository URL; ports are opt-in for Forgejo verification."""
     try:
         parsed = urlsplit(url)
         host = parsed.hostname
@@ -32,7 +32,7 @@ def parse_repo_url(url):
             and bool(host)
             and parsed.username is None
             and parsed.password is None
-            and parsed.port is None
+            and (parsed.port is None or (allow_forgejo_port and host != 'github.com' and parsed.port > 0))
             and not parsed.query
             and not parsed.fragment
             and "?" not in url
@@ -41,7 +41,7 @@ def parse_repo_url(url):
             and parts[0] == ""
         )
     except ValueError:
-        valid = False
+        raise ValueError("invalid source repository URL") from None
     if not valid:
         raise ValueError("invalid source repository URL")
     owner, name = parts[1], parts[2]
@@ -49,7 +49,8 @@ def parse_repo_url(url):
         raise ValueError("invalid source repository URL")
     if host == "github.com":
         return "github", "https://github.com", owner, name
-    return "forgejo", "https://" + host, owner, name
+    authority = parsed.netloc if parsed.port is not None else host
+    return "forgejo", "https://" + authority, owner, name
 
 
 def _source_for(source_type, base_url, owner, name):

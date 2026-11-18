@@ -147,13 +147,16 @@ class SourcePreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=src) as factory, \
              patch.object(forgejo_sync, 'sync_refs', return_value=0) as git, \
-             patch.object(forgejo_sync, 'snapshot_refs', return_value=(None, {}, {})), \
+             patch.object(forgejo_sync, 'snapshot_refs', return_value=(None, {}, {})) as snapshot, \
              patch.object(forgejo_sync, 'ForgejoDestinationAdapter') as adapter, \
              patch.object(forgejo_sync, 'mirror_releases') as mirror:
             adapter.return_value.target = 'target'
             self.assertEqual(forgejo_sync._sync_requested(args, ['manoma080/mirror-test'], dest, 'github-token', 'local', 'secret', tmp), 0)
             self.assertEqual(urls, ['https://api.github.com/repos/manoma080/mirror-test/releases'])
             self.assertEqual(factory.call_args.args[:2], ('manoma080/mirror-test', 'github-token'))
+            self.assertEqual(git.call_args.args[2], 'manoma080/mirror-test')
+            self.assertEqual(len(snapshot.call_args_list), 2)
+            self.assertTrue(all(c.args[2] == 'manoma080/mirror-test' for c in snapshot.call_args_list))
             self.assertEqual(git.call_args.kwargs, {'source_token': 'github-token', 'expected': (1, 'marker')})
             self.assertTrue(checks)
             self.assertIs(mirror.call_args.args[3], src)

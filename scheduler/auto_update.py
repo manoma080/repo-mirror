@@ -206,6 +206,7 @@ def main(argv=None):
     extra = args.scheduler_args
     if extra and extra[0] == '--':
         extra = extra[1:]
+    stage = 'configuration'
     try:
         if not re.fullmatch(r'[0-9]+', args.installation):
             raise ValueError('installation')
@@ -246,6 +247,7 @@ def main(argv=None):
         locks = [seen['--lock']] if '--lock' in seen else []
         if len(locks) != 1 or os.path.realpath(locks[0]) == os.path.realpath(args.job_lock):
             raise ValueError('distinct scheduler lock required')
+        stage = 'state and lock'
         state = Path(args.state_dir)
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = state.lstat()
@@ -272,21 +274,26 @@ def main(argv=None):
                 root = Path(tmp)
                 def run(command, quiet=True):
                     return checked_process(command, cwd=root, env=env, lock_fd=fd, quiet=quiet)
+                stage = 'git initialization'
                 if run(['git', 'init', '--bare', str(root / 'objects')]):
                     raise ValueError('git init')
                 fetch = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--',
                          'git', '--git-dir', str(root / 'objects'), 'fetch', '--no-tags', '--no-recurse-submodules', '--', args.remote, 'refs/heads/main']
+                stage = 'fetch'
                 if run(fetch):
                     raise ValueError('fetch failed')
                 # Resolve only FETCH_HEAD from this successful, fresh fetch, never a cached ref.
+                stage = 'commit resolution'
                 commit = subprocess.check_output(['git', '--git-dir', str(root / 'objects'), 'rev-parse', '--verify', 'FETCH_HEAD^{commit}'], cwd=root, env=env, stderr=subprocess.DEVNULL, text=True).strip()
                 if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', commit):
                     raise ValueError('invalid commit')
+                stage = 'snapshot archive'
                 archive = root / 'snapshot.tar'
                 with archive.open('wb') as output:
                     status = subprocess.run(['git', '--git-dir', str(root / 'objects'), 'archive', '--format=tar', commit], cwd=root, env=env, stdout=output, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, pass_fds=(fd,)).returncode
                 if status:
                     raise ValueError('archive')
+                stage = 'snapshot extraction'
                 snapshot = root / 'snapshot'
                 snapshot.mkdir(mode=0o700)
                 with tarfile.open(archive) as tar:
@@ -295,6 +302,7 @@ def main(argv=None):
                         if path.is_absolute() or '..' in path.parts or not (member.isfile() or member.isdir()):
                             raise ValueError('unsafe snapshot')
                         tar.extract(member, snapshot, filter='data')
+                stage = 'manifest validation'
                 manifest = snapshot / 'config-forgejo.json'
                 sources = json.loads(manifest.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
                 if not valid_manifest(sources):
@@ -305,10 +313,11 @@ def main(argv=None):
                         raise ValueError('destination profile runtime mismatch')
                 if not (snapshot / 'repo_mirror' / 'forgejo_schedule.py').is_file():
                     raise ValueError('scheduler missing')
+                stage = 'scheduler launch'
                 print(f'Updater fetched commit: {commit}', file=sys.stderr, flush=True)
                 return checked_process([sys.executable, '-m', 'repo_mirror.forgejo_schedule', 'run', '--manifest', str(manifest), *extra], cwd=snapshot, env=scheduler_env, lock_fd=fd, quiet=False, scheduler=True)
     except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError):
-        print('Updater failed: fetch, snapshot, configuration, or lock error', file=sys.stderr)
+        print(f'Updater failed: {stage}', file=sys.stderr)
         return 2
 
 
