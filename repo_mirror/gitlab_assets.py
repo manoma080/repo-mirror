@@ -99,7 +99,14 @@ class Download:
     size: int | None = None
 
 
-def _open(url, timeout):
+def _same_origin(a, b):
+    """True when both URLs share scheme, host and effective port."""
+    left, right = urlsplit(a), urlsplit(b)
+    return (left.scheme.lower(), left.hostname, left.port or 443) == (
+        right.scheme.lower(), right.hostname, right.port or 443)
+
+
+def _open(url, timeout, headers=None):
     started = time.monotonic()
     parts = validate_url(url, allow_query=True)
     host = parts.hostname
@@ -193,14 +200,16 @@ def _open(url, timeout):
         target = parts.path or "/"
         if "?" in url:
             target += "?" + parts.query
-        conn.request("GET", target, headers={"Accept-Encoding": "identity", "User-Agent": "repo-mirror"})
+        request_headers = {"Accept-Encoding": "identity", "User-Agent": "repo-mirror"}
+        request_headers.update(headers or {})
+        conn.request("GET", target, headers=request_headers)
         return conn.getresponse(), close
     except BaseException:
         close()
         raise
 
 
-def _open_before_deadline(url, deadline):
+def _open_before_deadline(url, deadline, headers=None):
     """Bound DNS and response headers even when the system resolver stalls."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -210,7 +219,7 @@ def _open_before_deadline(url, deadline):
     state = {"abandoned": False}
     def run():
         try:
-            result = _open(url, remaining)
+            result = _open(url, remaining, headers) if headers else _open(url, remaining)
             with lock:
                 if state["abandoned"]:
                     result[0].close()
@@ -237,7 +246,7 @@ def _open_before_deadline(url, deadline):
 
 
 @contextlib.contextmanager
-def download_asset(url, max_bytes, *, directory=None, timeout=None, max_redirects=3):
+def download_asset(url, max_bytes, *, directory=None, timeout=None, max_redirects=3, headers=None):
     """Yield Download with a rewinded temporary file, or oversize=True.
 
     File is deleted at context exit; the caller must upload before exiting.
@@ -271,7 +280,7 @@ def download_asset(url, max_bytes, *, directory=None, timeout=None, max_redirect
         current = url
         for hop in range(max_redirects + 1):
             validate_url(current, allow_query=hop > 0)
-            response, close = _open_before_deadline(current, deadline)
+            response, close = _open_before_deadline(current, deadline, headers if _same_origin(current, url) else None)
             try:
                 if response.status in (301, 302, 303, 307, 308):
                     location = response.getheader("Location")

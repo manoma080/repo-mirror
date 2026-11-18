@@ -483,6 +483,18 @@ def validate_unique_source_tags(releases):
         raise ValueError("duplicate source release tag")
 
 
+def gitlab_link_headers(source, url):
+    """Attach the gitlab.com token only to same-origin asset reads."""
+    token = os.environ.get("MIRROR_GITLAB_TOKEN")
+    if not token or not isinstance(source, dict) or source.get("type") != "gitlab":
+        return None
+    asset, origin = urlparse(url), urlparse(source["base_url"])
+    if (asset.scheme, asset.hostname, asset.port or 443) == (
+            origin.scheme, origin.hostname, origin.port or 443):
+        return {"PRIVATE-TOKEN": token}
+    return None
+
+
 def validate_source_release_listing(releases, *, allow_empty_target=False):
     """Strict preflight of the complete source snapshot before destination writes."""
     if not isinstance(releases, list):
@@ -932,6 +944,8 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     from repo_mirror import gitlab_assets
                     from repo_mirror.constants import MAX_ASSET_SIZE
                     from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
+
+
                     links = src.list_release_assets(tag)
                     if not isinstance(links, list):
                         raise ValueError("invalid source link assets")
@@ -957,7 +971,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         raise ValueError("invalid source link assets")
                     link_assets, preserved_links = [], []
                     for link, rendered in normalized_links:
-                        with gitlab_assets.download_asset(link["url"], cap) as downloaded:
+                        with gitlab_assets.download_asset(link["url"], cap, **(
+                            {"headers": gitlab_link_headers(source, link["url"])}
+                            if gitlab_link_headers(source, link["url"]) else {})) as downloaded:
                             if downloaded.oversize:
                                 preserved_links.append(rendered)
                                 link_assets.append((link, None, None))
@@ -1229,7 +1245,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         # streams are rechecked once at the final checkpoint. Each
                         # transferred link is separately checked against its hash.
                         for link, size, expected_hash in (link_assets if check_bytes else []):
-                            with gitlab_assets.download_asset(link["url"], cap) as downloaded:
+                            with gitlab_assets.download_asset(link["url"], cap, **(
+                            {"headers": gitlab_link_headers(source, link["url"])}
+                            if gitlab_link_headers(source, link["url"]) else {})) as downloaded:
                                 if size is None:
                                     if not downloaded.oversize:
                                         raise ReleaseRecoveryError("changed")
@@ -1826,7 +1844,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         )
                         with tempfile.TemporaryFile() as data:
                             if tag_identity:
-                                with gitlab_assets.download_asset(asset["browser_download_url"], cap) as downloaded:
+                                with gitlab_assets.download_asset(asset["browser_download_url"], cap, **(
+                                    {"headers": gitlab_link_headers(source, asset["browser_download_url"])}
+                                    if gitlab_link_headers(source, asset["browser_download_url"]) else {})) as downloaded:
                                     if downloaded.oversize or downloaded.size != asset["size"]:
                                         raise ReleaseRecoveryError("changed")
                                     for chunk in iter(lambda: downloaded.file.read(CHUNK_SIZE), b""):

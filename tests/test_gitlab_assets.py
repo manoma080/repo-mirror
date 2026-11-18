@@ -456,3 +456,29 @@ class GitLabAssetsTests(unittest.TestCase):
         for url in urls:
             with self.subTest(url=url), self.assertRaises(UnsafeAsset):
                 validate_url(url)
+
+
+class GitLabAssetTokenTests(unittest.TestCase):
+    def setUp(self):
+        from repo_mirror import gitlab_assets as module
+        self.module = module
+
+    def test_same_origin_token_used_and_dropped_on_redirect(self):
+        calls = []
+
+        def opening(url, timeout, headers=None):
+            calls.append((url, dict(headers or {})))
+            if len(calls) == 1:
+                return Response(status=302, headers={"Location": "https://cdn.example.com/file"}), lambda: None
+            return Response(b"data"), lambda: None
+
+        original = self.module._open
+        self.module._open = opening
+        try:
+            with self.module.download_asset("https://gitlab.com/uploads/file", 10,
+                                            headers={"PRIVATE-TOKEN": "glpat-x"}) as result:
+                self.assertEqual(result.file.read(), b"data")
+        finally:
+            self.module._open = original
+        self.assertEqual(calls[0][1].get("PRIVATE-TOKEN"), "glpat-x")
+        self.assertNotIn("PRIVATE-TOKEN", calls[1][1])
