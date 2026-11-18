@@ -237,12 +237,12 @@ jobs:
           PREPARE_OUTCOME: ${{ steps.prepare-journal.outcome }}
           JOURNAL_PRESENT: ${{ steps.prepare-journal.outputs.present }}
           MIRROR_OUTCOME: ${{ steps.mirror-run.outcome }}
-          JOB_CANCELLED: ${{ cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           # Cancellation or an unknown outcome can interrupt journal writes.
-          if [ "${JOB_CANCELLED:-}" != false ] || { [ "${MIRROR_OUTCOME:-}" != success ] && [ "${MIRROR_OUTCOME:-}" != failure ]; }; then
+          # A cancelled or unknown step outcome can interrupt journal writes.
+          if [ "${MIRROR_OUTCOME:-}" != success ] && [ "${MIRROR_OUTCOME:-}" != failure ]; then
             echo 'Mirror canceled or outcome unknown; retaining fence' >&2; exit 1
           fi
           if [ "${PREPARE_OUTCOME:-}" != success ]; then exit 0; fi
