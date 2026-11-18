@@ -19,12 +19,13 @@ from repo_mirror.constants import NAME
 from repo_mirror.source_filter import entry_urls
 
 
-def parse_repo_url(url, *, allow_forgejo_port=False):
+def parse_repo_url(url, *, allow_forgejo_port=False, source_type=None):
     """Parse an exact repository URL; ports are opt-in for Forgejo verification."""
     try:
         parsed = urlsplit(url)
         host = parsed.hostname
         parts = parsed.path.split("/")
+        kind = source_type or ('github' if host == 'github.com' else 'gitlab' if host == 'gitlab.com' else 'forgejo')
         valid = (
             bool(url)
             and all(ord(c) > 32 and ord(c) != 127 for c in url)
@@ -37,20 +38,24 @@ def parse_repo_url(url, *, allow_forgejo_port=False):
             and not parsed.fragment
             and "?" not in url
             and "#" not in url
-            and len(parts) == 3
+            and kind in ('github', 'forgejo', 'gitlab')
+            and not (host == 'github.com' and kind != 'github')
+            and not (kind == 'github' and host != 'github.com')
+            and not (host == 'gitlab.com' and kind != 'gitlab')
+            and (len(parts) >= 3 if kind == 'gitlab' else len(parts) == 3)
             and parts[0] == ""
         )
     except ValueError:
         raise ValueError("invalid source repository URL") from None
     if not valid:
         raise ValueError("invalid source repository URL")
-    owner, name = parts[1], parts[2]
-    if not NAME.fullmatch(owner) or not NAME.fullmatch(name) or owner in (".", "..") or name in (".", ".."):
+    if any(not NAME.fullmatch(part) or part in ('.', '..') for part in parts[1:]):
         raise ValueError("invalid source repository URL")
+    owner, name = '/'.join(parts[1:-1]), parts[-1]
     if host == "github.com":
         return "github", "https://github.com", owner, name
     authority = parsed.netloc if parsed.port is not None else host
-    return "forgejo", "https://" + authority, owner, name
+    return kind, "https://" + authority, owner, name
 
 
 def _source_for(source_type, base_url, owner, name):
@@ -65,15 +70,32 @@ def _matches_owner(source, kind, base, owner):
             and str(source.get("owner", "")).lower() == owner.lower())
 
 
+def parse_selected_url(url, sources):
+    """Resolve explicitly configured origins before applying host heuristics."""
+    matches = []
+    for source in sources:
+        if source.get('type') != 'gitlab':
+            continue
+        try:
+            parsed = parse_repo_url(url, source_type='gitlab')
+        except ValueError:
+            continue
+        if _matches_owner(source, *parsed[:3]):
+            matches.append(parsed)
+    if len({row[:3] for row in matches}) > 1:
+        raise ValueError('ambiguous source repository URL')
+    return matches[0] if matches else parse_repo_url(url)
+
+
 def add_to_config(config, source_urls, destination="", visibility=None, *, protect_pins=True):
     """Add URLs and optional per-repository destination settings."""
     if 'repositories' in config or 'destinations' in config:
         from repo_mirror.config_named import normalize_config
-        normalize_config(config)
+        runtime = normalize_config(config)
         import copy
         candidate = copy.deepcopy(config)
         profile = next(iter(candidate['destinations']))
-        parsed = [parse_repo_url(part.strip()) for part in source_urls.split(',')]
+        parsed = [parse_selected_url(part.strip(), runtime['sources']) for part in source_urls.split(',')]
         identities = [tuple(x.lower() for x in row) for row in parsed]
         if len(set(identities)) != len(identities):
             raise ValueError('duplicate source repository')
@@ -82,13 +104,15 @@ def add_to_config(config, source_urls, destination="", visibility=None, *, prote
         if destination and (len(parsed) != 1 or len(destination) > 100 or not NAME.fullmatch(destination) or destination in ('.', '..')):
             raise ValueError('custom destination requires one URL and a valid repository name')
         for (kind, base, owner, name), identity in zip(parsed, identities):
-            entry = next((e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'])) == identity), None)
+            entry = next((e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'], source_type=e['source'].get('type'))) == identity), None)
             if entry is None:
                 entry = {'source': {'url': base + '/' + owner + '/' + name}, 'mirrors': {profile: {}}}
+                if kind == 'gitlab' and base != 'https://gitlab.com':
+                    entry['source']['type'] = 'gitlab'
                 candidate['repositories'].append(entry)
             mirror = entry['mirrors'][profile]
             if destination:
-                _, _, saved_owner, saved_name = parse_repo_url(entry['source']['url'])
+                _, _, saved_owner, saved_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
                 current_name = mirror.get('name', 'mirror-' + saved_owner + '-' + saved_name)
                 if 'id' in mirror and destination != current_name:
                     raise ValueError('cannot rename pinned destination without explicit reconciliation')
@@ -102,7 +126,7 @@ def add_to_config(config, source_urls, destination="", visibility=None, *, prote
             config.update(candidate)
         return changed
     parts = source_urls.split(",")
-    parsed = [parse_repo_url(part.strip()) for part in parts]
+    parsed = [parse_selected_url(part.strip(), config['sources']) for part in parts]
     identities = [tuple(part.lower() for part in item) for item in parsed]
     if len(set(identities)) != len(identities):
         raise ValueError("duplicate source repository")
@@ -170,7 +194,7 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
         raise ValueError('destination profile runtime mismatch')
     if account_type not in ('personal', 'organization') or not isinstance(owner, str) or not NAME.fullmatch(owner):
         raise ValueError('invalid destination account')
-    requested = [tuple(x.lower() for x in parse_repo_url(part.strip())) for part in source_urls.split(',')]
+    requested = [tuple(x.lower() for x in parse_selected_url(part.strip(), normalized['sources'])) for part in source_urls.split(',')]
     # A separate anonymous client per Forgejo origin binds both direct requests
     # and every redirect, including discovery and subsequent identity rechecks.
     from repo_mirror.github_api import API, SourceAPI
@@ -188,6 +212,16 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
             client.restrict_origin(base)
             forgejo_clients[base] = client
         return forgejo_clients[base]
+
+    def read_source(api, source, name, upstream):
+        metadata = api.request('GET', upstream)
+        if source['type'] == 'gitlab':
+            if (not isinstance(metadata, dict) or metadata.get('visibility') != 'public'
+                    or metadata.get('path_with_namespace') != source['owner'] + '/' + name):
+                raise ValueError('GitLab project identity or visibility mismatch')
+            metadata = {**metadata, 'clone_url': metadata.get('http_url_to_repo')}
+        validate_source_clone_url(source, name, metadata)
+        return metadata
 
     selected, seen = [], set()
     for source in normalized['sources']:
@@ -215,9 +249,10 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
         else:
             marker = source_marker(source, name)
         api = source_client(source)
-        upstream = source_api_base(source) + '/repos/' + quote(source['owner'], safe='') + '/' + quote(name, safe='')
-        metadata = api.request('GET', upstream)
-        validate_source_clone_url(source, name, metadata)
+        upstream = (source_api_base(source) + '/projects/' + quote(source['owner'] + '/' + name, safe='')
+                    if source['type'] == 'gitlab' else
+                    source_api_base(source) + '/repos/' + quote(source['owner'], safe='') + '/' + quote(name, safe=''))
+        metadata = read_source(api, source, name, upstream)
         sid = metadata.get('id') if isinstance(metadata, dict) else None
         if type(sid) is not int or sid <= 0:
             raise ValueError('invalid source repository id')
@@ -233,6 +268,10 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
         prepared.append((source, name, target_name, settings, marker, api, upstream, sid, target, repo))
     verified_destinations = []
     for source, name, target_name, settings, marker, api, upstream, sid, target, repo in prepared:
+        if source['type'] == 'gitlab':
+            current = read_source(api, source, name, upstream)
+            if type(current.get('id')) is not int or current['id'] != sid:
+                raise ValueError('source repository id changed')
         if repo is None:
             payload = {'name': target_name, 'private': settings.get('visibility', 'private') != 'public',
                        'auto_init': False, 'description': marker + ' [repo-mirror:initializing:v1]'}
@@ -250,7 +289,7 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
             created_id = created.get('id')
             if type(created_id) is not int or created_id <= 0:
                 raise ValueError('invalid created destination repository id')
-            current = api.request('GET', upstream)
+            current = read_source(api, source, name, upstream)
             if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != sid:
                 raise ValueError('source repository id changed')
             validate_source_clone_url(source, name, current)
@@ -274,11 +313,11 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
         if type(did) is not int or did <= 0:
             raise ValueError('invalid destination repository id')
         verified_destinations.append((target, marker, did))
-        current = api.request('GET', upstream)
+        current = read_source(api, source, name, upstream)
         if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != sid:
             raise ValueError('source repository id changed')
         if 'repositories' in candidate:
-            entry = next(e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'])) == (source['type'], source['base_url'].lower(), source['owner'].lower(), name.lower()))
+            entry = next(e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'], source_type=e['source'].get('type'))) == (source['type'], source['base_url'].lower(), source['owner'].lower(), name.lower()))
             entry['source']['id'] = sid
             entry['mirrors'][next(iter(candidate['destinations']))]['id'] = did
         else:
@@ -291,7 +330,7 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
         if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != expected:
             raise ValueError('destination repository id changed')
     for source, name, _, _, _, api, upstream, sid, _, _ in prepared:
-        current = api.request('GET', upstream)
+        current = read_source(api, source, name, upstream)
         if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != sid:
             raise ValueError('source repository id changed')
         validate_source_clone_url(source, name, current)
@@ -348,7 +387,7 @@ def one_time_sources(source_urls, plan, configured_sources=()):
     sources = []
     for part in source_urls.split(","):
         url = part.strip()
-        source_type, base_url, owner, name = parse_repo_url(url)
+        source_type, base_url, owner, name = parse_selected_url(url, configured_sources)
         if url.lower() not in covered:
             if any(source.get("repos") == "all" and _matches_owner(source, source_type, base_url, owner)
                    for source in configured_sources):

@@ -1,6 +1,6 @@
 # Repository mirror
 
-This project copies public GitHub and Forgejo repositories into GitHub repositories (private by default), and supports copying GitHub and public Forgejo repositories to a local Forgejo host. The original repository is the **source**. The copy is the **mirror**. Forgejo is a self-hosted Git server.
+This project copies public GitHub, Forgejo and GitLab repositories into GitHub repositories (private by default), and supports copying GitHub and public Forgejo and GitLab repositories to a local Forgejo host. The original repository is the **source**. The copy is the **mirror**. Forgejo is a self-hosted Git server.
 
 ## What it copies
 
@@ -21,7 +21,7 @@ Both paths use the shared Git ref reconciliation and release orchestration, with
 
 | | GitHub destination | Local Forgejo destination |
 | --- | --- | --- |
-| Sources and execution | Public GitHub or Forgejo sources; GitHub Actions, scheduled or manual; up to eight concurrent repositories. | Any configured GitHub source, plus public Forgejo sources; local runner with systemd/cron templates, not automatically installed or enabled; four concurrent processes by default. The scheduled manifest is a restricted subset, not the GitHub config. |
+| Sources and execution | Public GitHub, Forgejo or GitLab sources; GitHub Actions, scheduled or manual; up to eight concurrent repositories. | Any configured GitHub source, plus public Forgejo and GitLab sources; local runner with systemd/cron templates, not automatically installed or enabled; four concurrent processes by default. The scheduled manifest is a restricted subset, not the GitHub config. |
 | Git refs and protection | Both reconcile branches and tags, including force updates and deletion. A detected wipe triggers a private, verified archive before updating; the archive contains Git refs and reachable objects only, not releases, assets or LFS. Detection is conditional, not a general backup. | Same shared wipe policy; destination must be private, have the expected source marker and have Actions disabled. |
 | Releases and assets | Both initialize with source releases visible to the source credentials; later runs select the first and latest, missing, visible draft, pending and failed releases. Changes to other older releases can be missed. Destination-only releases and ordinary destination-only assets are retained; selected assets with changed bytes can be replaced, and mirror-managed cache assets can be deleted or replaced. | Same shared policy and limitations. Synchronization is not atomic. |
 | Latest | Promotes the source latest after selected releases succeed. | Cannot force latest: checks what Forgejo reports and fails if it cannot match the requested latest. |
@@ -50,7 +50,7 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 - **Unticked** with URLs: a one-time mirror. The repositories are copied now but are not saved to `config.json`, so scheduled runs skip them. They do not need to be in the config, but the same host, owner and name rules apply.
 - **Empty** with add unticked: a regular full run of everything in the config. Add requires URLs.
 - Repositories already in the config are not written twice. If nothing changes, no commit is made.
-- Repository URLs on `github.com` are read as GitHub sources. Any other host is read as a Forgejo source.
+- Repository URLs on `github.com` are read as GitHub sources, and `gitlab.com` as GitLab. Other hosts default to Forgejo unless already configured with an explicit GitLab type. Unconfigured one-time GitLab URLs cannot be onboarded without durable pins; configure them explicitly instead.
 - Terms: *config* means `config.json`, the list of sources the mirror reads. *One-time mirror* means a run that copies repositories without saving them for later runs.
 
 ### Destination and removal options
@@ -73,9 +73,78 @@ Edit [`config.json`](config.json). Named configuration lists each source reposit
 }
 ```
 
-Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to Mirrorbot. The workflow uses those app secrets, while the Forgejo scheduler's separate Manobot helper authenticates GitHub source access. Legacy named profiles with `account_type` (`personal` or `organization`) remain supported with their previous behavior. Source URLs may point to GitHub or a public Forgejo instance. Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
+Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to Mirrorbot. The workflow uses those app secrets, while the Forgejo scheduler's separate Manobot helper authenticates GitHub source access. Legacy named profiles with `account_type` (`personal` or `organization`) remain supported with their previous behavior. Source URLs may point to GitHub, a public Forgejo instance or a public GitLab instance. GitLab repositories specifically require both source and destination ID pins before syncing; see [GitLab sources](#gitlab-sources). Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. For other sources, IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
 
 Legacy `destination_account_type` and `sources` configurations remain supported, including `repos: "all"` (owned public repositories, not stars), custom `prefix`, and per-repository `destinations` mappings using `source_id` and `destination_id`. Do not mix the formats.
+
+## GitLab sources
+
+These are code-level capabilities in this checkout, not a claim of a live deployment or end-to-end provider verification. Source access is anonymous and public-only, including releases and linked files; private projects and authenticated GitLab sources are not supported. Use a credential-free HTTPS origin and project URL. Nested group paths are supported; `gitlab.com` is recognized automatically, but a self-hosted GitLab source must be explicitly typed `gitlab`, otherwise it is treated as Forgejo. Obtain IDs from trusted provider records, independently verify the source, destination and ownership, and keep those pins and the source marker stable. GitLab IDs are scoped to their instance, not globally. Pin checks and operations are separate requests, not atomic protection against replacement or changes between checks.
+
+### Explicit project: GitHub runner
+
+Replace all example names and IDs with independently verified real values. This named configuration requires an already existing destination with the pinned ID and matching source marker; it does not create a missing pinned destination. Its profile and credentials follow [Configure sources](#configure-sources).
+
+<!-- gitlab-example: github-project -->
+```json
+{
+  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "mirror-owner", "auth": "mirrorbot"}},
+  "repositories": [
+    {"source": {"type": "gitlab", "url": "https://gitlab.com/team/sub/project", "id": 42},
+     "mirrors": {"github": {"name": "mirror-project", "id": 99}}}
+  ]
+}
+```
+
+### Direct group: GitHub runner
+
+Use the legacy `sources` format, not a named `repositories` configuration; do not mix formats. This discovers public projects owned directly by `team/sub`, excluding shared projects and subgroups. It is not a recursive group mirror. Newly discovered projects require the durable management configuration store (`MIRROR_MANAGEMENT_REPOSITORY` and `MIRROR_MANAGEMENT_TOKEN`; the workflow sets these), complete discovery and an authoritative checkout matching that store. The runner creates a destination, then conditionally publishes source/destination ID bindings and reads them back before mirroring. It refuses to adopt an existing unpinned destination. A group source is a continuing discovery rule, not an immutable pin of the group itself on this runner.
+
+<!-- gitlab-example: github-group -->
+```json
+{
+  "destination_account_type": "personal",
+  "sources": [
+    {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "team/sub", "repos": "all"}
+  ]
+}
+```
+
+### Explicit project and direct group: Forgejo scheduler
+
+These are alternative `config-forgejo.json` manifests. The first pins an existing destination; the second starts with no projects and pins the positive GitLab group ID. Set `--asset-max-bytes` to a positive decimal number no greater than 2,147,483,647 on the scheduler/worker for GitLab, even when no release links are expected. Group onboarding additionally needs the authoritative management `--config-repo` and the normal scheduler credentials, journal and secret; see [scheduler setup](scheduler/README.md). The scheduler publishes concrete source and destination pins before starting workers. Its legacy `sources`/`repos: "all"` form is not supported for GitLab groups. The generated `gitlab-` plus 24 hexadecimal characters namespace is reserved for group bindings; removing a group does not authorize continued syncing of its generated entries.
+
+<!-- gitlab-example: forgejo-project -->
+```json
+{
+  "destinations": {"local": {}},
+  "repositories": [
+    {"source": {"type": "gitlab", "url": "https://gitlab.com/team/sub/project", "id": 42},
+     "mirrors": {"local": {"name": "mirror-project", "id": 99}}}
+  ]
+}
+```
+
+<!-- gitlab-example: forgejo-group -->
+```json
+{
+  "destinations": {"local": {}},
+  "repositories": [],
+  "groups": [
+    {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "team/sub", "id": 7, "repos": "all"}
+  ]
+}
+```
+
+Group discovery checks public direct projects, not shared projects or descendants; the Forgejo path verifies the configured public group's ID and path as well. On either runner, creation, pin publication and sync are not one transaction. A failed or uncertain publication can leave remote repositories, possibly with Actions settings needing attention. Stop and inspect both the authoritative config and all attempted destinations, their IDs, ownership, markers, visibility and Actions settings. Independently reconcile the binding, or remove an unwanted partial repository only after verifying it, before retrying. Never blindly adopt a marker or delete a repository. Concurrent actors can still change state between checks.
+
+### GitLab releases, links and network boundaries
+
+GitLab releases are identified by instance, pinned project ID and exact tag. Latest is selected by greatest timezone-aware `released_at`; missing or invalid times, or a tie for latest, fail rather than guess. GitHub promotes the selected release after successful reconciliation; Forgejo checks its own latest and fails if it differs, because it cannot force parity. GitLab releases are represented as published, non-prerelease releases. Automatic GitLab source archives are excluded, as are Git LFS objects and submodule repositories. Git refs retain pointers, not those external contents.
+
+Explicit GitLab release asset **links** are downloaded anonymously and uploaded as files if their measured size is at most the cap: 2,147,483,647 bytes for GitHub, or the configured Forgejo cap. A verified larger link is preserved as its original link in release notes rather than uploaded; this does not guarantee future availability or immutable bytes. An existing same-name destination asset can make oversized-link reconciliation fail. Bad metadata, unsafe URLs, download errors and inconsistent content fail the release rather than silently preserving an unverified link. The cap is not a total storage limit; transfers and comparisons can use temporary disk and repeat downloads.
+
+Original link URLs must be credential-free, without query strings or fragments, and pass the URL/path checks; generated archive paths are rejected. HTTP and anonymous FTP are permitted but plaintext; prefer HTTPS. The downloader rejects non-public IP literals and DNS answers, connects to validated addresses, checks redirects and prevents HTTPS downgrade. Redirects may contain signed queries but are not published as the preserved link; never put secrets in source URLs or release text. API reads are restricted to the configured HTTPS origin and no destination credential is sent to GitLab or its asset servers. These checks reduce SSRF and credential leakage risks, but untrusted sources still require network isolation and operator review; they are not a sandbox or a guarantee against all races.
 
 ### Explicit relocation bindings
 
@@ -171,7 +240,7 @@ Never put keys or tokens in the repository's files. If GitHub asks you to approv
 - API clients in the same process share per-host cooldowns after HTTP 429 or a rate-limited HTTP 403. API retry waits are limited to 60 seconds; longer server-requested delays fail rather than retry early. Ordinary 403s are not retried. Existing PUT, PATCH and DELETE retry behavior remains unchanged; POST is not automatically retried. This coordination does not cover separate runs, Git operations, authentication requests or asset transfers.
 - A transfer already in progress keeps its old token. If it fails, that repository is reported as failed and retried on a later run.
 
-The token is also sent with GitHub API read requests (to `api.github.com` only, on port 443). This reduces rate-limit errors. Forgejo and public file downloads never get the token, and redirects to other sites never get it either.
+The token is also sent with GitHub API read requests (to `api.github.com` only, on port 443). This reduces rate-limit errors. Forgejo, GitLab and public file downloads never get the token, and redirects to other sites never get it either.
 
 ## Logs and errors
 
@@ -187,11 +256,11 @@ When a web request fails, the log shows the HTTP status code and what operation 
 
 ## Releases in detail
 
-- A release with no files is valid. Each file must be under **2 GiB**.
+- A release with no files is valid. Ordinary uploaded files must be under **2 GiB**; GitLab links follow the separate policy above.
 - **Empty release notes:** Exactly one ASCII space (U+0020) is treated as logically empty in release-body comparisons and draft finalization; an intentional one-space source therefore cannot be distinguished from empty in those paths. Other whitespace, including two or more spaces, tabs and newlines, remains meaningful and is preserved. Source drift checks compare raw bodies, not normalized ones. When finalizing a published GitHub release, the mirror sends the source body unchanged; comparisons may still treat one space and empty as equivalent. Forgejo uses the representation described below.
 - **Forgejo destination tradeoff:** Forgejo's release PATCH cannot reliably clear nonempty notes with an empty body. The workaround writes exactly one ASCII space for a truly empty source body, so the persisted Forgejo body is not byte-for-byte identical, even though it will typically appear empty. Pending markers are temporary; recovery after interruption requires a valid signed marker and compatible source and transaction state. Completed published releases should have the pending marker removed; completed drafts have the separate identity-marker exception below. Reconciliation is not atomic, and failures may require manual review.
 - **Drafts:** Forgejo source drafts are not visible to anonymous source reads and cannot be copied. For visible drafts from other sources, GitHub may return a synthetic `untagged-` tag for a draft. Source drafts with such tags are rejected rather than copied as real tags (even a legitimate draft tag with that prefix is conservatively rejected). For supported source tags, completed destination drafts retain a visible signed identity marker in their body until publication, so reruns can identify and publish the same release. Pending drafts use an ID-bound v3 recovery marker. Keep `MIRROR_TIMESTAMP_SECRET` stable: changing it, removing/editing a marker, or using older unmarked destination drafts requires manual reconciliation. Names and synthetic destination tags are not identities. If a create succeeds but its ID-bound marker cannot be saved, manual reconciliation can also be necessary.
-- **Latest release:** the source's `/releases/latest` picks the release to mark as latest on GitHub, even if it is older than the usual window. The GitHub mirror promotes it only after all selected releases are done. For a Forgejo destination, the mirror checks the destination latest rather than promoting it. A failed promotion is retried next run. Pre-releases and drafts are never promoted.
+- **Latest release:** for GitHub and Forgejo sources, `/releases/latest` picks the release to mark as latest on GitHub; GitLab instead selects by `released_at` as described above, even if it is older than the usual window. The GitHub mirror promotes it only after all selected releases are done. For a Forgejo destination, the mirror checks the destination latest rather than promoting it. A failed promotion is retried next run. Pre-releases and drafts are never promoted.
 - **404 from `/releases/latest`:** no release is promoted. The repository may be private, or the Forgejo server may be too old. Other errors fail the repository.
 - **Order:** releases are sorted by publish time, then creation time. If a time is missing or invalid, the source's list order is used. GitHub sets its own release times; the source's times are not copied.
 

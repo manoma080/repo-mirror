@@ -30,14 +30,14 @@ def normalize_config(config):
         if not isinstance(entry, dict) or set(entry) != {'source', 'mirrors'}:
             raise ValueError('invalid repository entry')
         source, mirrors = entry['source'], entry['mirrors']
-        if not isinstance(source, dict) or not isinstance(source.get('url'), str) or set(source) - {'url', 'id'}:
+        if not isinstance(source, dict) or not isinstance(source.get('url'), str) or set(source) - {'url', 'id', 'type'}:
             raise ValueError('invalid repository source')
         if not isinstance(mirrors, dict) or set(mirrors) != {profile}:
             raise ValueError('exactly one mirror for the configured destination is required')
         mirror = mirrors[profile]
         if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'visibility', 'legacy'}:
             raise ValueError('invalid mirror settings')
-        kind, base, owner, name = parse_repo_url(source['url'])
+        kind, base, owner, name = parse_repo_url(source['url'], source_type=source.get('type'))
         identity = (base.lower(), owner.lower(), name.lower())
         if identity in seen:
             raise ValueError('duplicate source repository')

@@ -15,6 +15,7 @@ from urllib.parse import quote, urlencode, urlparse
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
 from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
+from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
 from repo_mirror.github_api import API as GitHubAPI, SourceAPI as GitHubSourceAPI
 from repo_mirror.github_api import not_found, same_file, transient_transfer_error, transfer_retry_delay
@@ -245,8 +246,8 @@ def validate_source_clone_url(source, name, metadata):
         or parsed.port not in (None, 443)
         or any(c in base_url or c in clone_url for c in ("?", "#", "\\", "\n", "\r", "\t"))
         or any(not segment or segment in (".", "..") or "%" in segment for segment in segments)
-        or not NAME.fullmatch(source["owner"])
-        or source["owner"] in (".", "..")
+        or any(not NAME.fullmatch(part) or part in (".", "..")
+               for part in (source["owner"].split("/") if source["type"] == "gitlab" else [source["owner"]]))
         or not NAME.fullmatch(name)
         or name in (".", "..")
         or not clone_path_matches
@@ -292,7 +293,15 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     if "destination_id" in settings and (not isinstance(repo, dict) or
             type(repo.get("id")) is not int or repo["id"] != settings["destination_id"]):
         raise ValueError("destination repository id mismatch or missing")
-    metadata = src.request("GET", upstream)
+    if source["type"] == "gitlab":
+        if "source_id" not in settings:
+            raise ValueError("GitLab source repository id pin required")
+        src = GitLabSourceAdapter(source["base_url"], source["owner"] + "/" + source_name, settings["source_id"])
+        upstream = src.base
+        project = src.project()
+        metadata = {**project, "clone_url": project.get("http_url_to_repo")}
+    else:
+        metadata = src.request("GET", upstream)
     if "source_id" in settings and (type(metadata.get("id")) is not int or metadata["id"] != settings["source_id"]):
         raise ValueError("source repository id mismatch")
     relocation = None
@@ -338,10 +347,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     def recheck_pins():
         # These API reads narrow, but cannot eliminate, the TOCTOU window.
         if "source_id" in settings:
-            current_source = src.request("GET", upstream)
+            current_source = src.project() if source["type"] == "gitlab" else src.request("GET", upstream)
             if (not isinstance(current_source, dict) or type(current_source.get("id")) is not int
                     or current_source["id"] != settings["source_id"]):
                 raise ValueError("source repository id mismatch")
+            if source["type"] == "gitlab":
+                validate_source_clone_url(source, source_name, {"clone_url": current_source.get("http_url_to_repo")})
         if "destination_id" in settings:
             current = get_existing(dst, target)
             if (not isinstance(current, dict) or type(current.get("id")) is not int
@@ -427,10 +438,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         raw_dst = dst
         def check_release_pins():
             if "source_id" in settings:
-                current_source = src.request("GET", upstream)
+                current_source = src.project() if source["type"] == "gitlab" else src.request("GET", upstream)
                 if (not isinstance(current_source, dict) or type(current_source.get("id")) is not int
                         or current_source["id"] != settings["source_id"]):
                     raise ValueError("source repository id mismatch")
+                if source["type"] == "gitlab":
+                    validate_source_clone_url(source, source_name, {"clone_url": current_source.get("http_url_to_repo")})
             if "destination_id" in settings:
                 current = get_existing(raw_dst, target)
                 if (not isinstance(current, dict) or type(current.get("id")) is not int
@@ -534,6 +547,26 @@ def fetch_source_latest(src, upstream):
             raise
         exc.close()
         return None
+
+
+def select_tag_source_latest(releases):
+    """Choose by release time, rejecting absent or ambiguous timestamps."""
+    if not releases:
+        return None
+    timed_releases = []
+    for release in releases:
+        try:
+            stamp = datetime.fromisoformat(release["released_at"].replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                raise ValueError()
+        except (KeyError, AttributeError, TypeError, ValueError):
+            raise ValueError("invalid source release timestamp") from None
+        timed_releases.append((stamp.astimezone(UTC), release))
+    newest = max(stamp for stamp, _ in timed_releases)
+    matches = [release for stamp, release in timed_releases if stamp == newest]
+    if len(matches) != 1:
+        raise ValueError("ambiguous source latest release")
+    return matches[0]
 
 
 def validate_source_latest(latest, releases, *, allow_empty_target=False):
@@ -720,6 +753,18 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     validate_snapshot=None, recovery_target=None, journal_source=None, journal_name=None,
                     journal_identity=None, settings_name=None):
     """Apply the release policy independently of repository and Git setup."""
+    # Tag-identity providers implement list_releases(),
+    # get_release(tag), list_release_assets(tag), and
+    # verify_release_tag(tag, destination, target). The last method must compare
+    # the actual source and destination tag objects and return their identity.
+    tag_identity = getattr(src, "release_identity_kind", None) == "tag"
+    if tag_identity:
+        scope = getattr(src, "release_scope", None)
+        if (not isinstance(scope, tuple) or len(scope) != 2 or
+                not isinstance(scope[0], str) or not scope[0] or
+                type(scope[1]) is not int or scope[1] <= 0):
+            raise ValueError("invalid source release scope")
+        marker = json.dumps([marker, scope[0], scope[1]], ensure_ascii=True, separators=(",", ":"))
     recovery_target = recovery_target or target
     journal_source = journal_source or source
     journal_name = journal_name or name
@@ -749,9 +794,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         if upstream != src.base:
             raise ValueError("source API URL does not match source identity")
     with timed("step release-discovery target=source"):
-        releases = src.pages(upstream + "/releases")
+        releases = src.list_releases() if tag_identity else src.pages(upstream + "/releases")
     if validate_snapshot is not None:
-        latest = fetch_source_latest(src, upstream)
+        latest = select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
         validate_snapshot(releases, latest)
     invalid_releases = [
         r
@@ -766,7 +811,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
             if valid_source_release_tag(r)
         ]
     if validate_snapshot is None:
-        latest = fetch_source_latest(src, upstream)
+        latest = select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
 
     destination_releases = None
     known_draft_tags = {}
@@ -858,20 +903,70 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         try:
             with timed(f"release tag={safe_label(tag)}"):
                 validate_source_draft_tag(release)
-                metadata_keys = ("id", "tag_name", "body", "name", "target_commitish", "draft", "prerelease")
+                metadata_keys = (("tag_name", "body", "name", "target_commitish", "draft", "prerelease", "released_at")
+                                 if tag_identity else ("id", "tag_name", "body", "name", "target_commitish", "draft", "prerelease"))
                 release_id = release.get("id")
-                if type(release_id) is not int or release_id <= 0:
+                if not tag_identity and (type(release_id) is not int or release_id <= 0):
                     raise ValueError("source release changed during sync")
-                baseline = src.request("GET", upstream + "/releases/" + str(release_id))
+                baseline = src.get_release(tag) if tag_identity else src.request("GET", upstream + "/releases/" + str(release_id))
                 listed = next((item for item in releases if item["tag_name"] == tag), release)
                 if (not isinstance(baseline, dict) or
                         any(key not in baseline or type(baseline[key]) is not type(snapshot[key]) or
                             baseline[key] != snapshot[key]
                             for snapshot in (listed, release) for key in metadata_keys if key in snapshot) or
-                        baseline.get("id") != release_id or baseline.get("tag_name") != tag):
+                        (not tag_identity and baseline.get("id") != release_id) or baseline.get("tag_name") != tag):
                     raise ValueError("source release changed during sync")
                 allow_empty_target = source.get("type") == "forgejo"
-                validate_source_release_metadata(baseline, allow_empty_target=allow_empty_target)
+                if tag_identity:
+                    if ("id" in baseline or not {"name", "body", "draft", "prerelease", "released_at"} <= baseline.keys()
+                            or type(baseline["draft"]) is not bool or type(baseline["prerelease"]) is not bool
+                            or (baseline["name"] is not None and not isinstance(baseline["name"], str))
+                            or (baseline.get("target_commitish") is not None and
+                                (not isinstance(baseline["target_commitish"], str) or not baseline["target_commitish"]))):
+                        raise ValueError("invalid tag release metadata")
+                    validate_source_release_markers(baseline)
+                    original_tag_object = src.verify_release_tag(tag, dst, target)
+                    if not original_tag_object:
+                        raise ValueError("tag verification failed")
+                    from repo_mirror import gitlab_assets
+                    from repo_mirror.constants import MAX_ASSET_SIZE
+                    from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
+                    links = src.list_release_assets(tag)
+                    if not isinstance(links, list):
+                        raise ValueError("invalid source link assets")
+                    cap = MAX_ASSET_SIZE
+                    if links and isinstance(dst, ForgejoDestinationAdapter) and dst.supports_target_commitish:
+                        raw_cap = os.environ.get("MIRROR_FORGEJO_ASSET_MAX_BYTES", "")
+                        if not re.fullmatch(r"[0-9]+", raw_cap):
+                            raise ValueError("Forgejo asset byte limit must be configured")
+                        cap = int(raw_cap)
+                    # Validate identities before sorting; GitLab does not promise list order.
+                    normalized_links = []
+                    for link in links:
+                        if not isinstance(link, dict) or type(link.get("id")) is not int or link["id"] <= 0:
+                            raise ValueError("invalid source link assets")
+                        link = dict(link, link_type=link.get("link_type", "other"))
+                        rendered = gitlab_assets.render_preserved_link(link)
+                        normalized_links.append((link, rendered))
+                    normalized_links.sort(key=lambda item: item[0]["id"])
+                    link_snapshot = [[link["id"], link["name"], link["url"], link["link_type"]]
+                                     for link, _ in normalized_links]
+                    if (len({x[0] for x in link_snapshot}) != len(link_snapshot) or
+                            len({x[1] for x in link_snapshot}) != len(link_snapshot)):
+                        raise ValueError("invalid source link assets")
+                    link_assets, preserved_links = [], []
+                    for link, rendered in normalized_links:
+                        with gitlab_assets.download_asset(link["url"], cap) as downloaded:
+                            if downloaded.oversize:
+                                preserved_links.append(rendered)
+                                link_assets.append((link, None, None))
+                            else:
+                                h = hashlib.sha256()
+                                for chunk in iter(lambda: downloaded.file.read(CHUNK_SIZE), b""):
+                                    h.update(chunk)
+                                link_assets.append((link, downloaded.size, h.hexdigest()))
+                else:
+                    validate_source_release_metadata(baseline, allow_empty_target=allow_empty_target)
                 release = baseline
                 validate_source_draft_tag(release)
                 source_metadata = {key: (key in release, release.get(key)) for key in metadata_keys}
@@ -920,6 +1015,8 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 prefix_v2 = "[repo-mirror:pending:v2]"
                 current_name = existing.get("name") if existing else None
                 pending = isinstance(current_name, str) and current_name.startswith((prefix_v1, prefix_v2))
+                if tag_identity and pending:
+                    raise ReleaseRecoveryError("marker")
                 prefix = prefix_v2 if pending and current_name.startswith(prefix_v2) else prefix_v1
                 sentinel = "[repo-mirror:pending:v3]"
                 secret = os.environ.get("MIRROR_TIMESTAMP_SECRET", "")
@@ -1104,17 +1201,48 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     )
                 # Legacy name markers are unsigned and cannot authorize deletion.
                 may_replace = False if pending else state["replace"]
-                asset_url = upstream + "/releases/" + str(release["id"]) + "/assets"
+                asset_url = None if tag_identity else upstream + "/releases/" + str(release["id"]) + "/assets"
                 observed_stable_snapshot = None
                 all_source_names = set()
                 observed_starter_names = set()
 
-                @timed_call(lambda: "step source-manifest target=source")
-                def fetch_source_assets():
+                @timed_call(lambda *args, **kwargs: "step source-manifest target=source")
+                def fetch_source_assets(check_bytes=False):
                     nonlocal observed_stable_snapshot, all_source_names, state
-                    assets = (
+                    assets = src.list_release_assets(tag) if tag_identity else (
                         src.request("GET", asset_url) if source["type"] == "forgejo" else src.pages(asset_url)
                     )
+                    if tag_identity:
+                        if not isinstance(assets, list):
+                            raise ValueError("invalid source link assets")
+                        try:
+                            snapshot = [[a["id"], a["name"], a["url"], a.get("link_type", "other")] for a in assets]
+                            if any(type(entry[0]) is not int or entry[0] <= 0 for entry in snapshot):
+                                raise ValueError("invalid source link identity")
+                            snapshot.sort(key=lambda entry: entry[0])
+                        except (KeyError, TypeError, AttributeError, ValueError):
+                            raise ReleaseRecoveryError("changed") from None
+                        if snapshot != link_snapshot:
+                            raise ReleaseRecoveryError("changed")
+                        # Metadata identity is rechecked before each mutation; byte
+                        # streams are rechecked once at the final checkpoint. Each
+                        # transferred link is separately checked against its hash.
+                        for link, size, expected_hash in (link_assets if check_bytes else []):
+                            with gitlab_assets.download_asset(link["url"], cap) as downloaded:
+                                if size is None:
+                                    if not downloaded.oversize:
+                                        raise ReleaseRecoveryError("changed")
+                                else:
+                                    if downloaded.oversize or downloaded.size != size:
+                                        raise ReleaseRecoveryError("changed")
+                                    h = hashlib.sha256()
+                                    for chunk in iter(lambda: downloaded.file.read(CHUNK_SIZE), b""):
+                                        h.update(chunk)
+                                    if h.hexdigest() != expected_hash:
+                                        raise ReleaseRecoveryError("changed")
+                        assets = [dict(id=link["id"], name=link["name"], size=size,
+                                       state="uploaded", browser_download_url=link["url"], _link_hash=hash_value)
+                                  for link, size, hash_value in link_assets if size is not None]
                     if not isinstance(assets, list):
                         raise ValueError("release assets response is not an array")
                     all_source_names = [a.get("name") for a in assets]
@@ -1211,6 +1339,11 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         assets = [a for a in assets if a.get("name") not in candidate_skipped]
                     manifest = [stable_entry(a) for a in assets]
                     manifest.sort(key=lambda a: str(a[0]))
+                    if tag_identity:
+                        # Recovery must bind the release metadata and tag object,
+                        # not merely the (possibly empty) asset set.
+                        manifest.append(["repo-mirror-tag-release-v1", source_metadata, original_tag_object,
+                                         link_snapshot, [[a[0]["id"], a[1], a[2]] for a in link_assets]])
                     previous_manifest = [legacy_entry(a) for a in assets]
                     previous_manifest.sort(key=lambda a: str(a[0]))
                     # Same form without created_at, for markers stored under
@@ -1228,7 +1361,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         a
                         for a in assets
                         if a.get("state") != "starter"
-                        and isinstance(a.get("name"), str)
+                        and not tag_identity and isinstance(a.get("name"), str)
                         and CHECKSUM_FILE_NAME.fullmatch(a["name"])
                     ]
                     if len(checksum_files) == 1:
@@ -1478,6 +1611,10 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         # without any release mutation.
                 else:
                     if state["phase"] == "BOUND" and state["digest"] != digest:
+                        if tag_identity:
+                            # Never migrate an unauthenticated tag-source snapshot:
+                            # byte equality cannot attest to historical metadata.
+                            raise ReleaseRecoveryError("changed")
                         # Pre-fix BOUND markers hashed the full provider asset
                         # object (including download_count), so their digest can
                         # never match the stable digest again. Migrate only
@@ -1511,6 +1648,10 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 if any(asset.get("state") == "starter" for asset in assets):
                     raise StarterAssetError()
                 by_name = {asset["name"]: asset for asset in assets}
+                if tag_identity and any(link["name"] in by_name for link, size, _ in link_assets if size is None):
+                    # A same-name file could be destination-owned; oversized links
+                    # cannot establish byte identity or authorize its deletion.
+                    raise ReleaseRecoveryError("mismatch")
                 if len(by_name) != len(assets) or len({a["name"] for a in source_assets}) != len(
                     source_assets
                 ):
@@ -1521,7 +1662,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 cache_name, stage_name = new_name, new_stage
                 secret = os.environ.get("MIRROR_TIMESTAMP_SECRET", "")
                 cache_enabled = (
-                    bool(secret)
+                    bool(secret) and not tag_identity
                     and not pending
                     and not ({new_name, new_stage, "MIRROR-REPO-MANIFEST.json"} & set(all_source_names))
                 )
@@ -1683,7 +1824,14 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             flush=True,
                         )
                         with tempfile.TemporaryFile() as data:
-                            src.download(asset["browser_download_url"], data)
+                            if tag_identity:
+                                with gitlab_assets.download_asset(asset["browser_download_url"], cap) as downloaded:
+                                    if downloaded.oversize or downloaded.size != asset["size"]:
+                                        raise ReleaseRecoveryError("changed")
+                                    for chunk in iter(lambda: downloaded.file.read(CHUNK_SIZE), b""):
+                                        data.write(chunk)
+                            else:
+                                src.download(asset["browser_download_url"], data)
                             if (
                                 not isinstance(asset.get("size"), int)
                                 or (trusted_listing and (type(asset.get("size")) is not int or asset["size"] < 0))
@@ -1703,6 +1851,8 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             calculated = hashlib.sha256()
                             for chunk in iter(lambda: data.read(CHUNK_SIZE), b""):
                                 calculated.update(chunk)
+                            if tag_identity and calculated.hexdigest() != asset["_link_hash"]:
+                                raise ReleaseRecoveryError("changed")
                             if ident:
                                 records[asset["name"]] = dict(ident, sha256=calculated.hexdigest())
                             changed = False
@@ -1782,6 +1932,8 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                 else:
                                     uploaded += 1
                             else:
+                                if tag_identity:
+                                    shortcut_hashes[asset["name"]] = (previous["id"], calculated.hexdigest())
                                 skipped += 1
 
                 print(
@@ -1801,6 +1953,8 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                     raise StarterAssetError()
                 expected = {asset["name"]: asset["size"] for asset in source_assets}
                 actual = {asset["name"]: asset for asset in final_assets}
+                if tag_identity and any(link["name"] in actual for link, size, _ in link_assets if size is None):
+                    raise ReleaseRecoveryError("mismatch")
                 if (
                     len(expected) != len(source_assets)
                     or len(actual) != len(final_assets)
@@ -1836,7 +1990,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 for asset_name, expected_hash in fresh_hashes.items():
                     dest_asset = actual[asset_name]
                     dh = dest_asset.get("digest")
-                    if not (isinstance(dh, str) and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", dh)):
+                    if tag_identity or not (isinstance(dh, str) and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", dh)):
                         with tempfile.TemporaryFile() as f:
                             dst.download(dest_asset["url"], f)
                             if f.tell() != expected[asset_name]:
@@ -1943,7 +2097,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             f.seek(0)
                             if f.read() != content:
                                 raise ReleaseRecoveryError("mismatch")
-                fresh_release = src.request("GET", upstream + "/releases/" + str(release["id"]))
+                fresh_release = src.get_release(tag) if tag_identity else src.request("GET", upstream + "/releases/" + str(release["id"]))
                 if not isinstance(fresh_release, dict) or any(
                     (key in fresh_release, fresh_release.get(key)) != source_metadata[key]
                     or type(fresh_release.get(key)) is not type(source_metadata[key][1])
@@ -1953,11 +2107,19 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 if empty_forgejo_target:
                     if verify_forgejo_empty_target_tag(src, dst, upstream, target, tag) != original_tag_object:
                         raise ValueError("tag verification failed")
+                if tag_identity and src.verify_release_tag(tag, dst, target) != original_tag_object:
+                    raise ValueError("tag verification failed")
+                if tag_identity:
+                    _, checked_digest, _, _ = fetch_source_assets(check_bytes=True)
+                    if checked_digest != digest:
+                        raise ReleaseRecoveryError("changed")
                 # GitHub ignores a null body in PATCH; explicitly clear the
                 # recovery marker. Forgejo's adapter maps empty to one space.
                 final_body = release.get("body")
                 if final_body is None:
                     final_body = ""
+                if tag_identity and preserved_links:
+                    final_body += "\n\nOriginal oversized release asset links:\n" + "\n".join(preserved_links)
 
                 if release.get("draft") is True:
                     final_body = logical_release_body(final_body) + "\n" + IDENTITY_SENTINEL + draft_identity_signature(
@@ -1984,15 +2146,21 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 # GitHub may accept a clearing PATCH without persisting it. Verify
                 # the exact published release before reporting success or clearing
                 # the failure journal; drafts retain a signed identity marker.
-                if (not getattr(dst, "supports_target_commitish", False)
+                if tag_identity or (not getattr(dst, "supports_target_commitish", False)
                         and source_body is None and release.get("draft") is not True):
                     verified_release = dst.request("GET", target + "/releases/" + str(existing["id"]))
                     if (not isinstance(verified_release, dict)
                             or type(verified_release.get("id")) is not int
                             or verified_release["id"] != existing["id"]
                             or verified_release.get("tag_name") != tag
-                            or verified_release.get("draft") is not False
-                            or verified_release.get("body") != ""):
+                            or verified_release.get("draft") is not (release.get("draft") if tag_identity else False)
+                            or (tag_identity and (verified_release.get("name") != final_fields["name"]
+                                or type(verified_release.get("prerelease")) is not bool
+                                or verified_release["prerelease"] is not release["prerelease"]))
+                            or verified_release.get("body") != (
+                                (" " if isinstance(dst, ForgejoDestinationAdapter)
+                                 and dst.supports_target_commitish and final_body == "" else final_body)
+                                if tag_identity else "")):
                         raise ReleaseRecoveryError("mismatch")
                 if latest and tag == latest["tag_name"]:
                     latest_id = existing["id"]
