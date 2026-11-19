@@ -70,6 +70,13 @@ def parse_inactive(raw):
     return value
 
 
+def inactive_message(record, source_urls):
+    """Return the batch log line for a validated inactive record, or None."""
+    if record is None or record['url'] not in source_urls:
+        return None
+    return f'INACTIVE since {record["since"]} ({record["idle_days"]} days)'
+
+
 def refusal(exc):
     """Report only allowlisted migration failure text."""
     message = str(exc)
@@ -364,13 +371,10 @@ def main(argv=None):
                                     record = parse_inactive(line[len(prefix):].rstrip(b'\r\n'))
                                     # A report for an unconfigured URL is ignored: it is
                                     # informational and must never fail a good sync.
-                                    if record is not None and record['url'] in source_urls:
+                                    message = inactive_message(record, source_urls)
+                                    if message is not None:
                                         inactive += 1
-                                        print(
-                                            f'Repository {index}: INACTIVE since {record["since"]} '
-                                            f'({record["idle_days"]} days)',
-                                            flush=True,
-                                        )
+                                        print(f'Repository {index}: {message}', flush=True)
                                     continue
                                 prefix = b'FORGEJO_FAILURE: '
                                 if line.startswith(prefix) and not reported:

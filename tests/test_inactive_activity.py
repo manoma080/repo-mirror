@@ -12,8 +12,8 @@ from unittest.mock import patch
 from mirror_test_support import patch_everywhere
 
 import mirror
-from repo_mirror.forgejo_schedule import parse_inactive
-from repo_mirror.forgejo_sync import INACTIVE_PREFIX, report_inactive
+from repo_mirror.forgejo_schedule import inactive_message, parse_inactive
+from repo_mirror.forgejo_sync import INACTIVE_PREFIX, _source_url, report_inactive
 from repo_mirror.repository import latest_release_time
 from repo_mirror.snapshot_push import capture_snapshot
 from repo_mirror.staleness import observe, observing, parse_inactive_days, stale
@@ -128,6 +128,22 @@ class InactiveProtocolTests(unittest.TestCase):
         self.assertIsNone(parse_inactive(record(url="u", since="2024-3-1", idle_days=1)))
         self.assertIsNone(parse_inactive(record(url="u", since="2024-03-01", idle_days="1")))
         self.assertIsNone(parse_inactive(record(url="u", since="2024-03-01", idle_days=-1)))
+
+
+    def test_worker_reports_the_configured_url_not_the_owner_name_key(self):
+        # The scheduler matches records against configured URLs; the worker's
+        # identity is an owner/name key, so the report must be rebuilt.
+        entry = {"url": "https://github.com/alice/demo"}
+        self.assertEqual(_source_url("alice/demo", entry), "https://github.com/alice/demo")
+
+    def test_scheduler_only_reports_configured_urls(self):
+        record = {"url": "https://github.com/alice/demo", "since": "2024-03-01", "idle_days": 640}
+        self.assertEqual(
+            inactive_message(record, {"https://github.com/alice/demo"}),
+            "INACTIVE since 2024-03-01 (640 days)",
+        )
+        self.assertIsNone(inactive_message(record, {"https://github.com/other/demo"}))
+        self.assertIsNone(inactive_message(None, {"https://github.com/alice/demo"}))
 
 
 class CliInactiveWarningTests(unittest.TestCase):
