@@ -120,6 +120,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "API URL must be credential-free HTTPS",
         "refusing to send destination credentials to non-GitHub host",
         "request retries exhausted",
+        "already rate limited by the source or destination host; the 60 s wait limit is exhausted",
         "pagination response is not an array",
         "pagination exceeded safety limit",
         "refusing unsafe destination asset URL",

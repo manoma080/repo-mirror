@@ -37,7 +37,7 @@ def _wait_for_cooldown(host, budget=None):
         if remaining <= 0:
             return
         if remaining > budget[0]:
-            raise RuntimeError("rate limit cooldown exceeds wait limit")
+            raise RuntimeError("already rate limited by the source or destination host; the 60 s wait limit is exhausted")
         budget[0] -= remaining
         time.sleep(remaining)
 
