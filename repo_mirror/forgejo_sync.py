@@ -697,7 +697,9 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
             if idle is not None:
                 idle_days, stamp = idle
                 inactive_count += 1
-                report_inactive(identity, stamp_date(stamp), idle_days)
+                # The scheduler matches this against the configured URL list, so
+                # report the configured form rather than the owner/name key.
+                report_inactive(_source_url(identity, entry), stamp_date(stamp), idle_days)
             print(f'{identity}: OK (Git refs synchronized)', flush=True)
         except Exception as exc:
             failures.append(identity)
