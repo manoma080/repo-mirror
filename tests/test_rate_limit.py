@@ -8,6 +8,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from repo_mirror.github_api import API, _cooldowns
+from repo_mirror.logging_utils import error_detail
 
 
 def error(code, headers=None, body=b''):
@@ -70,8 +71,14 @@ class RateLimitTests(unittest.TestCase):
         with (patch('repo_mirror.github_api.subprocess.run') as run,
               patch('repo_mirror.github_api.build_opener') as opener):
             run.return_value.stdout = b'signature'
-            with self.assertRaises(RuntimeError): provider._mint()
+            with self.assertRaises(RuntimeError) as caught:
+                provider._mint()
             opener.return_value.open.assert_not_called()
+        # The operator-facing summary must name the cause, not "RuntimeError".
+        self.assertEqual(
+            error_detail(caught.exception),
+            "already rate limited by the source or destination host; the 60 s wait limit is exhausted",
+        )
 
     def test_real_threads_block_until_cooldown_expires(self):
         first, second = API(), API()
