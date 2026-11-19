@@ -23,6 +23,7 @@ from repo_mirror.journal import FailureJournal
 from repo_mirror.repository import (ReleaseAggregateError, mirror_releases, validate_source_release_listing,
                                     fetch_source_latest, validate_source_latest)
 from repo_mirror.sources import source_marker, source_api_base
+from repo_mirror.staleness import DEFAULT_INACTIVE_DAYS, begin, end, parse_inactive_days, stale, stamp_date
 from repo_mirror.config_json import unique_pairs
 from repo_mirror.forgejo_local import forgejo_source_identity
 from repo_mirror.forgejo_source_adapter import PublicForgejoSourceAdapter
@@ -357,11 +358,14 @@ def main(argv=None):
     parser.add_argument('--port', type=int, default=3300)
     parser.add_argument('--asset-max-bytes', help='operator-selected per-asset byte limit for this Forgejo destination')
     parser.add_argument('--gitlab-token-file', help='optional owner-only gitlab.com read token file')
+    parser.add_argument('--inactive-after-days', default=str(DEFAULT_INACTIVE_DAYS),
+                        help='report sources with no commit or release activity for this many days; 0 disables')
     parser.add_argument('--app-id')
     parser.add_argument('--private-key-file')
     parser.add_argument('--use-github-token', action='store_true', help='explicitly use GITHUB_TOKEN (not refreshable)')
     args = parser.parse_args(argv)
     try:
+        args.inactive_days = parse_inactive_days(args.inactive_after_days)
         if args.asset_max_bytes is not None:
             parse_asset_max_bytes(args.asset_max_bytes)
         if args.gitlab_token_file is not None:
@@ -459,6 +463,17 @@ def main(argv=None):
 
 RELOCATION_PREFIX = 'FORGEJO_RELOCATION: '
 RELOCATION_FIELDS = frozenset({'url', 'canonical', 'source_id', 'destination_id'})
+INACTIVE_PREFIX = 'FORGEJO_INACTIVE: '
+INACTIVE_FIELDS = frozenset({'url', 'since', 'idle_days'})
+
+
+def report_inactive(url, since, idle_days):
+    """Emit the machine-readable inactive-source report the scheduler consumes."""
+    if (not isinstance(url, str) or not url or not isinstance(since, str) or not since
+            or type(idle_days) is not int or idle_days < 0):
+        raise ValueError('invalid inactive-source report')
+    print(INACTIVE_PREFIX + json.dumps({'url': url, 'since': since, 'idle_days': idle_days}, sort_keys=True),
+          file=sys.stderr, flush=True)
 
 
 def report_relocation(relocation):
@@ -547,11 +562,13 @@ def resolve_relocation(configured, identity, metadata, port, owner, secret):
 
 def _sync_requested(args, requested, dest, token, local_token, secret, journal_dir, *, mappings=None, configured=None):
     failures = []
+    inactive_count = 0
     for identity in requested:
         entry = (mappings or {}).get(identity)
         name = entry['destination_name'] if entry else identity.rsplit('/', 1)[-1]
         recovery_identity = entry.get('legacy_identity', identity) if entry else identity
         relocation = None
+        activity, activity_token = begin()
         try:
             if entry and 'legacy_identity' in entry:
                 from repo_mirror.migration_attestation import forgejo_claim, verify
@@ -676,12 +693,22 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 dest.complete_initialization(name, recovery_identity, expected=expected)
             if relocation is not None:
                 report_relocation(relocation)
+            idle = stale(activity, getattr(args, 'inactive_days', DEFAULT_INACTIVE_DAYS))
+            if idle is not None:
+                idle_days, stamp = idle
+                inactive_count += 1
+                report_inactive(identity, stamp_date(stamp), idle_days)
             print(f'{identity}: OK (Git refs synchronized)', flush=True)
         except Exception as exc:
             failures.append(identity)
             print(f'{identity}: FAILED', file=sys.stderr, flush=True)
             print(f'FORGEJO_FAILURE: {safe_reason(exc)}', file=sys.stderr, flush=True)
-    print(f'Summary: {len(requested) - len(failures)} succeeded, {len(failures)} failed', flush=True)
+        finally:
+            end(activity_token)
+    summary = f'Summary: {len(requested) - len(failures)} succeeded, {len(failures)} failed'
+    if inactive_count:
+        summary += f', {inactive_count} inactive'
+    print(summary, flush=True)
     return 1 if failures else 0
 
 

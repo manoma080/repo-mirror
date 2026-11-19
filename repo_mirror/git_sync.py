@@ -11,6 +11,7 @@ from urllib.parse import quote
 from repo_mirror.constants import GITHUB, NAME
 from repo_mirror.logging_utils import timed
 from repo_mirror.snapshot_push import _default_branch, archive_snapshot, capture_snapshot, git_phase, push_snapshot
+from repo_mirror.staleness import observe
 from repo_mirror.wipe_detection import detect_wipe
 
 
@@ -28,6 +29,7 @@ def synchronize_snapshots(
     """Safely compare, archive when necessary, and reconcile two Git snapshots."""
     with timed("step git source-snapshot"):
         desired = capture_snapshot(source_run, store, source)
+    observe("last_commit", getattr(desired, "latest", None))
     if not desired:
         return False
     new_ref = "refs/heads/" + source_default if isinstance(source_default, str) else ""

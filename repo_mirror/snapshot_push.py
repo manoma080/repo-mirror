@@ -21,6 +21,7 @@ retry without a fresh safety decision and snapshot. Concurrent new refs survive.
 import re
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 
 
 @contextmanager
@@ -35,6 +36,41 @@ def git_phase(phase):
 
 class SnapshotError(RuntimeError):
     """A snapshot could not be proven safe or consistent."""
+
+
+class Snapshot(dict):
+    """Pinned refs plus the newest commit or tag date they point at."""
+
+    def __init__(self, refs=None, *, latest=None):
+        super().__init__(refs or {})
+        self.latest = latest
+
+
+def _latest_ref_date(run, store, prefix):
+    """Newest committer or tagger date among the refs fetched under ``prefix``."""
+    data = run([
+        "-C",
+        store,
+        "for-each-ref",
+        "--format=%(committerdate:iso-strict)%09%(taggerdate:iso-strict)",
+        prefix,
+    ])
+    latest = None
+    for line in data.decode("utf-8", "surrogateescape").splitlines():
+        # An annotated tag has no committer date and only a tagger date; a
+        # lightweight tag carries the tagged commit's committer date.
+        for value in line.split("\t"):
+            if not value:
+                continue
+            try:
+                stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                raise SnapshotError("invalid snapshot ref date") from None
+            if stamp.tzinfo is None:
+                raise SnapshotError("snapshot ref date lacks a timezone")
+            if latest is None or stamp > latest:
+                latest = stamp
+    return latest
 
 
 def _refs(run, remote, all_refs=False):
@@ -57,6 +93,7 @@ def _refs(run, remote, all_refs=False):
 
 def capture_snapshot(run, store, remote):
     """Fetch and pin precisely the advertised branches and tags, or fail."""
+    latest = None
     with git_phase("snapshot fetch"):
         refs = _refs(run, remote)
         if refs:
@@ -67,7 +104,8 @@ def capture_snapshot(run, store, remote):
                 actual = run(["-C", store, "rev-parse", "--verify", prefix + ref]).decode("ascii").strip()
                 if actual != oid:
                     raise SnapshotError("remote changed during snapshot capture")
-    return refs
+            latest = _latest_ref_date(run, store, prefix)
+    return Snapshot(refs, latest=latest)
 
 
 def _validate(snapshot):
