@@ -25,6 +25,25 @@ class GitDiagnosticsTests(unittest.TestCase):
                 self.assertIn(expected, error_detail(caught.exception))
                 self.assertNotIn('secret', error_detail(caught.exception))
 
+    def test_git_http_status_is_named_without_echoing_the_message(self):
+        cases = [
+            (b"fatal: unable to access 'https://git.example/o/r/': The requested URL returned error: 429", "HTTP 429"),
+            (b"error: RPC failed; HTTP 429 curl 22 The requested URL returned error: 429", "HTTP 429"),
+            (b"fatal: unable to access 'https://git.example/o/r/': The requested URL returned error: 503", "HTTP 503"),
+            (b"fatal: unable to access 'https://git.example/o/r/': The requested URL returned error: 404", "HTTP 404"),
+        ]
+        for stderr, expected in cases:
+            with self.subTest(stderr=stderr):
+                error = subprocess.CalledProcessError(1, ["git"], stderr=stderr)
+                with self.assertRaises(subprocess.CalledProcessError) as caught:
+                    with snapshot_push.git_phase("snapshot fetch"):
+                        raise error
+                detail = error_detail(caught.exception)
+                self.assertIn("snapshot fetch", detail)
+                self.assertIn(expected, detail)
+                self.assertNotIn("https://", detail)
+                self.assertNotIn("git.example", detail)
+
     def test_fetch_and_verify_phases(self):
         def fail(args):
             raise subprocess.CalledProcessError(1, args, stderr=b'connection reset /secret')

@@ -202,6 +202,31 @@ def _safe_operation(exc):
     return None
 
 
+_GIT_HTTP_STATUS = re.compile(
+    r"\bhttp(?:\s*error)?\s*[;:(]?\s*(\d{3})\b|returned error:\s*(\d{3})\b"
+)
+
+
+def _git_http_status(text):
+    """Return the HTTP status Git reported, if any, without echoing its text."""
+    match = _GIT_HTTP_STATUS.search(text)
+    if match is None:
+        return None
+    value = match.group(1) or match.group(2)
+    return int(value) if 100 <= int(value) <= 599 else None
+
+
+def _git_http_reason(status):
+    """Describe an HTTP status Git reported as a fixed, public-safe cause."""
+    if status == 429:
+        return "HTTP 429 (the source host rate limited the request; the next scheduled run retries)"
+    if status in (401, 403):
+        return f"HTTP {status} (access denied)"
+    if 500 <= status <= 599:
+        return f"HTTP {status} (source host server error)"
+    return f"HTTP {status}"
+
+
 def _network_reason(exc):
     """Map a transport failure to a fixed, public-safe cause label.
 
@@ -240,6 +265,11 @@ def error_detail(exc):
                 reason = "permission or authentication failure; check repository access and token permissions"
             elif any(s in text for s in ("could not resolve host", "connection timed out", "connection reset", "failed to connect", "remote end hung up unexpectedly")):
                 reason = "network failure; check connectivity and retry after a fresh safety check"
+            elif (status := _git_http_status(text)) is not None:
+                # Git only reports "error: 429" / "HTTP 500" in its stderr, so a
+                # rate limit was previously indistinguishable from any other Git
+                # failure. Only the numeric code is emitted, never the message.
+                reason = _git_http_reason(status)
             else:
                 reason = "unclassified Git failure; inspect safely on a trusted system"
         elif isinstance(exc, HTTPError) and type(exc.code) is int and 100 <= exc.code <= 599:
