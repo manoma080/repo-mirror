@@ -380,6 +380,14 @@ uv run python mirror.py --config config.json
 
 A local run changes real GitHub repositories. Test with a separate destination first.
 
+## Inactive sources
+
+At the end of a run, repositories whose newest commit, tag or release is older than a threshold are listed as warnings. The threshold defaults to 365 days and can be changed with `--inactive-after-days` (`0` disables it). The check needs no extra API request: the newest committer or tagger date comes from the refs the run already fetched, and the newest release timestamp comes from the release list the run already reads. Only completed repositories are judged, so a failed mirror is never reported as inactive.
+
+The GitHub workflow prints the list in its job log. The Forgejo runner reports each case through the worker protocol (`FORGEJO_INACTIVE`) and the scheduler re-emits it into the journald log as `Repository N: INACTIVE since <date> (<days> days)`, with the count appended to the batch summary.
+
+Commit dates are author-supplied, so a repository pushed today with old commits still looks inactive; a release published on an old tag counts through its release timestamp. Treat the list as a hint for pruning configuration, not as proof.
+
 ## Wipe protection
 
 Before updating a nonempty mirror, the repository workflow compares the old and new default-branch trees and the old default history with all captured source branches and tags. It treats the change as a wipe only if the default-branch file count drops by at least 75% relative to the old count **and** at least 75% of old commits are unreachable from all source branches and tags. Renamed or replaced files count toward the new total. Empty old trees do not trigger the heuristic. This is not a general backup: changes outside the default branch, retained commits, or smaller losses can evade it.
@@ -402,6 +410,7 @@ Destination ref updates and deletions use explicit leases and atomic pushes; con
 | `repo_mirror/logging_utils.py` | Log lines, timers and redaction. |
 | `repo_mirror/constants.py` | Shared limits and settings. |
 | `repo_mirror/source_filter.py` | Picks sources for a manual run. |
+| `repo_mirror/staleness.py` | Inactive-source threshold and reporting. |
 | `tests/` | Unit tests. |
 
 For the lint, format and type-check settings, see [`pyproject.toml`](pyproject.toml).

@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from repo_mirror import forgejo_migration
 from repo_mirror.config_json import unique_pairs
-from repo_mirror.forgejo_sync import (RELOCATION_FIELDS, RELOCATION_PREFIX, SAFE_REASONS,
-                                      parse_asset_max_bytes, parse_manifest)
+from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, RELOCATION_FIELDS, RELOCATION_PREFIX,
+                                      SAFE_REASONS, parse_asset_max_bytes, parse_manifest)
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
@@ -52,6 +52,20 @@ def parse_relocation(raw):
     if (not isinstance(value, dict) or set(value) != RELOCATION_FIELDS
             or any(not isinstance(value[key], str) or not value[key] for key in ('url', 'canonical'))
             or any(type(value[key]) is not int or value[key] <= 0 for key in ('source_id', 'destination_id'))):
+        return None
+    return value
+
+
+def parse_inactive(raw):
+    """Accept only the exact inactive-source record the worker protocol defines."""
+    try:
+        value = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (not isinstance(value, dict) or set(value) != INACTIVE_FIELDS
+            or not isinstance(value['url'], str) or not value['url']
+            or not isinstance(value['since'], str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value['since'])
+            or type(value['idle_days']) is not int or value['idle_days'] < 0):
         return None
     return value
 
@@ -246,6 +260,8 @@ def main(argv=None):
                 document = manifest_bytes if published is None else published
                 relocations = []
                 failures = 0
+                inactive = 0
+                source_urls = {entry['url'] for entry in entries}
                 pending = iter(enumerate((entry['url'] for entry in entries), 1))
                 active = {}
                 interrupted = False
@@ -343,6 +359,19 @@ def main(argv=None):
                                     else:
                                         relocation = parsed
                                     continue
+                                prefix = INACTIVE_PREFIX.encode('ascii')
+                                if line.startswith(prefix):
+                                    record = parse_inactive(line[len(prefix):].rstrip(b'\r\n'))
+                                    # A report for an unconfigured URL is ignored: it is
+                                    # informational and must never fail a good sync.
+                                    if record is not None and record['url'] in source_urls:
+                                        inactive += 1
+                                        print(
+                                            f'Repository {index}: INACTIVE since {record["since"]} '
+                                            f'({record["idle_days"]} days)',
+                                            flush=True,
+                                        )
+                                    continue
                                 prefix = b'FORGEJO_FAILURE: '
                                 if line.startswith(prefix) and not reported:
                                     candidate = line[len(prefix):].rstrip(b'\r\n').decode('utf-8', errors='replace')
@@ -404,7 +433,10 @@ def main(argv=None):
                                 print(f'Migration {index}: FAILED: unexpected migration failure', flush=True)
                                 break
                             print(f'Migration {index}: OK', flush=True)
-                print(f'Batch: {len(entries) - failures} succeeded, {failures} failed', flush=True)
+                summary = f'Batch: {len(entries) - failures} succeeded, {failures} failed'
+                if inactive:
+                    summary += f', {inactive} inactive'
+                print(summary, flush=True)
                 return 1 if failures else 0
     except KeyboardInterrupt:
         print('Batch interrupted; active processes stopped', file=sys.stderr)

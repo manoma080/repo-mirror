@@ -22,6 +22,7 @@ from repo_mirror.github_api import not_found, same_file, transient_transfer_erro
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker, validate_source
+from repo_mirror.staleness import observe
 
 # Checksum file names accepted as a fallback source, any letter case:
 # SHA256SUM, SHA256SUMS, SHA256SUM.txt, SHA256SUMS.txt.
@@ -548,6 +549,28 @@ def verify_forgejo_empty_target_tag(src, dst, upstream, target, tag):
     return (source_object["type"], sha)
 
 
+def release_time(release):
+    """Return the publication timestamp of one listed release, or None."""
+    if not isinstance(release, dict):
+        return None
+    for key in ("published_at", "released_at", "created_at"):
+        value = release.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return stamp if stamp.tzinfo is not None else None
+    return None
+
+
+def latest_release_time(releases):
+    """Return the newest publication timestamp among the listed releases."""
+    stamps = [stamp for stamp in (release_time(release) for release in releases) if stamp is not None]
+    return max(stamps) if stamps else None
+
+
 def fetch_source_latest(src, upstream):
     try:
         latest = src.request("GET", upstream + "/releases/latest")
@@ -808,6 +831,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
             raise ValueError("source API URL does not match source identity")
     with timed("step release-discovery target=source"):
         releases = src.list_releases() if tag_identity else src.pages(upstream + "/releases")
+    observe("last_release", latest_release_time(releases))
     if validate_snapshot is not None:
         latest = select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
         validate_snapshot(releases, latest)

@@ -26,6 +26,7 @@ from repo_mirror.sources import (
     source_marker,
     validate_source,
 )
+from repo_mirror.staleness import DEFAULT_INACTIVE_DAYS, observing, parse_inactive_days, stale, stamp_date
 
 
 class _ThreadStream:
@@ -51,7 +52,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--failures")
+    parser.add_argument(
+        "--inactive-after-days",
+        default=str(DEFAULT_INACTIVE_DAYS),
+        help="warn about repositories with no commit or release activity for this many days; 0 disables",
+    )
     args = parser.parse_args(argv)
+    inactive_days = parse_inactive_days(args.inactive_after_days)
     if not os.environ.get("MIRROR_TIMESTAMP_SECRET"):
         raise ReleaseRecoveryError("secret")
     journal = FailureJournal(args.failures) if args.failures else None
@@ -212,6 +219,7 @@ def main(argv=None):
     for _, source, _ in plan:
         source_client(source)
     failures = []
+    inactive = []
     ready = []
     for repo_index, (source_index, source, name) in enumerate(plan, 1):
         dest = destination_name(source, name)
@@ -305,6 +313,7 @@ def main(argv=None):
         stdout_router.local.stream = stderr_router.local.stream = log
         src = source_client(source)
         relocation = None
+        activity = {}
         try:
             print(
                 f"\n\n===== Repository {repo_index}/{len(plan)}: {safe_label(source.get('owner'))}/{safe_label(name)} =====",
@@ -317,10 +326,13 @@ def main(argv=None):
                 flush=True,
             )
             try:
-                if journal is None:
-                    relocation = mirror_repository(source, name, owner, src, dst, token, account_type)
-                else:
-                    relocation = mirror_repository(source, name, owner, src, dst, token, account_type, journal=journal)
+                # The worker thread owns this collector; nothing crosses threads.
+                with observing() as activity:
+                    if journal is None:
+                        relocation = mirror_repository(source, name, owner, src, dst, token, account_type)
+                    else:
+                        relocation = mirror_repository(source, name, owner, src, dst, token, account_type,
+                                                       journal=journal)
                 if isinstance(relocation, dict):
                     print(f"repository {repo_index} source relocation detected; migration deferred", file=sys.stderr, flush=True)
                 detail = None
@@ -336,7 +348,7 @@ def main(argv=None):
             raise
         finally:
             del stdout_router.local.stream, stderr_router.local.stream
-        return repo_index, detail, log, relocation
+        return repo_index, detail, log, relocation, activity
 
     sys.stdout, sys.stderr = stdout_router, stderr_router
     processing_started = time.monotonic()
@@ -350,7 +362,7 @@ def main(argv=None):
                 for future in completed:
                     item = pending.pop(future)
                     try:
-                        repo_index, detail, log, relocation = future.result()
+                        repo_index, detail, log, relocation, activity = future.result()
                     except Exception as exc:
                         failures.append((item[0], error_detail(exc)))
                         item = next(items, None)
@@ -369,6 +381,11 @@ def main(argv=None):
                             log.close()
                         except Exception as exc:
                             detail = detail or error_detail(exc)
+                    if detail is None:
+                        idle = stale(activity, inactive_days)
+                        if idle is not None:
+                            days, stamp = idle
+                            inactive.append((repo_index, item[1], item[2], item[3], days, stamp))
                     if detail is None and isinstance(relocation, dict):
                         # The copy succeeded; the configuration change is a
                         # separate, deferred transaction that must be recorded
@@ -438,6 +455,22 @@ def main(argv=None):
         file=sys.stderr,
         flush=True,
     )
+    if inactive:
+        inactive.sort()
+        print(
+            f"inactive: {len(inactive)} of {len(plan)} repositories had no commit or release activity "
+            f"in the last {inactive_days} days",
+            file=sys.stderr,
+            flush=True,
+        )
+        for repo_index, source_index, source, name, days, stamp in inactive:
+            print(
+                f"inactive repository {repo_index} (source {source_index}/{len(sources)}, "
+                f"{safe_label(source.get('owner'))}/{safe_label(name)}): "
+                f"last activity {stamp_date(stamp)} ({days} days)",
+                file=sys.stderr,
+                flush=True,
+            )
     if failures or discovery_failures or migration_failures:
         for repo_index, kind in failures:
             source_index, source, name = plan[repo_index - 1]
