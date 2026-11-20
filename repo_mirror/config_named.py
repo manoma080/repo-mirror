@@ -6,7 +6,9 @@ def normalize_config(config):
         raise ValueError("config must be an object")
     if 'destinations' not in config and 'repositories' not in config:
         return config
-    if set(config) != {'destinations', 'repositories'}:
+    from repo_mirror.host_limits import CONFIG_KEY, HostLimits
+    HostLimits.from_config(config.get(CONFIG_KEY), default=1)
+    if set(config) - {CONFIG_KEY} != {'destinations', 'repositories'}:
         raise ValueError('invalid named config fields')
     destinations = config['destinations']
     if not isinstance(destinations, dict) or len(destinations) != 1:
@@ -53,6 +55,8 @@ def normalize_config(config):
         validate_source(item)
         sources.append(item)
     result = {'destination_account_type': 'personal' if explicit else settings['account_type'], 'sources': sources}
+    if CONFIG_KEY in config:
+        result[CONFIG_KEY] = dict(config[CONFIG_KEY])
     if explicit:
         result['destination_profile'] = settings.copy()
     return result

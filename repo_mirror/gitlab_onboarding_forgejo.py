@@ -85,7 +85,8 @@ def validate_groups(groups):
 
 def onboard(document, source_api, destination_api, cas, owner, *, organization=False, project_factory=GitLabSourceAdapter, active_bindings=None):
     config = json.loads(document.decode('utf-8'), object_pairs_hook=unique_pairs)
-    if not isinstance(config, dict) or set(config) != {'destinations', 'repositories', 'groups'}:
+    from repo_mirror.host_limits import CONFIG_KEY
+    if not isinstance(config, dict) or set(config) - {CONFIG_KEY} != {'destinations', 'repositories', 'groups'}:
         raise ValueError('invalid group manifest')
     validate_groups(config['groups'])
     if not isinstance(config['destinations'], dict) or len(config['destinations']) != 1 or not isinstance(config['repositories'], list):

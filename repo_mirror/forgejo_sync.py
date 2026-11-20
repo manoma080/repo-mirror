@@ -130,7 +130,8 @@ def parse_source(value, source_type=None):
 
 
 def normalize_named(sources):
-    if not isinstance(sources, dict) or set(sources) != {'destinations', 'repositories'}:
+    from repo_mirror.host_limits import CONFIG_KEY
+    if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY} != {'destinations', 'repositories'}:
         raise ValueError('invalid named manifest')
     destinations, repositories = sources['destinations'], sources['repositories']
     if not isinstance(destinations, dict) or len(destinations) != 1 or not isinstance(repositories, list) or not repositories:

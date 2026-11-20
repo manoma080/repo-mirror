@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote
 
@@ -14,6 +15,7 @@ from repo_mirror.adhoc import add_to_config, add_to_config_pinned, one_time_sour
 from repo_mirror.config_named import normalize_config
 from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
 from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
+from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_main
 from repo_mirror.repository import mirror_repository
@@ -59,6 +61,7 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     inactive_days = parse_inactive_days(args.inactive_after_days)
+    max_workers = 16
     if not os.environ.get("MIRROR_TIMESTAMP_SECRET"):
         raise ReleaseRecoveryError("secret")
     journal = FailureJournal(args.failures) if args.failures else None
@@ -94,6 +97,7 @@ def main(argv=None):
     sources = config.get("sources")
     if not isinstance(sources, list):
         raise ValueError("sources must be a list")
+    host_limits = HostLimits.from_config(config.get(CONFIG_KEY), default=max_workers)
     selected_urls = os.environ.get("MIRROR_SOURCE_URLS")
     # Only URLs absent from the original configuration are one-time additions.
     # Explicit configured GitLab repositories still require historical pins.
@@ -353,21 +357,34 @@ def main(argv=None):
     sys.stdout, sys.stderr = stdout_router, stderr_router
     processing_started = time.monotonic()
     try:
-        max_workers = 16
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            items = iter(ready)
-            pending = {pool.submit(run_repository, item): item for item in (next(items, None) for _ in range(max_workers)) if item}
+            queue = deque(ready)
+            admission = HostAdmission(host_limits)
+
+            def item_host(item):
+                return source_host(item[2]["base_url"])
+
+            def fill():
+                # Never exceed a source host's cap, but keep other hosts busy
+                # while one of them is saturated.
+                while queue and len(pending) < max_workers:
+                    item = take_admissible(queue, admission, item_host)
+                    if item is None:
+                        return
+                    admission.acquire(item_host(item))
+                    pending[pool.submit(run_repository, item)] = item
+
+            pending = {}
+            fill()
             while pending:
                 completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in completed:
                     item = pending.pop(future)
+                    admission.release(item_host(item))
                     try:
                         repo_index, detail, log, relocation, activity = future.result()
                     except Exception as exc:
                         failures.append((item[0], error_detail(exc)))
-                        item = next(items, None)
-                        if item is not None:
-                            pending[pool.submit(run_repository, item)] = item
                         continue
                     try:
                         log.seek(0)
@@ -396,9 +413,7 @@ def main(argv=None):
                         succeeded += 1
                     else:
                         failures.append((repo_index, detail))
-                    item = next(items, None)
-                    if item is not None:
-                        pending[pool.submit(run_repository, item)] = item
+                fill()
     finally:
         sys.stdout, sys.stderr = original_stdout, original_stderr
         counter = REPOSITORY_TIME.get()

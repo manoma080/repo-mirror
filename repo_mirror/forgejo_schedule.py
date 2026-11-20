@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ from repo_mirror import forgejo_migration
 from repo_mirror.config_json import unique_pairs
 from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, RELOCATION_FIELDS, RELOCATION_PREFIX,
                                       SAFE_REASONS, parse_asset_max_bytes, parse_manifest)
+from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
@@ -123,7 +125,7 @@ def main(argv=None):
         if groups is not None:
             from repo_mirror.gitlab_onboarding_forgejo import validate_groups
             validate_groups(groups)
-            if set(sources) != {'destinations', 'repositories', 'groups'} or not args.config_repo or args.asset_max_bytes is None:
+            if set(sources) - {CONFIG_KEY} != {'destinations', 'repositories', 'groups'} or not args.config_repo or args.asset_max_bytes is None:
                 raise ValueError('group onboarding requires authoritative config and asset limit')
             worker_manifest = {k: v for k, v in sources.items() if k != 'groups'}
             if worker_manifest.get('repositories'):
@@ -269,7 +271,10 @@ def main(argv=None):
                 failures = 0
                 inactive = 0
                 source_urls = {entry['url'] for entry in entries}
-                pending = iter(enumerate((entry['url'] for entry in entries), 1))
+                host_limits = HostLimits.from_config(
+                    sources.get(CONFIG_KEY) if isinstance(sources, dict) else None, default=args.jobs)
+                queue = deque(enumerate((entry['url'] for entry in entries), 1))
+                admission = HostAdmission(host_limits)
                 active = {}
                 interrupted = False
                 def terminate(signum, frame):
@@ -277,18 +282,16 @@ def main(argv=None):
                     interrupted = True
                 previous_handlers = {sig: signal.signal(sig, terminate) for sig in (signal.SIGTERM, signal.SIGINT)}
                 try:
-                    exhausted = False
-                    while active or not exhausted:
+                    while active or queue:
                         if interrupted:
                             raise KeyboardInterrupt
-                        while len(active) < args.jobs and not exhausted:
+                        while len(active) < args.jobs and queue:
                             if interrupted:
                                 raise KeyboardInterrupt
-                            try:
-                                index, source = next(pending)
-                            except StopIteration:
-                                exhausted = True
+                            queued = take_admissible(queue, admission, lambda item: source_host(item[1]))
+                            if queued is None:
                                 break
+                            index, source = queued
                             if isinstance(source, dict):
                                 source = source['url']
                             entry_meta = entries[index - 1]
@@ -314,16 +317,19 @@ def main(argv=None):
                                 command.append('--organization')
                             command += ['--source', source]
                             diagnostics = tempfile.TemporaryFile()
+                            host = source_host(source)
+                            admission.acquire(host)
                             try:
                                 process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL,
                                                            stderr=diagnostics, pass_fds=(lock.fileno(),), start_new_session=True)
                             except OSError:
+                                admission.release(host)
                                 diagnostics.close()
                                 failures += 1
                                 print(f'Repository {index}: FAILED: unable to start helper; check executable and permissions', flush=True)
                             else:
-                                active[process] = [index, diagnostics, time.monotonic() + args.repository_timeout, None]
-                        for process, (index, diagnostics, deadline, kill_deadline) in list(active.items()):
+                                active[process] = [index, diagnostics, time.monotonic() + args.repository_timeout, None, host]
+                        for process, (index, diagnostics, deadline, kill_deadline, host) in list(active.items()):
                             status = process.poll()
                             now = time.monotonic()
                             if kill_deadline is not None:
@@ -336,6 +342,7 @@ def main(argv=None):
                                 process.wait()
                                 diagnostics.close()
                                 del active[process]
+                                admission.release(host)
                                 failures += 1
                                 print(f'Repository {index}: FAILED: repository timed out', flush=True)
                                 continue
@@ -384,6 +391,7 @@ def main(argv=None):
                                         reported = True
                             diagnostics.close()
                             del active[process]
+                            admission.release(host)
                             ok = status == 0 and not invalid_report
                             if invalid_report:
                                 reason = 'invalid relocation report'
@@ -400,7 +408,7 @@ def main(argv=None):
                         except ProcessLookupError:
                             pass
                     deadline = time.monotonic() + 2
-                    for process, (_, diagnostics, _, _) in active.items():
+                    for process, (_, diagnostics, _, _, _) in active.items():
                         try:
                             process.wait(timeout=max(0, deadline - time.monotonic()))
                         except subprocess.TimeoutExpired:
