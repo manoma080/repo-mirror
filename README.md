@@ -73,6 +73,14 @@ Edit [`config.json`](config.json). Named configuration lists each source reposit
 }
 ```
 
+A top-level `host_concurrency_limits` map caps how many repositories are mirrored at once from each source host; `default` applies to hosts without an entry, and omitting the map keeps one shared pool of sixteen:
+
+```json
+{"host_concurrency_limits": {"default": 16, "git.etawen.dev": 4}}
+```
+
+Hosts are lower-case names, optionally with a non-default port; limits count repositories in flight per source host, not per provider, and never exceed the runner's worker pool. Capping a host trades throughput there for predictable request rates — a host that answers HTTP 429 when several repositories are fetched at once mirrors its repositories in several waves instead of failing.
+
 Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to Mirrorbot. The workflow uses those app secrets, while the Forgejo scheduler's separate Manobot helper authenticates GitHub source access. Legacy named profiles with `account_type` (`personal` or `organization`) remain supported with their previous behavior. Source URLs may point to GitHub, a public Forgejo instance or a public GitLab instance. GitLab repositories specifically require both source and destination ID pins before syncing; see [GitLab sources](#gitlab-sources). Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. For other sources, IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
 
 Legacy `destination_account_type` and `sources` configurations remain supported, including `repos: "all"` (owned public repositories, not stars), custom `prefix`, and per-repository `destinations` mappings using `source_id` and `destination_id`. Do not mix the formats.
