@@ -5,6 +5,14 @@ on:
     branches: [main]
   push:
     branches: [main]
+    # The mirror workflow commits its journal and configuration to main; those
+    # data-only commits are not code changes and must not queue a test run.
+    paths-ignore:
+      - failures.json
+      - migrations.json
+      - config.json
+      - config-forgejo.json
+      - .failure-journal-in-progress
 
 permissions:
   contents: read
