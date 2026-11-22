@@ -453,7 +453,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                     raise ValueError("destination repository id mismatch or missing")
                 check_existing(current, marker)
         dst = _IdentityGuardedDestination(raw_dst, check_release_pins)
-    if "legacy" in settings:
+    if settings.get("ignore_releases") is True:
+        # The option stops release synchronization only; existing destination
+        # releases, pending markers and journal entries are left untouched so
+        # re-enabling the repository resumes recovery.
+        print("releases ignored by configuration", file=sys.stderr, flush=True)
+    elif "legacy" in settings:
         historical_target = f"{GITHUB}/repos/{qowner}/{quote(legacy['destination_name'], safe='')}"
         mirror_releases(source, source_name, owner, src, dst, upstream, target,
                         source_marker(historical_source, historical_name), initializing=initializing, journal=journal,

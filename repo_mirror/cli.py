@@ -113,6 +113,11 @@ def main(argv=None):
                 ephemeral_urls.add((base.lower(), source_owner.lower(), name.lower()))
     custom = os.environ.get("MIRROR_DESTINATION_NAME", "")
     visibility = os.environ.get("MIRROR_VISIBILITY") or "unchanged"
+    ignore_override = os.environ.get("MIRROR_IGNORE_RELEASES") or "keep"
+    if ignore_override not in ("keep", "true", "false"):
+        raise ValueError("invalid ignore-releases override")
+    if ignore_override != "keep" and not (selected_urls and selected_urls.strip()):
+        raise ValueError("ignore-releases override requires source URLs")
     if selected_urls and selected_urls.strip():
         add_to_config(config, selected_urls, custom, None if visibility == "unchanged" else visibility, protect_pins=False)
     elif custom or visibility not in ("private", "unchanged"):
@@ -199,6 +204,18 @@ def main(argv=None):
         seen.add(target)
         plan.append((len(sources), source, name))
     plan = filter_plan(plan, selected_urls, case_insensitive=True)
+    if ignore_override != "keep":
+        # A one-run override covers exactly the sources named in this run and is
+        # never written back to the configuration.
+        override = ignore_override == "true"
+        selected_identities = set()
+        for part in (selected_urls or "").split(','):
+            _, base, selected_owner, selected_name = parse_selected_url(part.strip(), sources)
+            selected_identities.add((base.lower().rstrip('/'), selected_owner.lower(), selected_name.lower()))
+        for _, source, name in plan:
+            identity = (source['base_url'].lower().rstrip('/'), source['owner'].lower(), name.lower())
+            if identity in selected_identities:
+                source.setdefault('destinations', {}).setdefault(name.lower(), {})['ignore_releases'] = override
     onboarding_store = None
     for source_index, source, name in plan:
         settings = source.get('destinations', {}).get(name.lower(), {})
@@ -479,10 +496,12 @@ def main(argv=None):
             flush=True,
         )
         for repo_index, source_index, source, name, days, stamp in inactive:
+            ignored = source.get('destinations', {}).get(name.lower(), {}).get('ignore_releases') is True
             print(
                 f"inactive repository {repo_index} (source {source_index}/{len(sources)}, "
                 f"{safe_label(source.get('owner'))}/{safe_label(name)}): "
-                f"last activity {stamp_date(stamp)} ({days} days)",
+                f"last activity {stamp_date(stamp)} ({days} days)"
+                + (" (releases ignored; commit activity only)" if ignored else ""),
                 file=sys.stderr,
                 flush=True,
             )

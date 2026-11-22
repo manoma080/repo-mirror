@@ -35,6 +35,7 @@ exit 0
         env = dict(os.environ, PATH=f'{root}:' + os.environ['PATH'], RECORD=str(root / 'record.json'),
                    GITHUB_OUTPUT=str(root / 'output'), REQUESTED_SOURCE_URLS='https://github.com/a/x',
                    REQUESTED_DESTINATION='custom', REQUESTED_VISIBILITY='public', REMOVE=str(remove).lower(),
+                   REQUESTED_IGNORE_RELEASES='keep',
                    DEFAULT_BRANCH='main', MIRROR_APP_ID='app-id', MIRROR_APP_PRIVATE_KEY='private-key',
                    DESTINATION_OWNER='target-owner', MIRROR_TIMESTAMP_SECRET='timestamp-secret')
         subprocess.run(['bash', '-c', script], cwd=root, env=env, check=True, capture_output=True, text=True)
@@ -45,7 +46,8 @@ class WorkflowPinWiringTests(unittest.TestCase):
     def test_add_invokes_pin_with_requested_settings_and_credentials(self):
         record, output = run_configure(False)
         self.assertEqual(record['args'], ['-m', 'repo_mirror.adhoc', '--config', 'config.json', '--urls',
-                                         'https://github.com/a/x', '--destination', 'custom', '--visibility', 'public', '--auto-pin'])
+                                         'https://github.com/a/x', '--destination', 'custom', '--visibility', 'public',
+                                         '--ignore-releases', 'keep', '--auto-pin'])
         self.assertEqual(record['env'], {'MIRROR_APP_ID': 'app-id', 'MIRROR_APP_PRIVATE_KEY': 'private-key',
                                          'DESTINATION_OWNER': 'target-owner', 'MIRROR_TIMESTAMP_SECRET': 'timestamp-secret'})
         self.assertEqual(output, 'sha=abc123\n')
@@ -108,13 +110,15 @@ github_api.API = API
             env = dict(os.environ, PATH=f'{root}:' + os.environ['PATH'], PYTHONPATH=f'{root}:{repo_root}',
                        GITHUB_OUTPUT=str(root / 'output'), REQUESTED_SOURCE_URLS='https://github.com/a/x',
                        REQUESTED_DESTINATION='custom', REQUESTED_VISIBILITY='public', REMOVE='false',
+                       REQUESTED_IGNORE_RELEASES='true',
                        DEFAULT_BRANCH='main', MIRROR_APP_ID='app-id', MIRROR_APP_PRIVATE_KEY='private-key',
                        DESTINATION_OWNER='bot', GH_TOKEN='incorrect-workflow-token')
             result = subprocess.run(['bash', '-c', script], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             entry = json.loads((root / 'config.json').read_text())['repositories'][0]
             self.assertEqual(entry['source']['id'], 11)
-            self.assertEqual(entry['mirrors']['d'], {'name': 'custom', 'visibility': 'public', 'id': 22})
+            self.assertEqual(entry['mirrors']['d'],
+                             {'name': 'custom', 'visibility': 'public', 'id': 22, 'ignore_releases': True})
             self.assertNotIn('private-key', result.stderr + result.stdout)
             self.assertNotIn('installation-token', result.stderr + result.stdout)
 
@@ -126,7 +130,8 @@ github_api.API = API
         for binding in ('ref: ${{ needs.test.outputs.tested-sha }}',
                         'MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}',
                         'MIRROR_DESTINATION_NAME: ${{ inputs.destination_name }}',
-                        "MIRROR_VISIBILITY: ${{ inputs.visibility || 'unchanged' }}"):
+                        "MIRROR_VISIBILITY: ${{ inputs.visibility || 'unchanged' }}",
+                        "MIRROR_IGNORE_RELEASES: ${{ (inputs.add_to_config && 'keep') || inputs.ignore_releases || 'keep' }}"):
             self.assertIn(binding, mirror)
 
 
