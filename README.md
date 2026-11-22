@@ -64,6 +64,10 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 - **ignore_releases** skips release synchronization for the named URLs: branches and tags are still mirrored, and any releases already in the destination are left untouched, as are pending recovery markers and journal entries, so turning it back off resumes them. `keep` (the default) leaves each repository's saved setting in charge; `true` and `false` either persist that value per repository with add selected, or apply to this run only without add. Releases are not deleted by this option. Release activity is no longer observed, so a repository whose only recent activity is upstream releases can be reported as inactive by the GitHub runner, which marks that repository's warning line with `releases ignored`; the Forgejo runner's inactive record has fixed fields and gives no such hint.
 - **remove_from_config** requires one or more URLs, commits only the config removal and skips the entire mirror job, including journal writes. It does not delete repositories. It cannot be combined with add, custom name or public visibility. Individual URLs covered by a `repos: "all"` source cannot be removed this way; edit the configuration explicitly instead.
 
+### Repository history
+
+This repository is the public code home. It was re-created on 2026-11-22 from a filtered import, so no commit here has ever contained `config.json`, `config-forgejo.json`, `failures.json` or `migrations.json`. The previous repository, with its full history, is kept private as [`manoma080/repo-mirror-archive`](https://github.com/manoma080/repo-mirror-archive). Use this repository for code and pull requests, and `repo-mirror-config` for configuration.
+
 ## Configure sources
 
 Edit [`config.json`](https://github.com/manoma080/repo-mirror-config/blob/main/config.json) in the configuration repository. Named configuration lists each source repository and its mirror explicitly:
