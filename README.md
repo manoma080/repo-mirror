@@ -404,6 +404,8 @@ On a trigger, the workflow creates a private `<mirror>-wipe-<UTC timestamp>` rep
 
 Destination ref updates and deletions use explicit leases and atomic pushes; concurrent new refs are left alone. Ref changes can still occur after verification, and default-branch settings cannot be updated atomically with Git pushes. A failed multi-stage update may therefore require inspection and a new run. Snapshot, detection, archive and push elapsed times are logged separately.
 
+An **empty destination** whose fetched pack exceeds 1.5 GiB is instead populated in slices, because GitHub rejects any single push whose pack exceeds 2 GiB. Branch histories are pushed as successive fast-forward commits (5000 per slice, halved on a size rejection until one), then the remaining refs one at a time, then the usual verified reconcile. A `refs/repo-mirror/seed-in-progress` marker written after the first slice is removed once the destination verifies; while it exists, a later run may finish an interrupted seed if every destination ref is at or behind its snapshot ref. Seeding is not atomic: an interrupted seed leaves partial refs (the next run resumes), and wipe detection and leases do not apply to it. See [GitHub's 2 GiB push limit](https://docs.github.com/en/get-started/using-git/troubleshooting-the-2-gb-push-limit).
+
 ## Code layout
 
 | Path | What it holds |

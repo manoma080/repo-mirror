@@ -23,7 +23,7 @@ class InitialDefaultTests(unittest.TestCase):
             return dict(state)
         dst.request.side_effect = request
         desired = {"refs/heads/main": "a" * 40, "refs/heads/other": "b" * 40}
-        def push(*args):
+        def push(*args, **kwargs):
             state['default_branch'] = 'other'
         def mirror(*args, **kwargs):
             safety = kwargs['safety']

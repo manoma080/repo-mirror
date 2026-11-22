@@ -16,12 +16,44 @@ fresh listing. When the old default branch must be removed, switch_default is
 called with a surviving new branch ref after updates and must change remote HEAD;
 this is verified before deletion. A failed step may leave partial changes; never
 retry without a fresh safety decision and snapshot. Concurrent new refs survive.
+
+A destination with no refs, or one that holds only ancestor states of the
+snapshot (an interrupted seed), is populated in slices: GitHub rejects any
+single push whose pack exceeds 2 GiB, so a large history cannot be sent as one
+atomic push. Slices are ordinary fast-forward pushes of successive commits along
+each branch, followed by one push per remaining ref and a final verified
+reconcile. ``resume=True`` selects that path for a partially seeded destination.
 """
 
 import re
+import subprocess
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
+
+# GitHub rejects a single push whose pack exceeds 2 GiB. Seeding is used for an
+# empty destination once its fetched pack is larger than this, and always when
+# resuming; the margin leaves room for pack overhead and ref advertisement.
+SEED_LIMIT_BYTES = 1500 * 1024 * 1024
+# Commits per slice when seeding. Halved on a transport failure until one.
+SEED_STEP = 5000
+# Marker ref written after the first slice and removed once the destination
+# verifies, so an interrupted seed is distinguishable from a foreign repository
+# whose default branch happens to differ.
+SEED_MARKER = "refs/repo-mirror/seed-in-progress"
+
+# A push rejected for size may surface as a server-side pack error, an HTTP 5xx,
+# or only as a closed connection (see GitHub's 2 GiB push limit documentation).
+_PUSH_RETRY_MARKERS = (
+    b"pack exceeds maximum allowed size",
+    b"push cannot exceed 2gb",
+    b"push cannot exceed 2 gb",
+    b"remote end hung up unexpectedly",
+    b"rpc failed",
+    b"returned error: 500",
+    b"http 500",
+)
+
 
 
 @contextmanager
@@ -156,9 +188,136 @@ def _default_branch(run, remote):
     return ref
 
 
-def push_snapshot(run, store, destination, snapshot, observed, switch_default=None):
+def _store_bytes(run, store):
+    """Compressed size of the objects the store fetched, in bytes."""
+    data = run(["-C", store, "count-objects", "-v"]).decode("ascii", "replace")
+    total = 0
+    for line in data.splitlines():
+        name, _, value = line.partition(":")
+        if name in ("size", "size-pack"):
+            try:
+                total += int(value.strip().split()[0]) * 1024
+            except (IndexError, ValueError):
+                raise SnapshotError("invalid object store size") from None
+    return total
+
+
+def _is_ancestor(run, store, old, new):
+    try:
+        run(["-C", store, "merge-base", "--is-ancestor", old, new])
+    except subprocess.CalledProcessError:
+        return False
+    return True
+
+
+def is_seed_preimage(run, store, observed, snapshot):
+    """True when every destination ref equals or is an ancestor of its snapshot ref.
+
+    Such a destination is an interrupted seed: completing it only fast-forwards
+    refs, so nothing can be lost. Any observed ref absent from the snapshot, or
+    one that is not an ancestor, keeps the normal reconciliation path and its
+    refusal. Callers must also distinguish this from a routine incremental run
+    (which is also a preimage) by the seed marker or the missing source default.
+    """
+    if not observed or set(observed) - set(snapshot):
+        return False
+    return all(
+        oid == snapshot[ref] or _is_ancestor(run, store, oid, snapshot[ref])
+        for ref, oid in observed.items()
+    )
+
+
+def seed_in_progress(run, remote):
+    """True when a previous seed left its in-progress marker in the destination."""
+    data = run(["ls-remote", "--refs", "--", remote, SEED_MARKER])
+    return bool(data.strip())
+
+
+def _delete_seed_marker(run, store, remote):
+    if seed_in_progress(run, remote):
+        run(["-C", store, "push", "--", remote, ":" + SEED_MARKER])
+
+
+def _push_ref(run, store, remote, spec):
+    run(["-C", store, "push", "--", remote, spec])
+
+
+def _retryable(exc):
+    text = exc.stderr or b""
+    text = text.lower() if isinstance(text, bytes) else text.encode()
+    return any(marker in text for marker in _PUSH_RETRY_MARKERS)
+
+
+def _seed_ref(run, store, remote, ref, tip, known, step, after_first=None):
+    """Fast-forward one branch in slices, halving the slice on a size rejection."""
+    args = ["-C", store, "rev-list", "--reverse", tip]
+    if known:
+        args += ["--not", known]
+    commits = run(args).decode("ascii", "replace").split()
+    position = 0
+    while position < len(commits):
+        end = min(position + step, len(commits))
+        try:
+            _push_ref(run, store, remote, f"{commits[end - 1]}:{ref}")
+        except subprocess.CalledProcessError as exc:
+            if step == 1 or not _retryable(exc):
+                raise
+            step = max(1, step // 2)
+            continue
+        position = end
+        if after_first is not None:
+            after_first(commits[end - 1])
+            after_first = None
+
+
+def _seed_destination(run, store, destination, snapshot, observed):
+    """Populate an empty or interrupted destination, one ref at a time.
+
+    Branch histories are fast-forwarded in slices because a single pack over
+    2 GiB is rejected. Remaining refs (tags, already-complete branches) follow
+    individually, so one oversized tag cannot hide the rest. A marker ref is
+    created after the first slice and removed only once the destination
+    verifies, so a later run can tell an interrupted seed from an unrelated
+    repository whose default branch changed.
+    """
+    heads = sorted(ref for ref in snapshot if ref.startswith("refs/heads/"))
+    if not heads:
+        raise SnapshotError("snapshot has no branches to seed")
+    pending_marker = [not seed_in_progress(run, destination)]
+
+    def mark(oid):
+        if pending_marker[0]:
+            _push_ref(run, store, destination, f"{oid}:{SEED_MARKER}")
+            pending_marker[0] = False
+
+    for ref in heads:
+        if observed.get(ref) != snapshot[ref]:
+            _seed_ref(run, store, destination, ref, snapshot[ref], observed.get(ref), SEED_STEP, mark)
+    for ref in sorted(set(snapshot) - set(heads)):
+        if observed.get(ref) != snapshot[ref]:
+            _push_ref(run, store, destination, f"{snapshot[ref]}:{ref}")
+
+
+def push_snapshot(run, store, destination, snapshot, observed, switch_default=None, *, resume=False):
     with git_phase("snapshot push"):
-        return _push_snapshot(run, store, destination, snapshot, observed, switch_default)
+        _validate(snapshot)
+        _validate(observed)
+        seeded = (resume or not observed) and (resume or _store_bytes(run, store) > SEED_LIMIT_BYTES)
+        if seeded:
+            # One atomic push cannot carry a history larger than GitHub's 2 GiB
+            # limit; send it in fast-forward slices and treat the seeded refs as
+            # observed for the final reconcile.
+            _seed_destination(run, store, destination, snapshot, observed)
+            observed = dict(snapshot)
+        result = _push_snapshot(run, store, destination, snapshot, observed, switch_default)
+        if seeded:
+            # Leaving the marker behind is harmless (it only permits a verified
+            # resume), so cleanup must not fail an otherwise complete mirror.
+            try:
+                _delete_seed_marker(run, store, destination)
+            except subprocess.CalledProcessError:
+                pass
+        return result
 
 
 def _push_snapshot(run, store, destination, snapshot, observed, switch_default=None):
