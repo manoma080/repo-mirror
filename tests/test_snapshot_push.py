@@ -2,8 +2,16 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from repo_mirror.snapshot_push import SnapshotError, archive_snapshot, capture_snapshot, push_snapshot
+from repo_mirror import snapshot_push
+from repo_mirror.snapshot_push import (
+    SnapshotError,
+    archive_snapshot,
+    capture_snapshot,
+    is_seed_preimage,
+    push_snapshot,
+)
 
 
 def git(*args):
@@ -84,3 +92,166 @@ class SnapshotPushTests(unittest.TestCase):
         with self.assertRaises(SnapshotError):
             push_snapshot(run, self.store, self.source, desired, observed)
         self.assertIn(b"refs/heads/old", git("ls-remote", "--refs", self.source))
+
+
+class SnapshotSeedTests(unittest.TestCase):
+    """First push of a large history, sent in slices under the 2 GiB limit."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.work = root / "work"
+        git("init", "-q", "-b", "main", self.work)
+        git("-C", self.work, "config", "user.name", "Test")
+        git("-C", self.work, "config", "user.email", "test@example.com")
+        self.commits = []
+        for index in range(6):
+            (self.work / "file").write_text(str(index))
+            git("-C", self.work, "add", "file")
+            git("-C", self.work, "commit", "-qm", f"commit {index}")
+            self.commits.append(git("-C", self.work, "rev-parse", "HEAD").decode().strip())
+        git("-C", self.work, "tag", "-a", "v1", self.commits[2], "-m", "tag")
+        git("clone", "-q", "--bare", self.work, root / "source")
+        git("init", "-q", "--bare", root / "store")
+        git("init", "-q", "--bare", root / "dest")
+        self.store = str(root / "store")
+        self.source = str(root / "source")
+        self.dest = str(root / "dest")
+        self.snapshot = capture_snapshot(run, self.store, self.source)
+
+    def _record(self, calls):
+        def run_and_record(args):
+            calls.append(list(args))
+            return run(args)
+        return run_and_record
+
+    @staticmethod
+    def _specs(calls, ref):
+        return [arg for call in calls for arg in call if isinstance(arg, str) and arg.endswith(":" + ref)]
+
+    def test_empty_destination_over_limit_is_seeded_in_slices(self):
+        calls = []
+        with patch.object(snapshot_push, "SEED_LIMIT_BYTES", 0), patch.object(snapshot_push, "SEED_STEP", 2):
+            push_snapshot(self._record(calls), self.store, self.dest, self.snapshot, {})
+        self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
+        self.assertGreaterEqual(len(self._specs(calls, "refs/heads/main")), 3)
+
+    def test_small_empty_destination_uses_one_atomic_push(self):
+        calls = []
+        with patch.object(snapshot_push, "SEED_LIMIT_BYTES", 10 ** 12):
+            push_snapshot(self._record(calls), self.store, self.dest, self.snapshot, {})
+        self.assertEqual(len([call for call in calls if "push" in call]), 1)
+        self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
+
+    def test_partial_seed_resumes_from_the_destination_ancestor(self):
+        git("-C", self.work, "push", "-q", self.dest, f"{self.commits[1]}:refs/heads/main")
+        observed = capture_snapshot(run, self.store, self.dest)
+        self.assertTrue(is_seed_preimage(run, self.store, observed, self.snapshot))
+        calls = []
+        with patch.object(snapshot_push, "SEED_STEP", 2):
+            push_snapshot(self._record(calls), self.store, self.dest, self.snapshot, observed, resume=True)
+        self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
+        specs = self._specs(calls, "refs/heads/main")
+        self.assertIn(f"{self.commits[3]}:refs/heads/main", specs)
+        self.assertNotIn(f"{self.commits[0]}:refs/heads/main", specs)
+
+    def test_seed_resume_rejects_a_destination_that_diverged(self):
+        other = Path(self.tmp.name) / "other"
+        git("init", "-q", "-b", "main", other)
+        git("-C", other, "config", "user.name", "Test")
+        git("-C", other, "config", "user.email", "test@example.com")
+        (other / "file").write_text("unrelated")
+        git("-C", other, "add", "file")
+        git("-C", other, "commit", "-qm", "unrelated")
+        git("-C", other, "push", "-q", self.dest, "HEAD:refs/heads/main")
+        observed = capture_snapshot(run, self.store, self.dest)
+        self.assertFalse(is_seed_preimage(run, self.store, observed, self.snapshot))
+
+    def test_seed_halves_the_slice_after_a_size_rejection(self):
+        calls = []
+        rejected = {"count": 1}
+
+        def flaky(args):
+            calls.append(list(args))
+            if (
+                rejected["count"]
+                and "push" in args
+                and any(isinstance(arg, str) and arg.endswith(":refs/heads/main") for arg in args)
+            ):
+                rejected["count"] -= 1
+                raise subprocess.CalledProcessError(1, args, stderr=b"fatal: the remote end hung up unexpectedly")
+            return run(args)
+
+        with patch.object(snapshot_push, "SEED_STEP", 4):
+            push_snapshot(flaky, self.store, self.dest, self.snapshot, {}, resume=True)
+        self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
+        self.assertIn(f"{self.commits[1]}:refs/heads/main", self._specs(calls, "refs/heads/main"))
+
+
+class SeedMarkerTests(unittest.TestCase):
+    """A marker distinguishes a crash after seeding from a foreign repository."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.work = root / "work"
+        git("init", "-q", "-b", "main", self.work)
+        git("-C", self.work, "config", "user.name", "Test")
+        git("-C", self.work, "config", "user.email", "test@example.com")
+        (self.work / "file").write_text("content")
+        git("-C", self.work, "add", "file")
+        git("-C", self.work, "commit", "-qm", "first")
+        git("-C", self.work, "branch", "other")
+        git("clone", "-q", "--bare", self.work, root / "source")
+        git("init", "-q", "--bare", root / "store")
+        git("init", "-q", "--bare", root / "dest")
+        self.store = str(root / "store")
+        self.source = str(root / "source")
+        self.dest = str(root / "dest")
+
+    def test_equal_refs_are_a_preimage(self):
+        snapshot = capture_snapshot(run, self.store, self.source)
+        self.assertTrue(is_seed_preimage(run, self.store, dict(snapshot), snapshot))
+
+    def test_marker_resumes_a_seed_that_only_lost_its_head(self):
+        from repo_mirror import git_sync
+
+        snapshot = capture_snapshot(run, self.store, self.source)
+        specs = [f"{oid}:{ref}" for ref, oid in snapshot.items()]
+        git("-C", self.work, "push", "-q", self.dest, *specs)
+        git("-C", self.dest, "symbolic-ref", "HEAD", "refs/heads/other")
+        git("-C", self.work, "push", "-q", self.dest, f"{snapshot['refs/heads/main']}:refs/repo-mirror/seed-in-progress")
+
+        def switch(ref, initial_refs=None):
+            git("-C", self.dest, "symbolic-ref", "HEAD", ref)
+
+        git_sync.synchronize_snapshots(
+            run, run, self.store, self.source, self.dest, "main", "main", lambda: (None, None), switch
+        )
+        self.assertEqual(
+            git("-C", self.dest, "symbolic-ref", "HEAD").decode().strip(), "refs/heads/main"
+        )
+        self.assertEqual(git("ls-remote", "--refs", self.dest, "refs/repo-mirror/seed-in-progress"), b"")
+        self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
+
+    def test_marker_and_partial_refs_finish_an_interrupted_seed(self):
+        from repo_mirror import git_sync
+        from unittest.mock import patch
+
+        snapshot = capture_snapshot(run, self.store, self.source)
+        first = git("-C", self.work, "rev-list", "--max-parents=0", "main").decode().strip()
+        git("-C", self.work, "push", "-q", self.dest, f"{first}:refs/heads/main")
+        git("-C", self.work, "push", "-q", self.dest, f"{first}:refs/repo-mirror/seed-in-progress")
+        git("-C", self.dest, "symbolic-ref", "HEAD", "refs/heads/main")
+
+        def switch(ref, initial_refs=None):
+            git("-C", self.dest, "symbolic-ref", "HEAD", ref)
+
+        with patch.object(snapshot_push, "SEED_STEP", 1), patch.object(snapshot_push, "SEED_LIMIT_BYTES", 0):
+            git_sync.synchronize_snapshots(
+                run, run, self.store, self.source, self.dest, "main", "main", lambda: (None, None), switch
+            )
+        self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
+        self.assertEqual(git("ls-remote", "--refs", self.dest, "refs/repo-mirror/seed-in-progress"), b"")

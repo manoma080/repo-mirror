@@ -86,7 +86,7 @@ class GitDiagnosticsTests(unittest.TestCase):
         error = subprocess.CalledProcessError(1, ['git', 'secret'], stderr=b'remote: error: GH001: Large files detected. /private/secret')
         with patch.object(snapshot_push, '_push', side_effect=error):
             with self.assertRaises(subprocess.CalledProcessError) as caught:
-                snapshot_push.push_snapshot(None, 'secret', 'secret', {'refs/heads/main': 'a' * 40}, {})
+                snapshot_push.push_snapshot(lambda args: b'size-pack: 0\n', 'secret', 'secret', {'refs/heads/main': 'a' * 40}, {})
         detail = error_detail(caught.exception)
         self.assertIn('snapshot push', detail)
         self.assertIn('100 MB', detail)

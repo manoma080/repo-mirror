@@ -10,7 +10,15 @@ from urllib.parse import quote
 
 from repo_mirror.constants import GITHUB, NAME
 from repo_mirror.logging_utils import timed
-from repo_mirror.snapshot_push import _default_branch, archive_snapshot, capture_snapshot, git_phase, push_snapshot
+from repo_mirror.snapshot_push import (
+    _default_branch,
+    archive_snapshot,
+    capture_snapshot,
+    git_phase,
+    is_seed_preimage,
+    push_snapshot,
+    seed_in_progress,
+)
 from repo_mirror.staleness import observe
 from repo_mirror.wipe_detection import detect_wipe
 
@@ -38,27 +46,37 @@ def synchronize_snapshots(
     with timed("step git destination-snapshot"):
         observed = capture_snapshot(dest_run, store, destination)
     old_ref = "refs/heads/" + dest_default if isinstance(dest_default, str) else ""
+    resume = False
     if observed:
-        if old_ref not in observed or _default_branch(dest_run, destination) != old_ref:
+        marker = seed_in_progress(dest_run, destination)
+        default_ok = old_ref in observed and _default_branch(dest_run, destination) == old_ref
+        if default_ok and not marker:
+            # Build local source refs only from the pinned object IDs, not remote names.
+            for ref, oid in desired.items():
+                source_run(["-C", store, "update-ref", ref, oid])
+            with timed("step git wipe-detection"):
+                result = detect_wipe(
+                    lambda args: source_run(["-C", store, *args]), observed[old_ref], desired[new_ref], desired
+                )
+            if result.is_wipe:
+                with timed("step git wipe-archive"):
+                    archive, set_archive_default = archive_factory()
+                    archive_snapshot(dest_run, store, archive, observed)
+                    set_archive_default(old_ref)
+                    if _default_branch(dest_run, archive) != old_ref:
+                        raise RuntimeError("archive default branch could not be verified")
+        elif (marker or old_ref not in observed) and is_seed_preimage(source_run, store, observed, desired):
+            # An interrupted first seed: every destination ref is at or behind
+            # its snapshot ref, so completing it only fast-forwards and no wipe
+            # decision is needed. The marker tells this apart from a routine
+            # incremental run or a destination whose HEAD was changed elsewhere.
+            resume = True
+        else:
             raise RuntimeError("destination default branch missing or changed; refusing to prune")
-        # Build local source refs only from the pinned object IDs, not remote names.
-        for ref, oid in desired.items():
-            source_run(["-C", store, "update-ref", ref, oid])
-        with timed("step git wipe-detection"):
-            result = detect_wipe(
-                lambda args: source_run(["-C", store, *args]), observed[old_ref], desired[new_ref], desired
-            )
-        if result.is_wipe:
-            with timed("step git wipe-archive"):
-                archive, set_archive_default = archive_factory()
-                archive_snapshot(dest_run, store, archive, observed)
-                set_archive_default(old_ref)
-                if _default_branch(dest_run, archive) != old_ref:
-                    raise RuntimeError("archive default branch could not be verified")
     with timed("step git snapshot-push"):
-        if observed and _default_branch(dest_run, destination) != old_ref:
+        if observed and not resume and _default_branch(dest_run, destination) != old_ref:
             raise RuntimeError("destination default branch changed; refusing to push")
-        push_snapshot(dest_run, store, destination, desired, observed, switch_default)
+        push_snapshot(dest_run, store, destination, desired, observed, switch_default, resume=resume)
         with git_phase("default switch"):
             if observed:
                 switch_default(new_ref)
