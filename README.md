@@ -214,7 +214,7 @@ The GitHub batch can finish a detected move itself when it has a durable managem
 
 The configured destination name is authoritative: a name that is merely `mirror-OWNER-REPO` for the old source follows the moved source, while a custom name is preserved and the destination is not renamed. The configuration update is a byte-exact conditional edit of `config.json` that replaces only the migrating entry (every other entry keeps its bytes) and adds the original `legacy` binding; a conflicting writer stops the transaction instead of overwriting it. Every resumed phase re-reads live repository IDs, so a replaced pin, a name collision, or an old-name redirect that resolves to another repository fails closed for review.
 
-The workflow enables this by setting `MIRROR_MANAGEMENT_REPOSITORY` (`${{ github.repository }}`) and `MIRROR_MANAGEMENT_TOKEN` (`${{ github.token }}`, contents write), and the management repository's default branch must be `main`. Without the store the batch reports the relocation and renames nothing. Rename and publication are still not atomic with respect to non-cooperating writers; the ID rechecks and the failing close on a conditional-write conflict are the only protection.
+The workflow enables this by setting `MIRROR_MANAGEMENT_REPOSITORY` (`${{ github.repository }}`) and `MIRROR_MANAGEMENT_TOKEN` (the installation token minted by the `token` job, contents write), and the management repository's default branch must be `main`. Without the store the batch reports the relocation and renames nothing. Rename and publication are still not atomic with respect to non-cooperating writers; the ID rechecks and the failing close on a conditional-write conflict are the only protection.
 
 The Forgejo scheduler performs the same transaction with its own durable store: `migrations.json` inside `--journal-dir`, authenticated with the runner's recovery secret, plus conditional publication of `config-forgejo.json`. It requires `--config-repo OWNER/NAME` (and `--config-account-type` when needed); without it, a pending intent makes the run exit instead of renaming. Because a Forgejo source name that has been reused does not redirect, a rename there usually fails closed rather than resolving automatically. Install the launcher after substituting `@CONFIG_REPO@`; a literal placeholder fails every run by design.
 
@@ -243,6 +243,7 @@ Never put keys or tokens in the repository's files. If GitHub asks you to approv
 ### How the app login works
 
 - The mirror finds the app's installation for `MIRROR_OWNER` and checks the owner name.
+- The workflow mints one installation token up front in its `token` job and uses it for every checkout, Git push and failure-journal commit in the run. The mirror step keeps its own provider so it can renew the credential during a long batch.
 - It gets a short-lived **installation token** (a temporary login). It renews the token when fewer than five minutes remain, including during long runs.
 - The private key stays inside the mirror process. It is passed to OpenSSL (the encryption tool) through a pipe, never in command arguments, logs or files. OpenSSL must be installed.
 - Up to eight repositories are mirrored concurrently. Failure journal updates and token renewal are synchronized within each run; separate runs must not share the same failure file.
