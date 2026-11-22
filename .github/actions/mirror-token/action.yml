@@ -1,0 +1,50 @@
+name: Mirror installation token
+description: Mint a short-lived GitHub App installation token for this job.
+
+inputs:
+  app-id:
+    description: The app's ID.
+    required: true
+  private-key:
+    description: The app's private key.
+    required: true
+  owner:
+    description: The account or organization that owns the app installation.
+    required: true
+  account-type:
+    description: personal or organization.
+    required: false
+    default: personal
+
+outputs:
+  token:
+    description: Installation token, masked, valid for one hour.
+    value: ${{ steps.mint.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - id: mint
+      shell: bash
+      env:
+        MIRROR_APP_ID: ${{ inputs.app-id }}
+        MIRROR_APP_PRIVATE_KEY: ${{ inputs.private-key }}
+        MIRROR_OWNER: ${{ inputs.owner }}
+        MIRROR_ACCOUNT_TYPE: ${{ inputs.account-type }}
+      run: |
+        set -euo pipefail
+        token=$(python - <<'PY'
+        import os, sys
+        from repo_mirror.github_api import AppTokenProvider
+        provider = AppTokenProvider(
+            os.environ['MIRROR_APP_ID'],
+            os.environ['MIRROR_APP_PRIVATE_KEY'],
+            os.environ['MIRROR_OWNER'],
+            os.environ.get('MIRROR_ACCOUNT_TYPE') or 'personal',
+        )
+        sys.stdout.write(provider())
+        PY
+        )
+        test -n "$token"
+        echo "::add-mask::$token"
+        printf 'token=%s\n' "$token" >> "$GITHUB_OUTPUT"
