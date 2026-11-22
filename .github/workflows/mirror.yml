@@ -125,34 +125,18 @@ jobs:
           fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  test:
-    needs: configure
-    runs-on: ubuntu-latest
-    outputs:
-      tested-sha: ${{ steps.revision.outputs.sha }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          # Test the commit produced by configure (or the default branch head when nothing was added).
-          ref: ${{ needs.configure.outputs.configured-sha || github.event.repository.default_branch }}
-          persist-credentials: false
-      - name: Record tested revision
-        id: revision
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
-
   mirror:
-    needs: test
+    needs: configure
     if: ${{ !inputs.remove_from_config }}
-    # Checks out tested-sha, which already contains any config.json commit made above.
+    # Checks out configured-sha, which already contains any config.json commit made above.
+    # Tests run in .github/workflows/test.yml on pull requests and pushes to main.
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.test.outputs.tested-sha }}
+          ref: ${{ needs.configure.outputs.configured-sha || github.event.repository.default_branch }}
           persist-credentials: false
       - name: Refresh failure journal
         # Migration intents are managed by the Contents API. Refresh the

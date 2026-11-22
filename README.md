@@ -46,7 +46,7 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 
 ### Add to config checkbox
 
-- **Ticked** with URLs: the URLs are written into `config.json` and committed to the default branch first. The test and mirror jobs then run on that commit, and only the typed repositories are mirrored. Future scheduled runs include them.
+- **Ticked** with URLs: the URLs are written into `config.json` and committed to the default branch first. The mirror job then runs on that commit, and only the typed repositories are mirrored. Future scheduled runs include them.
 - **Unticked** with URLs: a one-time mirror. The repositories are copied now but are not saved to `config.json`, so scheduled runs skip them. They do not need to be in the config, but the same host, owner and name rules apply.
 - **Empty** with add unticked: a regular full run of everything in the config. Add requires URLs.
 - Repositories already in the config are not written twice. If nothing changes, no commit is made.
