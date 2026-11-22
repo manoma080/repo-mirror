@@ -249,8 +249,15 @@ def _retryable(exc):
 
 
 def _seed_ref(run, store, remote, ref, tip, known, step, after_first=None):
-    """Fast-forward one branch in slices, halving the slice on a size rejection."""
-    args = ["-C", store, "rev-list", "--reverse", tip]
+    """Fast-forward one branch in slices, halving the slice on a size rejection.
+
+    Slices follow the first-parent chain. A plain ``rev-list`` order is not
+    ancestry-safe (a merge can put a child commit before its parent) and a
+    topological order still yields tips that are not descendants of the ref
+    already on the destination, so both are rejected as non-fast-forward.
+    Side-branch history travels with the merge commit that reaches it.
+    """
+    args = ["-C", store, "rev-list", "--reverse", "--first-parent", tip]
     if known:
         args += ["--not", known]
     commits = run(args).decode("ascii", "replace").split()
