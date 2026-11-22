@@ -11,7 +11,7 @@ WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/mirror.yml'
 
 def configure_step():
     text = WORKFLOW.read_text()
-    return text.split('      - name: Update requested repositories in config.json\n', 1)[1].split('\n  test:', 1)[0]
+    return text.split('      - name: Update requested repositories in config.json\n', 1)[1].split('\n  mirror:', 1)[0]
 
 
 def run_configure(remove):
@@ -122,17 +122,27 @@ github_api.API = API
             self.assertNotIn('private-key', result.stderr + result.stdout)
             self.assertNotIn('installation-token', result.stderr + result.stdout)
 
-    def test_mirror_selection_and_tested_revision_remain_wired(self):
+    def test_mirror_selection_and_mirrored_revision_remain_wired(self):
         text = WORKFLOW.read_text()
-        self.assertIn('ref: ${{ needs.configure.outputs.configured-sha || github.event.repository.default_branch }}', text)
         mirror = text.split('  mirror:\n', 1)[1]
+        self.assertIn('needs: configure', mirror.split('    if:', 1)[0])
         self.assertIn('if: ${{ !inputs.remove_from_config }}', mirror.split('    steps:', 1)[0])
-        for binding in ('ref: ${{ needs.test.outputs.tested-sha }}',
+        for binding in ('ref: ${{ needs.configure.outputs.configured-sha || github.event.repository.default_branch }}',
                         'MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}',
                         'MIRROR_DESTINATION_NAME: ${{ inputs.destination_name }}',
                         "MIRROR_VISIBILITY: ${{ inputs.visibility || 'unchanged' }}",
                         "MIRROR_IGNORE_RELEASES: ${{ (inputs.add_to_config && 'keep') || inputs.ignore_releases || 'keep' }}"):
             self.assertIn(binding, mirror)
+
+    def test_tests_run_outside_the_mirror_workflow(self):
+        text = WORKFLOW.read_text()
+        self.assertNotIn('\n  test:\n', text)
+        self.assertNotIn('unittest discover', text)
+        tests = (WORKFLOW.parent / 'test.yml').read_text()
+        self.assertIn('pull_request:', tests)
+        self.assertIn('branches: [main]', tests)
+        self.assertIn('  push:', tests)
+        self.assertIn('python -m unittest discover -s tests -v', tests)
 
 
 if __name__ == '__main__':
