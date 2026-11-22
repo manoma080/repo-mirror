@@ -118,7 +118,8 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
                     ['--loc', str(tmp / 'job.lock')], ['--loc=' + str(tmp / 'job.lock')],
                     ['--unknown', 'x'], ['--owner', 'one', '--owner=two'],
                     ['--organization', '--organization'], ['--lock', str(tmp / 'other')],
-                    ['--owner', '--manif=/evil'], ['--'], ['--lock=']):
+                    ['--owner', '--manif=/evil'], ['--'], ['--lock='],
+                    ['--config-repo', '../evil'], ['--config-repo', 'owner/']):
             with self.subTest(bad=bad):
                 (tmp / 'result').unlink(missing_ok=True)
                 result = launch(tmp, repo, helper, good + bad)
@@ -134,6 +135,36 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
         self.assertTrue(parsed['organization'])
         self.assertEqual(parsed['owner'], 'owner')
         self.assertTrue(parsed['manifest'].endswith('/snapshot/config-forgejo.json'))
+
+    def test_separate_configuration_repository_supplies_the_manifest(self):
+        tmp = self.tmp_path
+        repo, helper = fixture(tmp)
+        # The code snapshot carries one manifest; the configuration repository
+        # carries another and must win.
+        (repo / 'config-forgejo.json').write_text(json.dumps(['https://github.com/manoma080/code-copy']))
+        git(repo, 'add', '.'); git(repo, 'commit', '-m', 'code copy')
+        config = tmp / 'config-remote'
+        config.mkdir()
+        git(config, 'init', '-b', 'main')
+        git(config, 'config', 'user.email', 'test@example.com')
+        git(config, 'config', 'user.name', 'Test')
+        authoritative = ['https://github.com/manoma080/mirror-from-config-repository']
+        (config / 'config-forgejo.json').write_text(json.dumps(authoritative))
+        git(config, 'add', '.'); git(config, 'commit', '-m', 'authoritative')
+        helper.write_text(
+            'import os, sys\n'
+            'a = sys.argv[sys.argv.index("--") + 1:]\n'
+            'if os.environ.get("CONFIG_REMOTE"):\n'
+            '    a = [os.environ["CONFIG_REMOTE"] if x.startswith("https://github.com/") else x for x in a]\n'
+            'os.execvp(a[0], a)\n')
+        env = dict(os.environ, RESULT=str(tmp / 'result'), CONFIG_REMOTE=str(config))
+        result = subprocess.run(
+            [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp / 'state'),
+             '--job-lock', str(tmp / 'job.lock'), '--helper', str(helper), '--',
+             '--config-repo', 'manoma080/repo-mirror-config', '--lock', str(tmp / 'scheduler.lock')],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(json.loads((tmp / 'result').read_text())[0]), authoritative)
 
     def test_scheduler_cleanup_not_killed_after_five_seconds(self):
         with tempfile.TemporaryDirectory() as directory:

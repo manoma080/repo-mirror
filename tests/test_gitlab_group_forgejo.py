@@ -132,14 +132,16 @@ class GroupOnboardingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'configuration changed'):
             onboard(doc, Source(), object(), CAS(), 'local')
 
-    def test_launcher_rejects_mismatched_config_authority(self):
+    def test_launcher_rejects_malformed_config_authority(self):
+        # A separate configuration repository is now supported; only an
+        # unparseable name is refused, and before any state is created.
         from scheduler.auto_update import main
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             result = main(['--remote','https://github.com/owner/one.git','--state-dir',str(root/'state'),
-                           '--job-lock',str(root/'job'), '--', '--lock',str(root/'lock'), '--config-repo','owner/two'])
+                           '--job-lock',str(root/'job'), '--', '--lock',str(root/'lock'), '--config-repo','owner/'])
             self.assertEqual(result, 2)
             self.assertFalse((root/'state').exists())
 
