@@ -87,7 +87,7 @@ def parse_selected_url(url, sources):
     return matches[0] if matches else parse_repo_url(url)
 
 
-def add_to_config(config, source_urls, destination="", visibility=None, *, protect_pins=True):
+def add_to_config(config, source_urls, destination="", visibility=None, *, protect_pins=True, ignore_releases=None):
     """Add URLs and optional per-repository destination settings."""
     if 'repositories' in config or 'destinations' in config:
         from repo_mirror.config_named import normalize_config
@@ -101,6 +101,8 @@ def add_to_config(config, source_urls, destination="", visibility=None, *, prote
             raise ValueError('duplicate source repository')
         if visibility not in (None, 'private', 'public'):
             raise ValueError('invalid visibility')
+        if ignore_releases not in (None, True, False) or (ignore_releases is not None and not isinstance(ignore_releases, bool)):
+            raise ValueError('invalid ignore-releases')
         if destination and (len(parsed) != 1 or len(destination) > 100 or not NAME.fullmatch(destination) or destination in ('.', '..')):
             raise ValueError('custom destination requires one URL and a valid repository name')
         for (kind, base, owner, name), identity in zip(parsed, identities):
@@ -119,6 +121,10 @@ def add_to_config(config, source_urls, destination="", visibility=None, *, prote
                 mirror['name'] = destination
             if visibility is not None:
                 mirror['visibility'] = visibility
+            if ignore_releases is True:
+                mirror['ignore_releases'] = True
+            elif ignore_releases is False:
+                mirror.pop('ignore_releases', None)
         normalize_config(candidate)
         changed = candidate != config
         if changed:
@@ -153,7 +159,7 @@ def add_to_config(config, source_urls, destination="", visibility=None, *, prote
         elif match["repos"] != "all" and name.lower() not in {r.lower() for r in match["repos"]}:
             match["repos"].append(name)
             changed = True
-        if destination or visibility is not None:
+        if destination or visibility is not None or ignore_releases is not None:
             mappings = match.setdefault("destinations", {})
             old = mappings.get(name.lower(), {})
             if protect_pins and destination and 'destination_id' in old:
@@ -166,13 +172,17 @@ def add_to_config(config, source_urls, destination="", visibility=None, *, prote
                 new["visibility"] = visibility
             if destination:
                 new["name"] = destination
+            if ignore_releases is True:
+                new["ignore_releases"] = True
+            elif ignore_releases is False:
+                new.pop("ignore_releases", None)
             if old != new:
                 mappings[name.lower()] = new
                 changed = True
     return changed
 
 
-def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst, *, owner, account_type, destination='', visibility=None):
+def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst, *, owner, account_type, destination='', visibility=None, ignore_releases=None):
     """Stage additions, verify identities and create missing mirrors before committing config.
 
     Failed operations can leave initializing repositories remotely. Existing
@@ -187,7 +197,7 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
                                      source_api_base, source_marker, validate_source)
 
     candidate = copy.deepcopy(config)
-    add_to_config(candidate, source_urls, destination, visibility)
+    add_to_config(candidate, source_urls, destination, visibility, ignore_releases=ignore_releases)
     normalized = normalize_config(candidate)
     profile = normalized.get('destination_profile')
     if profile and (profile['url'] != 'https://github.com' or profile['owner'].lower() != owner.lower()):
@@ -407,11 +417,15 @@ def main(argv=None):
     parser.add_argument("--auto-pin", action="store_true")
     parser.add_argument("--destination", default="")
     parser.add_argument("--visibility", choices=("private", "public", "unchanged"), default="unchanged")
+    parser.add_argument("--ignore-releases", choices=("keep", "true", "false"), default="keep",
+                        help="persist ignore_releases for the saved repositories; keep leaves each entry unchanged")
     args = parser.parse_args(argv)
     if not args.urls.strip():
         raise ValueError("at least one repository URL is required")
-    if args.remove and (args.destination or args.visibility not in ("private", "unchanged")):
+    if args.remove and (args.destination or args.visibility not in ("private", "unchanged")
+                        or args.ignore_releases != "keep"):
         raise ValueError("remove cannot be combined with destination settings")
+    ignore_releases = None if args.ignore_releases == "keep" else args.ignore_releases == "true"
     with open(args.config, encoding="utf-8") as f:
         from repo_mirror.config_json import unique_pairs
         config = json.load(f, object_pairs_hook=unique_pairs)
@@ -439,10 +453,13 @@ def main(argv=None):
                                        owner=owner,
                                        account_type=account_type,
                                        destination=args.destination,
-                                       visibility=None if args.visibility == 'unchanged' else args.visibility)
+                                       visibility=None if args.visibility == 'unchanged' else args.visibility,
+                                       ignore_releases=ignore_releases)
     else:
         changed = (remove_from_config(config, args.urls) if args.remove else
-                   add_to_config(config, args.urls, args.destination, None if args.visibility == "unchanged" else args.visibility))
+                   add_to_config(config, args.urls, args.destination,
+                                 None if args.visibility == "unchanged" else args.visibility,
+                                 ignore_releases=ignore_releases))
     if not args.remove and not args.auto_pin:
         from repo_mirror.sources import destination_name, validate_source, discover
         from repo_mirror.github_api import API, SourceAPI

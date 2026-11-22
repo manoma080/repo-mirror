@@ -153,9 +153,13 @@ def normalize_named(sources):
         if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id', 'type'} or not isinstance(mirrors, dict) or set(mirrors) != {destination}:
             raise ValueError('unsupported repository mapping')
         mirror = mirrors[destination]
-        if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy'} or not isinstance(source['url'], str):
+        if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy', 'ignore_releases'} or not isinstance(source['url'], str):
+            raise ValueError('unsupported mirror mapping')
+        if 'ignore_releases' in mirror and not isinstance(mirror['ignore_releases'], bool):
             raise ValueError('unsupported mirror mapping')
         item = {'url': source['url'], 'destination_name': mirror.get('name', source['url'].rsplit('/', 1)[-1])}
+        if mirror.get('ignore_releases') is True:
+            item['ignore_releases'] = True
         if 'type' in source: item['source_type'] = source['type']
         if 'id' in source: item['source_id'] = source['id']
         if 'id' in mirror: item['destination_id'] = mirror['id']
@@ -181,7 +185,8 @@ def parse_manifest(sources):
             url = item
             identity = parse_source(url)
             entry = {'url': url, 'identity': identity, 'destination_name': identity.rsplit('/', 1)[-1]}
-        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id', 'source_type'} and {'url', 'destination_name'} <= set(item):
+        elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id', 'source_type',
+                                                                'ignore_releases'} and {'url', 'destination_name'} <= set(item):
             if not isinstance(item['url'], str):
                 raise ValueError('invalid source URL')
             identity = parse_source(item['url'], item.get('source_type'))
@@ -191,11 +196,18 @@ def parse_manifest(sources):
             for key in ('source_id', 'destination_id'):
                 if key in item and (type(item[key]) is not int or item[key] <= 0):
                     raise ValueError('invalid repository ID')
+            if 'ignore_releases' in item and not isinstance(item['ignore_releases'], bool):
+                raise ValueError('invalid ignore-releases setting')
             entry = {**item, 'identity': identity}
-        elif isinstance(item, dict) and set(item) == {'url', 'source_id', 'destination_id', 'destination_name',
-                                                     'legacy_url', 'legacy_destination_name', 'signature'}:
+        elif isinstance(item, dict) and set(item) in (
+                {'url', 'source_id', 'destination_id', 'destination_name',
+                 'legacy_url', 'legacy_destination_name', 'signature'},
+                {'url', 'source_id', 'destination_id', 'destination_name',
+                 'legacy_url', 'legacy_destination_name', 'signature', 'ignore_releases'}):
             if not isinstance(item['signature'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['signature']):
                 raise ValueError('invalid migration attestation')
+            if 'ignore_releases' in item and not isinstance(item['ignore_releases'], bool):
+                raise ValueError('invalid ignore-releases setting')
             if not isinstance(item['url'], str) or not isinstance(item['legacy_url'], str):
                 raise ValueError('invalid source URL')
             identity = parse_source(item['url'])
@@ -364,6 +376,8 @@ def main(argv=None):
     parser.add_argument('--app-id')
     parser.add_argument('--private-key-file')
     parser.add_argument('--use-github-token', action='store_true', help='explicitly use GITHUB_TOKEN (not refreshable)')
+    parser.add_argument('--ignore-releases', action='store_true',
+                        help='skip release synchronization for the requested --source URLs on this run only')
     args = parser.parse_args(argv)
     try:
         args.inactive_days = parse_inactive_days(args.inactive_after_days)
@@ -615,15 +629,18 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                     upstream = f"{source_api_base(source)}/repos/{source['owner']}/{source_name}"
                     git_source = (f"{source['owner']}/{source_name}" if source['type'] == 'github'
                                   else entry['url'])
+            ignore_releases = (bool(entry and entry.get('ignore_releases') is True)
+                               or getattr(args, 'ignore_releases', False) is True)
             validation_options = {'allow_empty_target': True} if source['type'] in ('forgejo', 'gitlab') else {}
-            if source['type'] == 'gitlab':
-                source_releases = src.list_releases()
-                from repo_mirror.repository import select_tag_source_latest
-                select_tag_source_latest(source_releases)
-            else:
-                source_releases = src.pages(upstream + '/releases')
-                validate_source_release_listing(source_releases, **validation_options)
-                validate_source_latest(fetch_source_latest(src, upstream), source_releases, **validation_options)
+            if not ignore_releases:
+                if source['type'] == 'gitlab':
+                    source_releases = src.list_releases()
+                    from repo_mirror.repository import select_tag_source_latest
+                    select_tag_source_latest(source_releases)
+                else:
+                    source_releases = src.pages(upstream + '/releases')
+                    validate_source_release_listing(source_releases, **validation_options)
+                    validate_source_latest(fetch_source_latest(src, upstream), source_releases, **validation_options)
             # This preflight cannot prevent the source changing immediately
             # afterwards; mirror_releases fetches and checks it again.
             initializing = (dest.begin_initialization(name, recovery_identity, expected_id=entry['destination_id'])
@@ -666,7 +683,9 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                 journal_options['journal_identity'] = (source['base_url'], entry['source_id'],
                                                        f'http://127.0.0.1:{args.port}', entry['destination_id'])
             try:
-                if entry and 'legacy_identity' in entry:
+                if ignore_releases:
+                    print(f'{identity}: releases ignored by configuration', flush=True)
+                elif entry and 'legacy_identity' in entry:
                     old_owner, old_name = recovery_identity.rsplit('/', 2)[-2:]
                     old_source = {**source, 'owner': old_owner}
                     old_target = adapter.target.rsplit('/', 1)[0] + '/' + entry['legacy_destination_name']
