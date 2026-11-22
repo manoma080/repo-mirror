@@ -160,6 +160,9 @@ github_api.API = API
         self.assertIn('branches: [main]', tests)
         self.assertIn('  push:', tests)
         self.assertIn('python -m unittest discover -s tests -v', tests)
+        for data_file in ('failures.json', 'migrations.json', 'config.json',
+                          'config-forgejo.json', '.failure-journal-in-progress'):
+            self.assertIn(data_file, tests)
 
 
 if __name__ == '__main__':
