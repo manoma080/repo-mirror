@@ -285,11 +285,22 @@ def main(argv=None):
                     raise ValueError('invalid scheduler option value')
                 seen[name] = value
             i += 1
+        config_repository = None
         if '--config-repo' in seen:
+            # The manifest may live in a separate private repository. The code
+            # remote is still fetched here; the configuration repository is
+            # fetched separately below so publication and the fetched snapshot
+            # share one authority.
             authority = seen['--config-repo']
+            parts = authority.split('/')
+            if (len(parts) != 2 or not all(re.fullmatch(r'[A-Za-z0-9_.-]+', part) and part not in ('.', '..')
+                                          for part in parts)):
+                raise ValueError('invalid configuration repository')
+            config_repository = authority
             match = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?', args.remote, re.IGNORECASE)
-            if not match or authority.lower() != (match.group(1) + '/' + match.group(2)).lower():
-                raise ValueError('remote and configuration authority mismatch')
+            if match and authority.lower() == (match.group(1) + '/' + match.group(2)).lower():
+                # The code snapshot already carries the manifest.
+                config_repository = None
         locks = [seen['--lock']] if '--lock' in seen else []
         if len(locks) != 1 or os.path.realpath(locks[0]) == os.path.realpath(args.job_lock):
             raise ValueError('distinct scheduler lock required')
@@ -339,17 +350,57 @@ def main(argv=None):
                     status = subprocess.run(['git', '--git-dir', str(root / 'objects'), 'archive', '--format=tar', commit], cwd=root, env=env, stdout=output, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, pass_fds=(fd,)).returncode
                 if status:
                     raise ValueError('archive')
+                def extract_snapshot(archive_file, destination):
+                    destination.mkdir(mode=0o700)
+                    with tarfile.open(archive_file) as tar:
+                        for member in tar:
+                            path = PurePosixPath(member.name)
+                            if path.is_absolute() or '..' in path.parts or not (member.isfile() or member.isdir()):
+                                raise ValueError('unsafe snapshot')
+                            tar.extract(member, destination, filter='data')
+
+                def fetch_commit(git_dir, url, label):
+                    fetch = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--',
+                             'git', '--git-dir', str(git_dir), 'fetch', '--no-tags', '--no-recurse-submodules', '--',
+                             url, 'refs/heads/main']
+                    if run(fetch):
+                        raise ValueError(f'{label} fetch failed')
+                    resolved = subprocess.check_output(
+                        ['git', '--git-dir', str(git_dir), 'rev-parse', '--verify', 'FETCH_HEAD^{commit}'],
+                        cwd=root, env=env, stderr=subprocess.DEVNULL, text=True).strip()
+                    if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', resolved):
+                        raise ValueError(f'invalid {label} commit')
+                    return resolved
+
+                def write_archive(git_dir, resolved, archive_file, label):
+                    with archive_file.open('wb') as output:
+                        status = subprocess.run(
+                            ['git', '--git-dir', str(git_dir), 'archive', '--format=tar', resolved],
+                            cwd=root, env=env, stdout=output, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, pass_fds=(fd,)).returncode
+                    if status:
+                        raise ValueError(f'{label} archive')
+
                 stage = 'snapshot extraction'
                 snapshot = root / 'snapshot'
-                snapshot.mkdir(mode=0o700)
-                with tarfile.open(archive) as tar:
-                    for member in tar:
-                        path = PurePosixPath(member.name)
-                        if path.is_absolute() or '..' in path.parts or not (member.isfile() or member.isdir()):
-                            raise ValueError('unsafe snapshot')
-                        tar.extract(member, snapshot, filter='data')
-                stage = 'manifest validation'
+                extract_snapshot(archive, snapshot)
                 manifest = snapshot / 'config-forgejo.json'
+                if config_repository is not None:
+                    stage = 'configuration git initialization'
+                    config_objects = root / 'config-objects'
+                    if run(['git', 'init', '--bare', str(config_objects)]):
+                        raise ValueError('configuration git init')
+                    stage = 'configuration fetch'
+                    config_commit = fetch_commit(config_objects, 'https://github.com/' + config_repository,
+                                                 'configuration')
+                    stage = 'configuration archive'
+                    config_archive = root / 'config-snapshot.tar'
+                    write_archive(config_objects, config_commit, config_archive, 'configuration')
+                    stage = 'configuration extraction'
+                    config_snapshot = root / 'config-snapshot'
+                    extract_snapshot(config_archive, config_snapshot)
+                    manifest = config_snapshot / 'config-forgejo.json'
+                stage = 'manifest validation'
                 sources = json.loads(manifest.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
                 if isinstance(sources, dict) and isinstance(sources.get('sources'), list) and any(
                         isinstance(s, dict) and s.get('type') == 'gitlab' and s.get('repos') == 'all'
