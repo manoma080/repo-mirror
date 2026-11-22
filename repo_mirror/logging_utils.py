@@ -280,6 +280,8 @@ def error_detail(exc):
                 )
             elif any(s in text for s in ("permission denied", "403", "authentication failed", "access denied", "write access to repository not granted")):
                 reason = "permission or authentication failure; check repository access and token permissions"
+            elif "non-fast-forward" in text or "fetch first" in text:
+                reason = "push rejected as non-fast-forward; the destination advanced during the push; retry after a fresh safety check"
             elif any(s in text for s in ("could not resolve host", "connection timed out", "connection reset", "failed to connect")) or (
                 phase != "snapshot push" and _PUSH_TRANSPORT_SIGNATURE in text
             ):

@@ -43,6 +43,17 @@ class GitDiagnosticsTests(unittest.TestCase):
         self.assertIn("2 GiB", detail)
         self.assertIn("retry after a fresh safety check", detail)
 
+    def test_non_fast_forward_push_is_named(self):
+        error = subprocess.CalledProcessError(
+            1,
+            ["git", "push"],
+            stderr=b" ! [rejected] abc -> main (non-fast-forward)\nerror: failed to push some refs\n",
+        )
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            with snapshot_push.git_phase("snapshot push"):
+                raise error
+        self.assertIn("non-fast-forward", error_detail(caught.exception))
+
     def test_hung_up_during_fetch_stays_a_network_failure(self):
         error = subprocess.CalledProcessError(
             1, ["git", "fetch"], stderr=b"fatal: the remote end hung up unexpectedly"

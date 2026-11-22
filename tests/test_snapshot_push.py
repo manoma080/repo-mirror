@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -255,3 +256,61 @@ class SeedMarkerTests(unittest.TestCase):
             )
         self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
         self.assertEqual(git("ls-remote", "--refs", self.dest, "refs/repo-mirror/seed-in-progress"), b"")
+
+
+class SeedOrderTests(unittest.TestCase):
+    """Slices must follow ancestry, not commit dates."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.work = root / "work"
+        git("init", "-q", "-b", "main", self.work)
+        git("-C", self.work, "config", "user.name", "Test")
+        git("-C", self.work, "config", "user.email", "test@example.com")
+
+        def commit(name, date):
+            (self.work / name).write_text(name)
+            git("-C", self.work, "add", name)
+            subprocess.run(
+                ["git", "-C", str(self.work), "commit", "-qm", name],
+                check=True,
+                capture_output=True,
+                env={**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date},
+            )
+
+        # A branch whose child commits are dated before their merge base: default
+        # reverse date order emits "mainline" (a child) before its parent "base".
+        commit("base", "2020-01-01T00:00:00+0000")
+        git("-C", self.work, "branch", "side")
+        commit("mainline", "2018-01-01T00:00:00+0000")
+        git("-C", self.work, "checkout", "-q", "side")
+        commit("side1", "2019-01-01T00:00:00+0000")
+        commit("side2", "2019-06-01T00:00:00+0000")
+        git("-C", self.work, "checkout", "-q", "main")
+        subprocess.run(
+            ["git", "-C", str(self.work), "merge", "-q", "--no-ff", "side", "-m", "merge"],
+            check=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_DATE": "2022-01-01T00:00:00+0000",
+                "GIT_COMMITTER_DATE": "2022-01-01T00:00:00+0000",
+            },
+        )
+        git("clone", "-q", "--bare", self.work, root / "source")
+        git("init", "-q", "--bare", root / "store")
+        git("init", "-q", "--bare", root / "dest")
+        self.store = str(root / "store")
+        self.source = str(root / "source")
+        self.dest = str(root / "dest")
+
+    def test_seeded_slices_follow_ancestry_and_not_dates(self):
+        date_order = git("-C", self.work, "rev-list", "--reverse", "main").decode().split()
+        topo_order = git("-C", self.work, "rev-list", "--reverse", "--topo-order", "main").decode().split()
+        self.assertNotEqual(date_order, topo_order)
+        snapshot = capture_snapshot(run, self.store, self.source)
+        with patch.object(snapshot_push, "SEED_LIMIT_BYTES", 0), patch.object(snapshot_push, "SEED_STEP", 1):
+            push_snapshot(run, self.store, self.dest, snapshot, {})
+        self.assertEqual(git("ls-remote", "--refs", self.dest), git("ls-remote", "--refs", self.source))
