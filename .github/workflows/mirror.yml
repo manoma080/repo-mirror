@@ -47,6 +47,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Configuration and operational state live in a separate private repository.
+  MIRROR_CONFIG_REPOSITORY: manoma080/repo-mirror-config
+  MIRROR_CONFIG_DIR: config-repo
+
 concurrency:
   group: repository-mirror
   cancel-in-progress: false
@@ -57,7 +62,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      configured-sha: ${{ steps.commit.outputs.sha }}
+      config-sha: ${{ steps.config-revision.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -70,6 +75,14 @@ jobs:
           private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
           owner: ${{ vars.MIRROR_OWNER }}
           account-type: ${{ vars.MIRROR_ACCOUNT_TYPE || 'personal' }}
+      - name: Check out the configuration repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ env.MIRROR_CONFIG_REPOSITORY }}
+          ref: main
+          path: ${{ env.MIRROR_CONFIG_DIR }}
+          token: ${{ steps.auth.outputs.token }}
+          persist-credentials: false
       - name: Validate management branch
         env:
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -116,21 +129,28 @@ jobs:
         run: |
           set -euo pipefail
           git check-ref-format "refs/heads/$DEFAULT_BRANCH"
-          test ! -L config.json
-          args=(--config config.json --urls "$REQUESTED_SOURCE_URLS" --destination "$REQUESTED_DESTINATION" --visibility "$REQUESTED_VISIBILITY" --ignore-releases "$REQUESTED_IGNORE_RELEASES")
+          test ! -L "$MIRROR_CONFIG_DIR/config.json"
+          args=(--config "$MIRROR_CONFIG_DIR/config.json" --urls "$REQUESTED_SOURCE_URLS" --destination "$REQUESTED_DESTINATION" --visibility "$REQUESTED_VISIBILITY" --ignore-releases "$REQUESTED_IGNORE_RELEASES")
           if [[ "$REMOVE" == true ]]; then args+=(--remove); else args+=(--auto-pin); fi
           python -m repo_mirror.adhoc "${args[@]}"
-          if git diff --quiet -- config.json; then
+          if git -C "$MIRROR_CONFIG_DIR" diff --quiet -- config.json; then
             echo "No config change needed"
           else
-            git -c core.hooksPath=/dev/null add -- config.json
-            git -c core.hooksPath=/dev/null -c user.name=repo-mirror -c user.email=repo-mirror@users.noreply.github.com commit -m "Add mirror sources from manual run"
+            git -C "$MIRROR_CONFIG_DIR" -c core.hooksPath=/dev/null add -- config.json
+            git -C "$MIRROR_CONFIG_DIR" -c core.hooksPath=/dev/null -c user.name=repo-mirror -c user.email=repo-mirror@users.noreply.github.com commit -m "Add mirror sources from manual run"
             export GIT_CONFIG_COUNT=1
             export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
             export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:$GITHUB_TOKEN_VALUE" | base64 -w0)"
-            git -c core.hooksPath=/dev/null push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
+            git -C "$MIRROR_CONFIG_DIR" -c core.hooksPath=/dev/null push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
           fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Record configuration revision
+        id: config-revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pin the exact configuration commit the mirror job will run against,
+          # whether or not this run wrote to it.
+          echo "sha=$(git -C "$MIRROR_CONFIG_DIR" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   mirror:
     needs: configure
@@ -143,7 +163,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.configure.outputs.configured-sha || github.event.repository.default_branch }}
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       - uses: ./.github/actions/mirror-token
         id: auth
@@ -152,6 +172,14 @@ jobs:
           private-key: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
           owner: ${{ vars.MIRROR_OWNER }}
           account-type: ${{ vars.MIRROR_ACCOUNT_TYPE || 'personal' }}
+      - name: Check out the configuration repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ env.MIRROR_CONFIG_REPOSITORY }}
+          ref: ${{ needs.configure.outputs.config-sha }}
+          path: ${{ env.MIRROR_CONFIG_DIR }}
+          token: ${{ steps.auth.outputs.token }}
+          persist-credentials: false
       - name: Refresh failure journal
         # Migration intents are managed by the Contents API. Refresh the
         # failure journal separately before the CLI reads it.
@@ -161,6 +189,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$MIRROR_CONFIG_DIR"
           git check-ref-format "refs/heads/$MANAGEMENT_BRANCH"
           export GIT_CONFIG_COUNT=1
           export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
@@ -213,9 +242,9 @@ jobs:
           # Journal and configuration writes go through the Contents API with
           # conditional blob-sha writes, using the workflow's minted installation
           # token rather than the job-scoped GITHUB_TOKEN.
-          MIRROR_MANAGEMENT_REPOSITORY: ${{ github.repository }}
+          MIRROR_MANAGEMENT_REPOSITORY: ${{ env.MIRROR_CONFIG_REPOSITORY }}
           MIRROR_MANAGEMENT_TOKEN: ${{ steps.auth.outputs.token }}
-        run: python mirror.py --config config.json --failures failures.json
+        run: python mirror.py --config "$MIRROR_CONFIG_DIR/config.json" --failures "$MIRROR_CONFIG_DIR/failures.json"
       # Migration transactions publish their journal directly through the API;
       # never push a stale local migrations.json over that authoritative state.
       - name: Prepare failure journal recovery
@@ -224,6 +253,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$MIRROR_CONFIG_DIR"
           # Snapshot just the regular journal, before any fallible git operation.
           # Artifacts are readable by repository readers, like the journal itself.
           python -c 'import os, stat, shutil
@@ -258,6 +288,7 @@ jobs:
             echo 'Mirror canceled or outcome unknown; retaining fence' >&2; exit 1
           fi
           if [ "${PREPARE_OUTCOME:-}" != success ]; then exit 0; fi
+          cd "$MIRROR_CONFIG_DIR"
           git check-ref-format "refs/heads/$MANAGEMENT_BRANCH"
           base=$(<"$RUNNER_TEMP/failure-journal-base")
           if [ "${JOURNAL_PRESENT:-false}" = true ]; then

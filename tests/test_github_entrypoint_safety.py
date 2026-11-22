@@ -37,7 +37,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(writer, 'add', 'config.json')
             git(writer, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'revoke')
             git(writer, 'push', 'origin', 'HEAD:main')
-            env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory}
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory}
             result = subprocess.run(['bash', '-e', '-c', workflow_step('Refresh failure journal')], cwd=runner, env=env, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0, result.stderr)
             self.assertIn('config', result.stderr.lower())
@@ -54,7 +54,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(runner, 'add', '.')
             git(runner, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial')
             git(runner, 'push', 'origin', 'HEAD:main')
-            env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
                    'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output'),
                    'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': '', 'MIRROR_OUTCOME': 'success'}
             def run(step):
@@ -78,7 +78,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(runner, 'add', '.')
             git(runner, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial')
             git(runner, 'push', 'origin', 'HEAD:main')
-            env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
                    'GITHUB_OUTPUT': str(root / 'output'), 'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': '',
                    'MIRROR_OUTCOME': 'success'}
             def run(step):
@@ -111,7 +111,7 @@ class EntrypointSafetyTests(unittest.TestCase):
                 git(runner, 'add', '.')
                 git(runner, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial')
                 git(runner, 'push', 'origin', 'HEAD:main')
-                env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
+                env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
                        'GITHUB_OUTPUT': str(root / 'output'), 'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': '',
                        'MIRROR_OUTCOME': outcome}
                 def run(step):
@@ -134,7 +134,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(first, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial')
             git(first, 'push', 'origin', 'HEAD:main')
             git(root, 'clone', 'remote.git', 'second')
-            env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
                    'RUNNER_TEMP': str(root), 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
             def refresh(where):
                 return subprocess.run(['bash', '-e', '-c', workflow_step('Refresh failure journal')], cwd=where, env=env, capture_output=True, text=True)
@@ -156,7 +156,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(runner, 'add', '.')
             git(runner, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial')
             git(runner, 'push', 'origin', 'HEAD:main')
-            env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main', 'RUNNER_TEMP': directory,
                    'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': 'true', 'MIRROR_OUTCOME': 'failure', 'MIRROR_OUTCOME': 'success'}
             refresh = subprocess.run(['bash', '-e', '-c', workflow_step('Refresh failure journal')], cwd=runner, env=env, capture_output=True, text=True)
             self.assertEqual(refresh.returncode, 0, refresh.stderr)
@@ -200,7 +200,7 @@ class EntrypointSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'failures.json').write_bytes(b'exact local bytes\n')
-            env = {**os.environ, 'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output')}
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output')}
             result = subprocess.run(['bash', '-e', '-c', workflow_step('Prepare failure journal recovery')], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((root / 'failure-journal-recovery' / 'failures.json').read_bytes(), b'exact local bytes\n')
@@ -210,7 +210,7 @@ class EntrypointSafetyTests(unittest.TestCase):
         self.assertLess(text.index('- name: Validate management branch'), text.index('- name: Mirror\n'))
         script = workflow_step('Validate management branch')
         for branch, code in [('main', 0), ('other', 1)]:
-            result = subprocess.run(['bash', '-e', '-c', script], env={**os.environ, 'MANAGEMENT_BRANCH': branch}, capture_output=True)
+            result = subprocess.run(['bash', '-e', '-c', script], env={**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_BRANCH': branch}, capture_output=True)
             self.assertEqual(result.returncode, code)
 
     def test_push_race_retains_snapshot_and_remote(self):
@@ -226,7 +226,7 @@ class EntrypointSafetyTests(unittest.TestCase):
             git(runner, 'push', 'origin', 'HEAD:main')
             git(root, 'clone', 'remote.git', 'api')
             api = root / 'api'
-            env = {**os.environ, 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'MANAGEMENT_TOKEN': 'test', 'MANAGEMENT_BRANCH': 'main',
                    'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output'),
                    'PREPARE_OUTCOME': 'success', 'JOURNAL_PRESENT': 'true', 'MIRROR_OUTCOME': 'failure', 'MIRROR_OUTCOME': 'success'}
             def run(step):
@@ -263,7 +263,7 @@ class EntrypointSafetyTests(unittest.TestCase):
     def test_recovery_rejects_symlink_and_ignores_missing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            env = {**os.environ, 'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output')}
+            env = {**os.environ, 'MIRROR_CONFIG_DIR': '.', 'RUNNER_TEMP': directory, 'GITHUB_OUTPUT': str(root / 'output')}
             def prepare():
                 return subprocess.run(['bash', '-e', '-c', workflow_step('Prepare failure journal recovery')], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(prepare().returncode, 0)

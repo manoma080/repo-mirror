@@ -29,7 +29,7 @@ Both paths use the shared Git ref reconciliation and release orchestration, with
 
 Forgejo sources are read anonymously for both destination paths: only public repositories, refs and published releases accessible without authentication can be mirrored. Private repositories and draft releases are not visible anonymously, and authenticated private Forgejo source support is not implemented. Neither the GitHub token nor the destination Forgejo token is reused for Forgejo source access. For example, a public source URL is `https://forge.example/owner/repo`.
 
-The Forgejo path uses [`config-forgejo.json`](config-forgejo.json), independently of GitHub Actions' `config.json`. It uses the same empty-body comparison rules as GitHub, including the intentional-one-space ambiguity; see [Releases in detail](#releases-in-detail). A source entry's mirror mapping may set `"ignore_releases": true` to skip release synchronization for that repository; the worker also accepts `--ignore-releases` to skip releases for the exact `--source` URLs of that invocation only, which is never written back to the manifest. Its host setup, restricted manifest, authentication, retry journals, safety gates and live-test limitations are documented in [scheduler/README.md](scheduler/README.md). In particular, changed-asset transfers were tested with mocks but still need live verification.
+The Forgejo path uses `config-forgejo.json`, independently of GitHub Actions' `config.json`. It uses the same empty-body comparison rules as GitHub, including the intentional-one-space ambiguity; see [Releases in detail](#releases-in-detail). A source entry's mirror mapping may set `"ignore_releases": true` to skip release synchronization for that repository; the worker also accepts `--ignore-releases` to skip releases for the exact `--source` URLs of that invocation only, which is never written back to the manifest. Its host setup, restricted manifest, authentication, retry journals, safety gates and live-test limitations are documented in [scheduler/README.md](scheduler/README.md). In particular, changed-asset transfers were tested with mocks but still need live verification.
 
 ### Shared-code impact on GitHub
 
@@ -53,6 +53,10 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 - Repository URLs on `github.com` are read as GitHub sources, and `gitlab.com` as GitLab. Other hosts default to Forgejo unless already configured with an explicit GitLab type. Unconfigured one-time GitLab URLs cannot be onboarded without durable pins; configure them explicitly instead.
 - Terms: *config* means `config.json`, the list of sources the mirror reads. *One-time mirror* means a run that copies repositories without saving them for later runs.
 
+### Where the configuration lives
+
+`config.json`, `config-forgejo.json`, `failures.json` and `migrations.json` are not in this repository. They live in the private repository [`manoma080/repo-mirror-config`](https://github.com/manoma080/repo-mirror-config) on `main`, which both runners read and write. The workflow checks it out into `config-repo/` and passes `--config`/`--failures` paths there, keeps the failure-journal fence on that repository, and targets it for migration journal and configuration writes (`MIRROR_MANAGEMENT_REPOSITORY`). Keeping the code public and the operational state private is deliberate: public Actions minutes stay free while the source URLs, destination names and repository IDs are not world-readable.
+
 ### Destination and removal options
 
 - **destination_name** optionally replaces `mirror-<owner>-<repo>` for exactly one URL. Names must be valid GitHub repository names and must not collide with another destination. A pre-existing repository is used only if its source marker matches; visibility is never changed implicitly. Manual config updates reject changing a pinned destination name; use the explicit reconciliation procedure instead.
@@ -62,7 +66,7 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 
 ## Configure sources
 
-Edit [`config.json`](config.json). Named configuration lists each source repository and its mirror explicitly:
+Edit [`config.json`](https://github.com/manoma080/repo-mirror-config/blob/main/config.json) in the configuration repository. Named configuration lists each source repository and its mirror explicitly:
 
 ```json
 {
@@ -309,7 +313,7 @@ Failed uploads are saved in `failures.json` on the management branch. The next r
 | --- | --- |
 | A run is cancelled or cannot save the file | A valid release marker can let the next run resume if the source and transaction state remain compatible; otherwise manual review may be needed. |
 | Someone changes the management branch during a run | Saving may fail instead of overwriting their change. Run again. |
-| Branch protection blocks the workflow | Allow the workflow's GitHub token to push `failures.json`. |
+| Branch protection blocks the workflow | Allow the Mirrorbot installation to push `failures.json` on the configuration repository. |
 | A source or marker is changed or removed | Old entries may need manual review. |
 
 ## Checking files
@@ -385,7 +389,7 @@ To mirror locally, set these environment variables:
 Then run:
 
 ```sh
-uv run python mirror.py --config config.json
+uv run python mirror.py --config ../repo-mirror-config/config.json
 ```
 
 A local run changes real GitHub repositories. Test with a separate destination first.
@@ -418,7 +422,7 @@ An **empty destination** whose fetched pack exceeds 1.5 GiB is instead populated
 | `repo_mirror/github_api.py` | HTTP calls, app login and token renewal. |
 | `repo_mirror/sources.py` | Source discovery and mirror naming. |
 | `repo_mirror/git_sync.py` | Git fetch and push. |
-| `repo_mirror/journal.py` | The failure file (`failures.json`). |
+| `repo_mirror/journal.py` | The failure file (`failures.json`, stored in `repo-mirror-config`). |
 | `repo_mirror/logging_utils.py` | Log lines, timers and redaction. |
 | `repo_mirror/constants.py` | Shared limits and settings. |
 | `repo_mirror/source_filter.py` | Picks sources for a manual run. |
