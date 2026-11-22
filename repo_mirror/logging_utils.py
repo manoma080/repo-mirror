@@ -207,6 +207,17 @@ _GIT_HTTP_STATUS = re.compile(
     r"\bhttp(?:\s*error)?\s*[;:(]?\s*(\d{3})\b|returned error:\s*(\d{3})\b"
 )
 
+# GitHub rejects any single push whose pack exceeds 2 GiB. Depending on where
+# the server aborts, Git reports this as "pack exceeds maximum allowed size",
+# "push cannot exceed 2GB", or only as a closed connection. The last form is
+# indistinguishable from a real network fault, so it is worded as both.
+_PUSH_LIMIT_SIGNATURES = (
+    "pack exceeds maximum allowed size",
+    "push cannot exceed 2gb",
+    "push cannot exceed 2 gb",
+)
+_PUSH_TRANSPORT_SIGNATURE = "remote end hung up unexpectedly"
+
 
 def _git_http_status(text):
     """Return the HTTP status Git reported, if any, without echoing its text."""
@@ -260,11 +271,18 @@ def error_detail(exc):
             text = raw.decode("utf-8", "replace").lower() if isinstance(raw, bytes) else raw.lower() if isinstance(raw, str) else ""
             if "gh001" in text or "exceeds github's file size limit" in text:
                 reason = "large file rejected (100 MB limit); inspect repository history and consider Git LFS"
-            elif "pack exceeds maximum allowed size" in text or "push cannot exceed 2gb" in text or "push cannot exceed 2 gb" in text:
+            elif any(s in text for s in _PUSH_LIMIT_SIGNATURES):
                 reason = "push exceeds 2 GB limit; split the history into smaller pushes"
+            elif phase == "snapshot push" and _PUSH_TRANSPORT_SIGNATURE in text:
+                reason = (
+                    "push connection closed by the destination (a history larger than GitHub's 2 GiB "
+                    "single-push limit, or connectivity); retry after a fresh safety check"
+                )
             elif any(s in text for s in ("permission denied", "403", "authentication failed", "access denied", "write access to repository not granted")):
                 reason = "permission or authentication failure; check repository access and token permissions"
-            elif any(s in text for s in ("could not resolve host", "connection timed out", "connection reset", "failed to connect", "remote end hung up unexpectedly")):
+            elif any(s in text for s in ("could not resolve host", "connection timed out", "connection reset", "failed to connect")) or (
+                phase != "snapshot push" and _PUSH_TRANSPORT_SIGNATURE in text
+            ):
                 reason = "network failure; check connectivity and retry after a fresh safety check"
             elif (status := _git_http_status(text)) is not None:
                 # Git only reports "error: 429" / "HTTP 500" in its stderr, so a
