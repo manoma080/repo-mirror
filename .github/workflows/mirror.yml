@@ -52,10 +52,50 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  token:
+    runs-on: ubuntu-latest
+    # Mints one short-lived installation token for the workflow's Git operations,
+    # checkouts and Contents API writes. The mirror step keeps its own refreshing
+    # provider (MIRROR_APP_ID/MIRROR_APP_PRIVATE_KEY) for long runs.
+    permissions:
+      contents: read
+    outputs:
+      token: ${{ steps.mint.outputs.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Mint mirrorbot installation token
+        id: mint
+        env:
+          MIRROR_APP_ID: ${{ secrets.MIRROR_APP_ID }}
+          MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
+          MIRROR_OWNER: ${{ vars.MIRROR_OWNER }}
+          MIRROR_ACCOUNT_TYPE: ${{ vars.MIRROR_ACCOUNT_TYPE || 'personal' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          token=$(python - <<'PY'
+          import os, sys
+          from repo_mirror.github_api import AppTokenProvider
+          provider = AppTokenProvider(
+              os.environ['MIRROR_APP_ID'],
+              os.environ['MIRROR_APP_PRIVATE_KEY'],
+              os.environ['MIRROR_OWNER'],
+              os.environ.get('MIRROR_ACCOUNT_TYPE') or 'personal',
+          )
+          sys.stdout.write(provider())
+          PY
+          )
+          test -n "$token"
+          echo "::add-mask::$token"
+          printf 'token=%s\n' "$token" >> "$GITHUB_OUTPUT"
+
   configure:
+    needs: token
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     outputs:
       configured-sha: ${{ steps.commit.outputs.sha }}
     steps:
@@ -104,7 +144,7 @@ jobs:
           MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
           MIRROR_GITLAB_TOKEN: ${{ secrets.MIRROR_GITLAB_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GITHUB_TOKEN_VALUE: ${{ github.token }}
+          GITHUB_TOKEN_VALUE: ${{ needs.token.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -126,13 +166,13 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   mirror:
-    needs: configure
+    needs: [token, configure]
     if: ${{ !inputs.remove_from_config }}
     # Checks out configured-sha, which already contains any config.json commit made above.
     # Tests run in .github/workflows/test.yml on pull requests and pushes to main.
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -142,7 +182,7 @@ jobs:
         # Migration intents are managed by the Contents API. Refresh the
         # failure journal separately before the CLI reads it.
         env:
-          MANAGEMENT_TOKEN: ${{ github.token }}
+          MANAGEMENT_TOKEN: ${{ needs.token.outputs.token }}
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
@@ -197,10 +237,10 @@ jobs:
           MIRROR_APP_PRIVATE_KEY: ${{ secrets.MIRROR_APP_PRIVATE_KEY }}
           MIRROR_TIMESTAMP_SECRET: ${{ secrets.MIRROR_TIMESTAMP_SECRET }}
           # Journal and configuration writes go through the Contents API with
-          # conditional blob-sha writes, so the run needs contents write on the
-          # management repository it is itself running in.
+          # conditional blob-sha writes, using the workflow's minted installation
+          # token rather than the job-scoped GITHUB_TOKEN.
           MIRROR_MANAGEMENT_REPOSITORY: ${{ github.repository }}
-          MIRROR_MANAGEMENT_TOKEN: ${{ github.token }}
+          MIRROR_MANAGEMENT_TOKEN: ${{ needs.token.outputs.token }}
         run: python mirror.py --config config.json --failures failures.json
       # Migration transactions publish their journal directly through the API;
       # never push a stale local migrations.json over that authoritative state.
@@ -230,7 +270,7 @@ jobs:
         id: save-journal
         if: ${{ always() }}
         env:
-          MANAGEMENT_TOKEN: ${{ github.token }}
+          MANAGEMENT_TOKEN: ${{ needs.token.outputs.token }}
           MANAGEMENT_BRANCH: ${{ github.event.repository.default_branch }}
           PREPARE_OUTCOME: ${{ steps.prepare-journal.outcome }}
           JOURNAL_PRESENT: ${{ steps.prepare-journal.outputs.present }}

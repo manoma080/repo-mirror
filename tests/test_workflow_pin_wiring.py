@@ -125,7 +125,7 @@ github_api.API = API
     def test_mirror_selection_and_mirrored_revision_remain_wired(self):
         text = WORKFLOW.read_text()
         mirror = text.split('  mirror:\n', 1)[1]
-        self.assertIn('needs: configure', mirror.split('    if:', 1)[0])
+        self.assertIn('needs: [token, configure]', mirror.split('    if:', 1)[0])
         self.assertIn('if: ${{ !inputs.remove_from_config }}', mirror.split('    steps:', 1)[0])
         for binding in ('ref: ${{ needs.configure.outputs.configured-sha || github.event.repository.default_branch }}',
                         'MIRROR_SOURCE_URLS: ${{ inputs.source_urls }}',
@@ -133,6 +133,20 @@ github_api.API = API
                         "MIRROR_VISIBILITY: ${{ inputs.visibility || 'unchanged' }}",
                         "MIRROR_IGNORE_RELEASES: ${{ (inputs.add_to_config && 'keep') || inputs.ignore_releases || 'keep' }}"):
             self.assertIn(binding, mirror)
+
+    def test_one_installation_token_serves_the_whole_workflow(self):
+        text = WORKFLOW.read_text()
+        self.assertIn('  token:\n', text)
+        self.assertIn('id: mint', text)
+        self.assertNotIn('${{ github.token }}', text)
+        bindings = [line.strip() for line in text.splitlines() if 'TOKEN' in line and 'needs.token' in line]
+        self.assertEqual(bindings.count('GITHUB_TOKEN_VALUE: ${{ needs.token.outputs.token }}'), 1)
+        self.assertEqual(bindings.count('MANAGEMENT_TOKEN: ${{ needs.token.outputs.token }}'), 2)
+        self.assertEqual(bindings.count('MIRROR_MANAGEMENT_TOKEN: ${{ needs.token.outputs.token }}'), 1)
+        configure = text.split('  configure:\n', 1)[1].split('    steps:', 1)[0]
+        self.assertIn('needs: token', configure)
+        mirror = text.split('  mirror:\n', 1)[1].split('    steps:', 1)[0]
+        self.assertIn('needs: [token, configure]', mirror)
 
     def test_tests_run_outside_the_mirror_workflow(self):
         text = WORKFLOW.read_text()
