@@ -151,11 +151,8 @@ github_api.API = API
     def test_configuration_files_live_outside_this_repository(self):
         text = WORKFLOW.read_text()
         root = WORKFLOW.parents[2]
-        for name in ('config.json', 'failures.json', 'migrations.json'):
+        for name in ('config.json', 'config-forgejo.json', 'failures.json', 'migrations.json'):
             self.assertFalse((root / name).exists(), name)
-        # The Forgejo launcher still reads the manifest from the code snapshot
-        # until its own cutover; it is mirrored in the configuration repository.
-        self.assertTrue((root / 'config-forgejo.json').exists())
         self.assertIn('MIRROR_CONFIG_REPOSITORY: manoma080/repo-mirror-config', text)
         self.assertEqual(text.count('Check out the configuration repository'), 2)
 
