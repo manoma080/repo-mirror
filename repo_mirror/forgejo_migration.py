@@ -5,11 +5,12 @@ destination and reports the move. This module finishes the transaction through
 the shared, provider-neutral ``migrations.MigrationTransaction`` engine:
 
 1. the intent is recorded in the durable migration journal (``migrations.json``
-   in the owner-only journal directory) before any destination rename,
+   in the Forgejo control repository, or in the owner-only journal directory
+   with legacy configuration) before any destination rename,
 2. both repository pins are rechecked from live metadata,
 3. the existing destination is renamed only when its own ID already sits at the
    recorded name or its candidate name is free,
-4. the candidate manifest is published to the authoritative GitHub repository
+4. the candidate manifest is published to the authoritative control repository
    through a byte-conditional write with readback,
 5. only then is the intent removed.
 
@@ -25,6 +26,7 @@ between a check and a following write.
 """
 import json
 import os
+from urllib.request import build_opener
 
 from repo_mirror.config_json import unique_pairs
 from repo_mirror.forgejo_automatic_transition import prepare_source_transition
@@ -170,7 +172,7 @@ class _ForgejoPolicy:
         except Exception:
             raise MigrationRefused('destination identity mismatch') from None
 
-    def _verify_repo(self, repository, entry, name):
+    def _verify_repo(self, repository, entry, name, *, private=True):
         repo = self._get(repository, name)
         if repo is None:
             raise MigrationRefused('destination missing')
@@ -178,7 +180,7 @@ class _ForgejoPolicy:
                 or repo['id'] != entry['destination']['id']
                 or not isinstance(repo.get('full_name'), str)
                 or repo['full_name'].lower() != f'{self.owner}/{name}'.lower()
-                or repo.get('private') is not True):
+                or repo.get('private') is not private):
             raise MigrationRefused('destination identity mismatch')
         recovery = entry['recovery']
         # Forgejo destinations carry the Forgejo marker format
@@ -203,24 +205,28 @@ class _ForgejoPolicy:
         for name in dict.fromkeys((item['destination_name'], entry['destination']['name'])):
             repo = self._get(repository, name)
             if repo is not None and repo.get('id') == entry['destination']['id']:
-                self._verify_repo(repository, entry, name)
+                self._verify_repo(repository, entry, name, private=item.get('visibility', 'private') == 'private')
                 return name
         raise MigrationRefused('destination identity mismatch')
 
     def verify_destination(self, repository, configuration, entry, phase):
         if phase == 'renamed':
-            self._verify_repo(repository, entry, entry['destination']['name'])
+            _, item = self._document(configuration, entry)
+            self._verify_repo(repository, entry, entry['destination']['name'],
+                              private=item.get('visibility', 'private') == 'private')
         else:
             self._current_name(repository, configuration, entry)
 
     def rename(self, repository, configuration, entry):
         candidate = entry['destination']['name']
+        _, item = self._document(configuration, entry)
+        private = item.get('visibility', 'private') == 'private'
         target = self._get(repository, candidate)
         if target is not None:
             if target.get('id') != entry['destination']['id']:
                 # Never clobber another repository, even with the same name.
                 raise MigrationRefused('destination collision')
-            self._verify_repo(repository, entry, candidate)
+            self._verify_repo(repository, entry, candidate, private=private)
             return
         current = self._current_name(repository, configuration, entry)
         if current.lower() == candidate.lower():
@@ -231,7 +237,7 @@ class _ForgejoPolicy:
             raise
         except Exception:
             raise MigrationRefused('destination rename failed') from None
-        self._verify_repo(repository, entry, candidate)
+        self._verify_repo(repository, entry, candidate, private=private)
 
     def publish(self, configuration, entry):
         data = configuration.read()[0]
@@ -405,28 +411,38 @@ class DeferredMigration:
 
 def build_migration(args, secret):
     """Construct the transaction from scheduler arguments; None when unconfigured."""
-    if not getattr(args, 'config_repo', None):
+    forgejo_repo = getattr(args, 'forgejo_config_repo', None)
+    slug = forgejo_repo or getattr(args, 'config_repo', None)
+    if not slug:
         return None
     from repo_mirror.forgejo_authoritative_config import GitHubConfigCAS
+    from repo_mirror.forgejo_control_config import ForgejoControlAPI, ForgejoFile, ForgejoMigrations
     from repo_mirror.forgejo_git import LocalForgejoAPI
     from repo_mirror.forgejo_sync import read_secure_file
-    from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
+    from repo_mirror.github_api import (
+        API, AppTokenProvider, OriginRedirect, SourceAPI, UploadErrorProcessor, https_origin,
+    )
     from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
-    owner, separator, repo = args.config_repo.partition('/')
+    owner, separator, repo = slug.partition('/')
     if not separator or not owner or not repo:
         raise ValueError('invalid configuration repository')
-    if args.app_id and args.private_key_file:
+    config_id = getattr(args, 'forgejo_config_id', None)
+    if forgejo_repo and (type(config_id) is not int or config_id <= 0):
+        raise ValueError('invalid Forgejo control repository ID')
+    if getattr(args, 'app_id', None) and getattr(args, 'private_key_file', None):
         key = read_secure_file(args.private_key_file)[0]
-        token = AppTokenProvider(args.app_id, key, owner, getattr(args, 'config_account_type', 'personal'))
+        app_owner = (getattr(args, 'source_app_owner', None) or 'manoma080') if forgejo_repo else owner
+        token = AppTokenProvider(args.app_id, key, app_owner, getattr(args, 'config_account_type', 'personal'))
     else:
         token = os.environ.get('GITHUB_TOKEN')
-        if not token or '\n' in token or '\r' in token:
+        if (token and ('\n' in token or '\r' in token)) or (not token and not forgejo_repo):
             raise ValueError('configuration publication requires GitHub App credentials')
     forgejo_token = read_secure_file(args.token_file)[0].strip()
     if not forgejo_token or '\n' in forgejo_token or '\r' in forgejo_token:
         raise ValueError('invalid Forgejo token')
-    api = LocalForgejoAPI(f'http://127.0.0.1:{args.port}', args.token_file)
+    api_class = ForgejoControlAPI if forgejo_repo else LocalForgejoAPI
+    api = api_class(f'http://127.0.0.1:{args.port}', args.token_file)
     # Pin the checked credential; re-opening its path could race with replacement.
     api.token = lambda: forgejo_token
 
@@ -442,7 +458,18 @@ def build_migration(args, secret):
             raise ValueError('invalid source metadata')
         return metadata
 
-    store = MigrationsStore(FileMigrations(os.path.join(args.journal_dir, 'migrations.json')), secret)
-    cas = GitHubConfigCAS(API(token), owner, repo, 'main', CONFIG_PATH)
+    if forgejo_repo:
+        config_path = 'config.json'
+        cas = ForgejoFile(api, owner, repo, config_path, expected_id=config_id)
+        backend = ForgejoMigrations(api, owner, repo, expected_id=config_id)
+    else:
+        config_path = CONFIG_PATH
+        github = API(token)
+        origin = https_origin('https://api.github.com')
+        setattr(github, 'trusted_api_origin', origin)
+        github.opener = build_opener(OriginRedirect(origin), UploadErrorProcessor())
+        cas = GitHubConfigCAS(github, owner, repo, 'main', config_path)
+        backend = FileMigrations(os.path.join(args.journal_dir, 'migrations.json'))
+    store = MigrationsStore(backend, secret)
     return ForgejoMigration(store, cas, ForgejoRenameAPI(api, args.owner), probe,
-                            secret, args.port, args.owner)
+                            secret, args.port, args.owner, config_path=config_path)
