@@ -5,7 +5,10 @@ Install a copy of this launcher outside the checkout. All paths and the remote
 are trusted administrator configuration; never put credentials in the URL.
 """
 import argparse
+import base64
 import fcntl
+import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -74,7 +77,8 @@ def valid_manifest(sources):
     """Validate the entire snapshot before running any downloaded scheduler."""
     named = isinstance(sources, dict)
     if named:
-        if set(sources) == {'destinations', 'repositories', 'groups'}:
+        from_groups = 'groups' in sources
+        if from_groups and set(sources) - {'host_concurrency_limits'} == {'destinations', 'repositories', 'groups'}:
             groups = sources['groups']
             if not isinstance(groups, list) or not groups:
                 return False
@@ -106,10 +110,10 @@ def valid_manifest(sources):
             if sources['repositories'] == []:
                 profile = next(iter(sources['destinations']), None) if isinstance(sources['destinations'], dict) else None
                 sources['repositories'] = [{'source': {'url': 'https://github.com/check/check'}, 'mirrors': {profile: {}}}]
-        if set(sources) != {'destinations', 'repositories'}:
+        if set(sources) - {'host_concurrency_limits'} != {'destinations', 'repositories'}:
             return False
         profiles, repos = sources['destinations'], sources['repositories']
-        if not isinstance(profiles, dict) or len(profiles) != 1 or not isinstance(repos, list) or not repos:
+        if not isinstance(profiles, dict) or len(profiles) != 1 or not isinstance(repos, list):
             return False
         profile, settings = next(iter(profiles.items()))
         if not isinstance(profile, str) or not profile or not isinstance(settings, dict):
@@ -129,7 +133,9 @@ def valid_manifest(sources):
             if source.get('type') not in (None, 'github', 'forgejo', 'gitlab'):
                 return False
             mirror = mirrors[profile]
-            if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy'} or not isinstance(source['url'], str):
+            if not isinstance(mirror, dict) or set(mirror) - {'name', 'id', 'legacy', 'visibility', 'ignore_releases'} or not isinstance(source['url'], str):
+                return False
+            if mirror.get('visibility', 'private') not in ('private', 'public') or not isinstance(mirror.get('ignore_releases', False), bool):
                 return False
             item = {'url': source['url'], 'destination_name': mirror.get('name', source['url'].rsplit('/', 1)[-1])}
             if 'type' in source: item['source_type'] = source['type']
@@ -142,7 +148,7 @@ def valid_manifest(sources):
                 item.update(legacy_url=legacy['url'], legacy_destination_name=legacy['name'], signature=legacy['signature'])
             converted.append(item)
         sources = converted
-    if not isinstance(sources, list) or not sources:
+    if not isinstance(sources, list) or (not named and not sources):
         return False
     identities, destinations = set(), set()
     for item in sources:
@@ -183,6 +189,56 @@ def valid_manifest(sources):
         identities.update(source_names)
         destinations.update(names)
     return True
+
+
+def local_json(path, credential):
+    port, token = credential
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=20)
+    try:
+        connection.request('GET', path, headers={'Authorization': 'token ' + token})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError('local configuration read refused')
+        raw = response.read(8 * 1024 * 1024 + 1)
+        if len(raw) > 8 * 1024 * 1024:
+            raise ValueError('local configuration response too large')
+        return json.loads(raw, object_pairs_hook=unique_pairs)
+    finally:
+        connection.close()
+
+
+def local_manifest(repo, expected_id, port, token):
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*', repo):
+        raise ValueError('invalid local configuration repository')
+    path = '/api/v1/repos/' + repo
+    def verify():
+        data = local_json(path, (port, token))
+        if (not isinstance(data, dict) or type(data.get('id')) is not int or data['id'] != expected_id
+                or data.get('full_name') != repo or data.get('private') is not True
+                or data.get('has_actions') is not False or data.get('default_branch') != 'main'):
+            raise ValueError('local configuration repository identity or policy mismatch')
+    verify()
+    file = local_json(path + '/contents/config.json?ref=main', (port, token))
+    if (not isinstance(file, dict) or file.get('type') != 'file' or file.get('encoding') != 'base64'
+            or not isinstance(file.get('content'), str)):
+        raise ValueError('invalid local configuration blob')
+    raw = base64.b64decode(file['content'].replace('\n', ''), validate=True)
+    if hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest() != file.get('sha'):
+        raise ValueError('local configuration blob mismatch')
+    verify()
+    return raw
+
+
+def local_token_file(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 4096:
+            raise ValueError('invalid local configuration token file')
+        token = stream.read(4097).strip().decode('ascii')
+        if not token or any(c.isspace() or ord(c) < 32 for c in token):
+            raise ValueError('invalid local configuration token')
+        return token
 
 
 def checked_process(command, *, cwd, env, lock_fd, quiet=True, scheduler=False):
@@ -264,7 +320,8 @@ def main(argv=None):
         valued = {'--token-file', '--timestamp-secret-file', '--journal-dir', '--owner',
                   '--port', '--jobs', '--repository-timeout', '--lock', '--helper',
                   '--helper-python', '--sync-python', '--installation', '--app-id',
-                  '--private-key-file', '--config-repo', '--config-account-type', '--asset-max-bytes', '--gitlab-token-file'}
+                  '--private-key-file', '--config-repo', '--config-account-type', '--asset-max-bytes', '--gitlab-token-file',
+                  '--forgejo-config-repo', '--forgejo-config-id'}
         seen = {}
         i = 0
         while i < len(extra):
@@ -286,6 +343,12 @@ def main(argv=None):
                 seen[name] = value
             i += 1
         config_repository = None
+        local_repo = seen.get('--forgejo-config-repo')
+        local_id = seen.get('--forgejo-config-id')
+        if (bool(local_repo) != bool(local_id) or (local_repo and ('--config-repo' in seen
+                or not re.fullmatch(r'[1-9][0-9]{0,17}', local_id) or '--token-file' not in seen
+                or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*', local_repo)))):
+            raise ValueError('invalid local configuration repository options')
         if '--config-repo' in seen:
             # The manifest may live in a separate private repository. The code
             # remote is still fetched here; the configuration repository is
@@ -385,7 +448,14 @@ def main(argv=None):
                 snapshot = root / 'snapshot'
                 extract_snapshot(archive, snapshot)
                 manifest = snapshot / 'config-forgejo.json'
-                if config_repository is not None:
+                if local_repo is not None:
+                    stage = 'local configuration fetch'
+                    port = int(seen.get('--port', '3300'))
+                    if not 1 <= port <= 65535:
+                        raise ValueError('invalid local Forgejo port')
+                    manifest = root / 'config.json'
+                    manifest.write_bytes(local_manifest(local_repo, int(local_id), port, local_token_file(seen['--token-file'])))
+                elif config_repository is not None:
                     stage = 'configuration git initialization'
                     config_objects = root / 'config-objects'
                     if run(['git', 'init', '--bare', str(config_objects)]):
@@ -415,10 +485,14 @@ def main(argv=None):
                         raise ValueError('destination profile runtime mismatch')
                 if not (snapshot / 'repo_mirror' / 'forgejo_schedule.py').is_file():
                     raise ValueError('scheduler missing')
+                if 'FORGEJO_MANUAL_INPUTS' in scheduler_env and not (snapshot / 'repo_mirror' / 'forgejo_dispatch_runtime.py').is_file():
+                    raise ValueError('manual options require an upgraded scheduler')
+                if local_repo is not None and not (snapshot / 'repo_mirror' / 'forgejo_control_config.py').is_file():
+                    raise ValueError('local configuration requires an upgraded scheduler')
                 stage = 'scheduler launch'
                 print(f'Updater fetched commit: {commit}', file=sys.stderr, flush=True)
                 return checked_process([sys.executable, '-m', 'repo_mirror.forgejo_schedule', 'run', '--manifest', str(manifest), *extra], cwd=snapshot, env=scheduler_env, lock_fd=fd, quiet=False, scheduler=True)
-    except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError):
+    except (OSError, ValueError, http.client.HTTPException, subprocess.SubprocessError, tarfile.TarError):
         print(f'Updater failed: {stage}', file=sys.stderr)
         return 2
 

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections import deque
+from contextlib import ExitStack
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,11 @@ def refusal(exc):
     return message if isinstance(exc, forgejo_migration.MigrationRefused) and message in MIGRATION_REASONS else 'unexpected migration failure'
 
 
+def prepare_manual(args, secret, manifest_bytes, inputs):
+    from repo_mirror.forgejo_dispatch_runtime import prepare
+    return prepare(args, secret, manifest_bytes, inputs)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['run'])
@@ -110,8 +116,19 @@ def main(argv=None):
     parser.add_argument('--config-repo', metavar='OWNER/NAME',
                         help='GitHub repository holding the authoritative config-forgejo.json')
     parser.add_argument('--config-account-type', default='personal', choices=['personal', 'organization'])
+    parser.add_argument('--forgejo-config-repo', metavar='OWNER/NAME')
+    parser.add_argument('--forgejo-config-id', type=int)
     args = parser.parse_args(argv)
     try:
+        if (bool(args.forgejo_config_repo) != (args.forgejo_config_id is not None)
+                or (args.forgejo_config_repo and (args.config_repo or args.forgejo_config_id <= 0
+                    or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*', args.forgejo_config_repo)))):
+            raise ValueError('invalid local configuration authority')
+        has_authority = args.config_repo or args.forgejo_config_repo
+        raw_dispatch = os.environ.pop('FORGEJO_MANUAL_INPUTS', None)
+        inputs = None if raw_dispatch is None else json.loads(raw_dispatch, object_pairs_hook=unique_pairs)
+        if raw_dispatch is not None and not isinstance(inputs, dict):
+            raise ValueError('invalid manual dispatch')
         if args.asset_max_bytes is not None:
             parse_asset_max_bytes(args.asset_max_bytes)
         manifest_bytes = Path(args.manifest).read_bytes()
@@ -125,7 +142,7 @@ def main(argv=None):
         if groups is not None:
             from repo_mirror.gitlab_onboarding_forgejo import validate_groups
             validate_groups(groups)
-            if set(sources) - {CONFIG_KEY} != {'destinations', 'repositories', 'groups'} or not args.config_repo or args.asset_max_bytes is None:
+            if set(sources) - {CONFIG_KEY} != {'destinations', 'repositories', 'groups'} or not has_authority or args.asset_max_bytes is None:
                 raise ValueError('group onboarding requires authoritative config and asset limit')
             worker_manifest = {k: v for k, v in sources.items() if k != 'groups'}
             if worker_manifest.get('repositories'):
@@ -200,19 +217,65 @@ def main(argv=None):
             except BlockingIOError:
                 print('Batch skipped: lock held', file=sys.stderr)
                 return 75
-            with tempfile.TemporaryDirectory(prefix='forgejo-schedule-') as directory:
+            with tempfile.TemporaryDirectory(prefix='forgejo-schedule-') as directory, ExitStack() as state:
                 snapshot = Path(directory) / 'sources.json'
                 # Preserve the validated bytes: remote configuration CAS compares
                 # against the original Git blob, not reserialized JSON.
                 snapshot.write_bytes(manifest_bytes)
                 try:
-                    recorded = MigrationsStore(FileMigrations(os.path.join(args.journal_dir, 'migrations.json')),
-                                               secret).pending()
+                    transaction = None
+                    if args.forgejo_config_repo:
+                        from repo_mirror.forgejo_control_config import ForgejoFile
+                        from repo_mirror.forgejo_failure_remote import session
+                        transaction = forgejo_migration.build_migration(args, secret)
+                        if transaction.cas.read() != manifest_bytes:
+                            raise ValueError('configuration changed since fetch')
+                        recorded = transaction.store.pending()
+                        owner, repo = args.forgejo_config_repo.split('/')
+                        failures_remote = ForgejoFile(transaction.cas.api, owner, repo, 'failures.json',
+                                                      expected_id=args.forgejo_config_id)
+                        state.enter_context(session(args.journal_dir, failures_remote))
+                    else:
+                        recorded = MigrationsStore(FileMigrations(os.path.join(args.journal_dir, 'migrations.json')),
+                                                   secret).pending()
                 except (OSError, ValueError, TypeError):
                     print('Batch configuration or lock error', file=sys.stderr)
                     return 2
+                selected = None
+                transient = False
+                isolated = set()
+                if inputs is not None:
+                    if recorded:
+                        print('Manual dispatch refused: pending migration; let the scheduled runner reconcile it first', flush=True)
+                        return 1
+                    try:
+                        replacement, runtime, selected = prepare_manual(args, secret, manifest_bytes, inputs)
+                    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+                        from repo_mirror.forgejo_dispatch_runtime import dispatch_failure
+                        print(f'Manual dispatch refused: {dispatch_failure(exc)}', flush=True)
+                        return 2
+                    if selected == []:
+                        print('No mirroring requested', flush=True)
+                        return 0
+                    if replacement is not None:
+                        manifest_bytes = replacement
+                    if selected is not None:
+                        authoritative = json.loads(manifest_bytes, object_pairs_hook=unique_pairs)
+                        transient = runtime != authoritative
+                        profile = next(iter(runtime['destinations']))
+                        saved_routes = {(r['source']['url'], r['mirrors'][profile].get('name', r['source']['url'].rsplit('/', 1)[-1]))
+                                        for r in authoritative['repositories']}
+                        isolated = {r['source']['url'] for r in runtime['repositories']
+                                    if (r['source']['url'], r['mirrors'][profile].get('name', r['source']['url'].rsplit('/', 1)[-1])) not in saved_routes}
+                        worker_manifest = {k: v for k, v in runtime.items() if k != 'groups'}
+                        entries = [e for e in parse_manifest(worker_manifest) if e['url'] in selected]
+                        if len(entries) != len(selected):
+                            raise ValueError('manual selection changed')
+                        snapshot.write_text(json.dumps(worker_manifest), encoding='utf-8')
                 migration = None
-                if args.config_repo:
+                if transaction is not None:
+                    migration = transaction
+                elif has_authority:
                     # Build lazily: an ordinary batch must not require the
                     # configuration-publication credentials.
                     migration = forgejo_migration.DeferredMigration(
@@ -231,7 +294,7 @@ def main(argv=None):
                     except Exception:
                         print('Migration: FAILED: unexpected migration failure', flush=True)
                         return 1
-                if groups:
+                if groups and selected is None:
                     if recorded:
                         print('Group onboarding: FAILED: pending migration requires reconciliation', flush=True)
                         return 1
@@ -315,6 +378,10 @@ def main(argv=None):
                                     command = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--'] + command
                             if args.organization:
                                 command.append('--organization')
+                            if transient:
+                                command.append('--no-dispatch-relocation')
+                            if source in isolated:
+                                command.append('--isolated-dispatch-journal')
                             command += ['--source', source]
                             diagnostics = tempfile.TemporaryFile()
                             host = source_host(source)
@@ -453,7 +520,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         print('Batch interrupted; active processes stopped', file=sys.stderr)
         return 130
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
         print('Batch configuration or lock error', file=sys.stderr)
         return 2
 

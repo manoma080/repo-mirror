@@ -1,0 +1,71 @@
+name: Mirror to local Forgejo
+on:
+  schedule:
+    - cron: '0 0,6,12,18 * * *'
+      timezone: Europe/Helsinki
+  workflow_dispatch:
+    inputs:
+      source_urls:
+        description: 'Comma-separated source URLs (blank mirrors all)'
+        required: false
+        type: string
+        default: ''
+      add_to_config:
+        description: 'Save these URLs to config-forgejo.json in repo-mirror-config'
+        required: false
+        type: boolean
+        default: false
+      destination_name:
+        description: 'Optional destination name (one source URL only)'
+        required: false
+        type: string
+        default: ''
+      visibility:
+        description: 'Visibility for newly created destinations only'
+        required: false
+        type: choice
+        options:
+          - unchanged
+          - private
+          - public
+        default: unchanged
+      remove_from_config:
+        description: 'Remove URLs from config only; no mirroring'
+        required: false
+        type: boolean
+        default: false
+      ignore_releases:
+        description: 'Ignore releases for these URLs (keep = use each saved repository setting)'
+        required: false
+        type: choice
+        options:
+          - keep
+          - 'true'
+          - 'false'
+        default: keep
+concurrency:
+  group: local-forgejo-mirror
+  cancel-in-progress: false
+jobs:
+  mirror:
+    runs-on: forgejo-mirror-local
+    timeout-minutes: 360
+    steps:
+      - name: Run installed launcher
+        env:
+          EVENT: ${{ forgejo.event_name }}
+          SOURCE_URLS: ${{ inputs.source_urls }}
+          ADD: ${{ inputs.add_to_config }}
+          REMOVE: ${{ inputs.remove_from_config }}
+          DESTINATION: ${{ inputs.destination_name }}
+          VISIBILITY: ${{ inputs.visibility }}
+          IGNORE_RELEASES: ${{ inputs.ignore_releases }}
+        run: |
+          set -eu
+          unset FORGEJO_MANUAL_INPUTS
+          if [ "$EVENT" = workflow_dispatch ]; then
+            FORGEJO_MANUAL_INPUTS=$(python3 -c 'import json,os; e=os.environ; print(json.dumps(dict(source_urls=e["SOURCE_URLS"], add_to_config=e["ADD"].lower()=="true", remove_from_config=e["REMOVE"].lower()=="true", destination_name=e["DESTINATION"], visibility=e["VISIBILITY"] or "unchanged", ignore_releases=e["IGNORE_RELEASES"] or "keep")))')
+            export FORGEJO_MANUAL_INPUTS
+          fi
+          unset SOURCE_URLS ADD REMOVE DESTINATION VISIBILITY IGNORE_RELEASES
+          exec run-mirror mirror

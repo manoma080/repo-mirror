@@ -1,4 +1,4 @@
-"""Provision private local Forgejo mirrors and copy Git branches and tags safely."""
+"""Provision local Forgejo mirrors and copy Git branches and tags safely."""
 
 import http.client
 import hashlib
@@ -138,7 +138,10 @@ class ForgejoDestination:
         self.organization = organization
         self.run_pin = None
 
-    def ensure_repository(self, name, source, *, expected_id=None):
+    def ensure_repository(self, name, source, *, expected_id=None, visibility='private', require_new=False):
+        if visibility not in ('private', 'public'):
+            raise ValueError('invalid mirror visibility')
+        private = visibility == 'private'
         if expected_id is not None and (type(expected_id) is not int or expected_id <= 0):
             raise ValueError("invalid destination repository ID")
         name = _name(name)
@@ -147,6 +150,8 @@ class ForgejoDestination:
         path = f"/api/v1/repos/{self.owner}/{name}"
         try:
             repo = self.api.request("GET", path)
+            if require_new:
+                raise ValueError('destination already exists')
         except APIError as exc:
             if exc.status != 404:
                 raise
@@ -166,18 +171,19 @@ class ForgejoDestination:
                 endpoint,
                 {
                     "name": name,
-                    "private": True,
+                    "private": private,
                     "auto_init": False,
                     "description": marker + " [repo-mirror:initializing:v1]",
                     "has_actions": False,
                 },
             )
-            self._verify(created, name, marker, actions=False)
+            self._verify(created, name, marker, actions=False, private=private)
             created_id = created['id']
             repo = self.api.request("GET", path)
             if repo.get('id') != created_id:
                 raise RuntimeError('Forgejo repository replaced during creation')
-        self._verify(repo, name, marker, actions=False)
+        # Never convert an existing repository or accept a server overriding creation visibility.
+        self._verify(repo, name, marker, actions=False, private=private)
         if expected_id is not None and repo['id'] != expected_id:
             raise RuntimeError("Forgejo destination ID mismatch")
         expected_id = repo['id']
@@ -185,45 +191,45 @@ class ForgejoDestination:
         if repo.get("has_actions") is not False:
             self.api.request("PATCH", path, {"has_actions": False})
             repo = self.api.request("GET", path)
-        self._verify(repo, name, marker, actions=True)
+        self._verify(repo, name, marker, actions=True, private=private)
         if repo['id'] != expected_id or repo['description'] != expected_description:
             raise RuntimeError('Forgejo repository replaced or initialization state changed')
         return repo
 
-    def _verify(self, repo, name, marker, *, actions):
+    def _verify(self, repo, name, marker, *, actions, private=True):
         if (
             not isinstance(repo, dict)
             or type(repo.get('id')) is not int or repo['id'] <= 0
             or repo.get("full_name", "").lower() != f"{self.owner}/{name}".lower()
-            or repo.get("private") is not True
+            or repo.get("private") is not private
             or repo.get("description") not in (marker, marker + " [repo-mirror:initializing:v1]", marker + " [repo-mirror:initialized:v1]")
             or (actions and repo.get("has_actions") is not False)
         ):
             raise RuntimeError("Forgejo repository identity, provenance, privacy or Actions not verified")
 
-    def _read_pinned(self, name, marker, expected_id, description):
+    def _read_pinned(self, name, marker, expected_id, description, private=True):
         # Forgejo offers no conditional write tied to repository ID; replacement
         # between this GET and the following Git/API write remains non-atomic.
         repo = self.api.request("GET", f"/api/v1/repos/{self.owner}/{_name(name)}")
-        self._verify(repo, name, marker, actions=True)
+        self._verify(repo, name, marker, actions=True, private=private)
         if repo['id'] != expected_id or repo['description'] != description:
             raise RuntimeError("Forgejo repository identity or initialization state changed")
         return repo
 
-    def begin_initialization(self, name, source, *, expected_id=None):
+    def begin_initialization(self, name, source, *, expected_id=None, visibility='private'):
         """Conservatively migrate legacy mirrors through a full-history pass."""
         self.run_pin = None
-        repo = (self.ensure_repository(name, source) if expected_id is None
-                else self.ensure_repository(name, source, expected_id=expected_id))
+        repo = self.ensure_repository(name, source, expected_id=expected_id, visibility=visibility)
+        private = visibility == 'private'
         owner, source_name = _source(source)
         marker = _source_marker(source)
         if repo["description"] == marker:
             expected_id = repo['id']
-            self._read_pinned(name, marker, expected_id, marker)
+            self._read_pinned(name, marker, expected_id, marker, private)
             self.api.request("PATCH", f"/api/v1/repos/{self.owner}/{_name(name)}",
                              {"description": marker + " [repo-mirror:initializing:v1]"})
-            repo = self._read_pinned(name, marker, expected_id, marker + " [repo-mirror:initializing:v1]")
-        self.run_pin = (repo['id'], repo['description'])
+            repo = self._read_pinned(name, marker, expected_id, marker + " [repo-mirror:initializing:v1]", private)
+        self.run_pin = (repo['id'], repo['description'], private)
         return repo["description"] == marker + " [repo-mirror:initializing:v1]"
 
     def revalidate(self, name, source, expected):
@@ -238,16 +244,22 @@ class ForgejoDestination:
         path = f"/api/v1/repos/{self.owner}/{name}"
         repo = (self.revalidate(name, source, expected) if expected is not None
                 else self.api.request("GET", path))
-        self._verify(repo, name, marker, actions=True)
+        private = _pinned_privacy(expected)
+        self._verify(repo, name, marker, actions=True, private=private)
         expected_id = repo['id']
         initializing = marker + " [repo-mirror:initializing:v1]"
         if repo["description"] != initializing:
             raise RuntimeError("Forgejo repository identity, provenance, privacy or Actions not verified")
-        self._read_pinned(name, marker, expected_id, initializing)
+        self._read_pinned(name, marker, expected_id, initializing, private)
         self.api.request("PATCH", path, {"description": marker + " [repo-mirror:initialized:v1]"})
-        self._read_pinned(name, marker, expected_id, marker + " [repo-mirror:initialized:v1]")
+        self._read_pinned(name, marker, expected_id, marker + " [repo-mirror:initialized:v1]", private)
         if expected is not None:
-            self.run_pin = (expected_id, marker + " [repo-mirror:initialized:v1]")
+            self.run_pin = (expected_id, marker + " [repo-mirror:initialized:v1]", private)
+
+
+def _pinned_privacy(expected):
+    # Older callers with an ID/description pin have always required private.
+    return expected[2] if expected is not None and len(expected) == 3 else True
 
 
 def plan_updates(desired, observed, is_ancestor):
@@ -293,22 +305,17 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None, re
     info = (destination.revalidate(name, provenance, expected) if expected is not None
             else destination.ensure_repository(name, provenance))
     pins = {}
-    def pin(repo_name, info):
+    def pin(repo_name, info, private=True):
         repo_id = info.get('id') if isinstance(info, dict) else None
         if type(repo_id) is not int or repo_id <= 0:
             raise RuntimeError('Forgejo repository ID not verified')
-        pins[repo_name] = (repo_id, info['description'])
+        pins[repo_name] = (repo_id, info['description'], private)
 
     def revalidate(repo_name):
-        marker_owner, marker_repo = _source(source)
         marker = _source_marker(provenance)
-        current = destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{repo_name}')
-        destination._verify(current, repo_name, marker, actions=True)
-        if (current.get('id'), current.get('description')) != pins[repo_name]:
-            raise RuntimeError('Forgejo repository identity or initialization state changed')
-        return current
+        return destination._read_pinned(repo_name, marker, *pins[repo_name])
 
-    pin(name, info)
+    pin(name, info, _pinned_privacy(expected))
     source_url = _source_url(source)
     destination_url = f"{destination.api.base_url.rstrip('/')}/{destination.owner}/{name}.git"
     with tempfile.TemporaryDirectory(prefix="repo-mirror-forgejo-") as tmp:
@@ -424,6 +431,7 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None, re
             revalidate(name)
             if source_snapshot is None or _refs(source_run, source_url) != source_snapshot:
                 raise RuntimeError('source refs changed during sync')
+            # Wipe history stays private even when the active mirror is public.
             pin(archive_name, destination.ensure_repository(archive_name, provenance))
             archive_url = f"{destination.api.base_url.rstrip('/')}/{destination.owner}/{archive_name}.git"
             archive_targets[archive_url] = archive_name
@@ -534,7 +542,7 @@ def snapshot_refs(destination, name, source, *, source_token, expected=None, rec
             raise RuntimeError('source default branch not verified')
         info = (destination.revalidate(name, provenance, expected) if expected is not None
                 else destination.api.request('GET', f'/api/v1/repos/{destination.owner}/{name}'))
-        destination._verify(info, name, _source_marker(provenance), actions=True)
+        destination._verify(info, name, _source_marker(provenance), actions=True, private=_pinned_privacy(expected))
         if source_head is not None and info.get('default_branch') != source_head[0][len('refs/heads/'):]:
             raise RuntimeError('Forgejo default branch readback did not match')
         if destination_refs != source_refs:
