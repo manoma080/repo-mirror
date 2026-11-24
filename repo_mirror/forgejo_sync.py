@@ -718,7 +718,7 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                                                        f'http://127.0.0.1:{args.port}', entry['destination_id'])
             try:
                 if ignore_releases:
-                    print(f'{identity}: releases ignored by configuration', flush=True)
+                    print('releases ignored by configuration', file=sys.stderr, flush=True)
                 elif entry and 'legacy_identity' in entry:
                     old_owner, old_name = recovery_identity.rsplit('/', 2)[-2:]
                     old_source = {**source, 'owner': old_owner}

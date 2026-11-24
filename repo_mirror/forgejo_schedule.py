@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from repo_mirror import forgejo_migration
 from repo_mirror.config_json import unique_pairs
+from repo_mirror.forgejo_progress import ProgressReader
 from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, RELOCATION_FIELDS, RELOCATION_PREFIX,
                                       SAFE_REASONS, parse_asset_max_bytes, parse_manifest)
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
@@ -92,6 +93,7 @@ def prepare_manual(args, secret, manifest_bytes, inputs):
 
 
 def main(argv=None):
+    started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['run'])
     parser.add_argument('--manifest', required=True)
@@ -395,10 +397,15 @@ def main(argv=None):
                                 failures += 1
                                 print(f'Repository {index}: FAILED: unable to start helper; check executable and permissions', flush=True)
                             else:
-                                active[process] = [index, diagnostics, time.monotonic() + args.repository_timeout, None, host]
-                        for process, (index, diagnostics, deadline, kill_deadline, host) in list(active.items()):
+                                launch = time.monotonic()
+                                active[process] = [index, diagnostics, launch + args.repository_timeout, None, host, ProgressReader(), launch]
+                                print(f'\n===== Repository {index}/{len(entries)} =====', flush=True)
+                                print(f'repository {index}/{len(entries)} started', flush=True)
+                        for process, (index, diagnostics, deadline, kill_deadline, host, progress, launch) in list(active.items()):
                             status = process.poll()
                             now = time.monotonic()
+                            for event in progress.drain(diagnostics):
+                                print(f'repository {index}/{len(entries)} {event}', flush=True)
                             if kill_deadline is not None:
                                 if now < kill_deadline:
                                     continue
@@ -427,6 +434,8 @@ def main(argv=None):
                                 os.killpg(process.pid, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
+                            for event in progress.drain(diagnostics, finished=True):
+                                print(f'repository {index}/{len(entries)} {event}', flush=True)
                             reason = 'helper or sync process failed; check helper configuration and credentials'
                             relocation = None
                             invalid_report = False
@@ -463,6 +472,8 @@ def main(argv=None):
                             if invalid_report:
                                 reason = 'invalid relocation report'
                             failures += not ok
+                            outcome = 'completed' if ok else 'failed'
+                            print(f'repository {index}/{len(entries)} {outcome} elapsed={time.monotonic() - launch:.3f}s', flush=True)
                             print(f'Repository {index}: {"OK" if ok else "FAILED: " + reason}', flush=True)
                             if ok and relocation is not None:
                                 relocations.append((index, relocation))
@@ -475,7 +486,7 @@ def main(argv=None):
                         except ProcessLookupError:
                             pass
                     deadline = time.monotonic() + 2
-                    for process, (_, diagnostics, _, _, _) in active.items():
+                    for process, (_, diagnostics, _, _, _, _, _) in active.items():
                         try:
                             process.wait(timeout=max(0, deadline - time.monotonic()))
                         except subprocess.TimeoutExpired:
@@ -515,7 +526,9 @@ def main(argv=None):
                 summary = f'Batch: {len(entries) - failures} succeeded, {failures} failed'
                 if inactive:
                     summary += f', {inactive} inactive'
+                print('\n===== Summary =====', flush=True)
                 print(summary, flush=True)
+                print(f'runtime total elapsed={time.monotonic() - started:.3f}s', flush=True)
                 return 1 if failures else 0
     except KeyboardInterrupt:
         print('Batch interrupted; active processes stopped', file=sys.stderr)
