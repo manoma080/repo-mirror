@@ -14,6 +14,7 @@ import tempfile
 from collections import deque
 from contextlib import ExitStack
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -23,6 +24,7 @@ from repo_mirror.forgejo_progress import ProgressReader
 from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, RELOCATION_FIELDS, RELOCATION_PREFIX,
                                       SAFE_REASONS, parse_asset_max_bytes, parse_manifest)
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
+from repo_mirror.logging_utils import safe_label
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
 DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
@@ -399,7 +401,8 @@ def main(argv=None):
                             else:
                                 launch = time.monotonic()
                                 active[process] = [index, diagnostics, launch + args.repository_timeout, None, host, ProgressReader(), launch]
-                                print(f'\n===== Repository {index}/{len(entries)} =====', flush=True)
+                                label = '/'.join(safe_label(part) for part in urlsplit(source).path.strip('/').split('/'))
+                                print(f'\n===== Repository {index}/{len(entries)}: {label} =====', flush=True)
                                 print(f'repository {index}/{len(entries)} started', flush=True)
                         for process, (index, diagnostics, deadline, kill_deadline, host, progress, launch) in list(active.items()):
                             status = process.poll()

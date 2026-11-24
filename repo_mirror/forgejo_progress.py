@@ -2,6 +2,8 @@
 import os
 import re
 
+from repo_mirror.logging_utils import safe_label
+
 _N = r'[0-9]{1,10}'
 _TIME = rf'{_N}\.[0-9]{{3}}s'
 _SAFE = tuple(re.compile(pattern) for pattern in (
@@ -13,19 +15,27 @@ _SAFE = tuple(re.compile(pattern) for pattern in (
     r'release resuming pending update',
     r'releases ignored by configuration',
 ))
+_LABELS = tuple(re.compile(pattern) for pattern in (
+    rf'(===== Release {_N}/{_N}: )(.+)( =====)',
+    rf'(release {_N}/{_N} started tag=)(.+)()',
+    rf'(asset {_N}/{_N} started asset_name=)(.+)()',
+))
 _REDACT = tuple(re.compile(pattern) for pattern in (
-    rf'(release {_N}/{_N} started) tag=.+',
-    rf'(asset {_N}/{_N} started) asset_name=.+',
     rf'(asset {_N}/{_N} comparing downloaded bytes) reason=.+',
     rf'(asset {_N}/{_N} unchanged) \(published SHA-256\) reason=matching-published-digests',
 ))
 
 
 def safe_progress(raw):
-    """Never forward raw labels, exceptions, or internal worker protocol lines."""
+    """Forward named progress using the GitHub workflow's label sanitizer."""
     line = raw.decode('utf-8', errors='replace') if len(raw) <= 512 else ''
     if any(pattern.fullmatch(line) for pattern in _SAFE):
         return line
+    for pattern in _LABELS:
+        match = pattern.fullmatch(line)
+        if match:
+            prefix, label, suffix = match.groups()
+            return prefix + safe_label(label) + suffix
     for pattern in _REDACT:
         match = pattern.fullmatch(line)
         if match:

@@ -20,8 +20,11 @@ class ScheduleTest(unittest.TestCase):
             worker = tmp / 'worker'
             worker.write_text('''#!/bin/sh
 printf 'step git source-snapshot elapsed=0.100s\n' >&2
-printf 'release 1/2 started tag=SECRET_RELEASE\n' >&2
-printf 'asset 1/2 started asset_name=SECRET_ASSET\n' >&2
+printf '===== Release 1/2: v1.2.3 =====\n' >&2
+printf 'release 1/2 started tag=v1.2.3\n' >&2
+printf 'asset 1/2 started asset_name=build.tar.gz\n' >&2
+printf 'asset 2/2 started asset_name=SECRET_ASSET\n' >&2
+printf 'release 2/2 started tag=https://private.example/signed\n' >&2
 printf 'step git snapshot-push elapsed=0.200s SECRET_SUFFIX\n' >&2
 printf 'SECRET_RAW https://private.example/signed\n' >&2
 printf 'assets uploaded=1 updated=0 skipped=1 retried=0 upload_failed=0\n' >&2
@@ -46,9 +49,12 @@ exit 1
                         ack.touch()
                 self.assertEqual(child.wait(timeout=5), 0, ''.join(log))
             output = ''.join(log)
+            self.assertIn('===== Repository 1/1: a/b =====', output)
             self.assertIn('repository 1/1 started', output)
-            self.assertIn('repository 1/1 release 1/2 started', output)
-            self.assertIn('repository 1/1 asset 1/2 started', output)
+            self.assertIn('===== Release 1/2: v1.2.3 =====', output)
+            self.assertIn('repository 1/1 release 1/2 started tag=v1.2.3', output)
+            self.assertIn('repository 1/1 asset 1/2 started asset_name=build.tar.gz', output)
+            self.assertIn('repository 1/1 asset 2/2 started asset_name=[redacted]', output)
             self.assertIn('assets uploaded=1 updated=0 skipped=1 retried=0 upload_failed=0', output)
             self.assertIn('repository 1/1 completed', output)
             self.assertIn('===== Summary =====', output)
