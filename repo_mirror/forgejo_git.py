@@ -275,7 +275,7 @@ def plan_updates(desired, observed, is_ancestor):
     return updates
 
 
-def sync_refs(destination, name, source, *, source_token=None, expected=None, recovery_identity=None):
+def sync_refs(destination, name, source, *, source_token=None, expected=None, recovery_identity=None, anonymous_github=False):
     """Reconcile heads and tags using the shared archive-before-wipe policy."""
     provenance = recovery_identity if recovery_identity is not None else source
     owner, repo = _source(source)
@@ -293,9 +293,11 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None, re
     ):
         raise ValueError("invalid Forgejo Git origin")
     public_forgejo = source.startswith("https://")
-    if source_token is None and not public_forgejo:
+    if source_token is None and not public_forgejo and not anonymous_github:
         source_token = os.environ.get("GITHUB_TOKEN")
     def github_token():
+        if anonymous_github:
+            return ""
         token = source_token() if callable(source_token) else source_token
         if public_forgejo and token is None:
             return ""
@@ -464,7 +466,7 @@ def sync_refs(destination, name, source, *, source_token=None, expected=None, re
 
 
 
-def snapshot_refs(destination, name, source, *, source_token, expected=None, recovery_identity=None):
+def snapshot_refs(destination, name, source, *, source_token, expected=None, recovery_identity=None, anonymous_github=False):
     provenance = recovery_identity if recovery_identity is not None else source
     owner, repo = _source(source)
     name = _name(name)
@@ -487,10 +489,11 @@ def snapshot_refs(destination, name, source, *, source_token, expected=None, rec
                     'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': str(askpass), 'LC_ALL': 'C'}
 
         def git(args, token, user):
-            token = token() if callable(token) else token
+            anonymous = anonymous_github and user == 'x-access-token'
+            token = '' if anonymous else token() if callable(token) else token
             if token is None and source.startswith("https://"):
                 token = ""
-            if not isinstance(token, str) or (not token and not source.startswith("https://")) or '\n' in token or '\r' in token:
+            if not isinstance(token, str) or (not token and not anonymous and not source.startswith("https://")) or '\n' in token or '\r' in token:
                 raise RuntimeError('GITHUB_TOKEN required for source clone')
             env = dict(base_env, MIRROR_TOKEN=token, MIRROR_USER=user)
             result = subprocess.run(['git', '-c', 'core.hooksPath=' + os.devnull,
