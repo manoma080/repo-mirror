@@ -11,6 +11,50 @@ SCRIPT = ROOT / 'repo_mirror' / 'forgejo_schedule.py'
 
 
 class ScheduleTest(unittest.TestCase):
+    def test_streams_only_sanitized_progress_while_worker_is_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'; secret.write_text('x' * 32); secret.chmod(0o600)
+            journals = tmp / 'journals'; journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources'; manifest.write_text(json.dumps(['https://localhost/a/b']))
+            worker = tmp / 'worker'
+            worker.write_text('''#!/bin/sh
+printf 'step git source-snapshot elapsed=0.100s\n' >&2
+printf 'release 1/2 started tag=SECRET_RELEASE\n' >&2
+printf 'asset 1/2 started asset_name=SECRET_ASSET\n' >&2
+printf 'step git snapshot-push elapsed=0.200s SECRET_SUFFIX\n' >&2
+printf 'SECRET_RAW https://private.example/signed\n' >&2
+printf 'assets uploaded=1 updated=0 skipped=1 retried=0 upload_failed=0\n' >&2
+for n in 1 2 3 4 5; do
+  if [ -e "$ACK" ]; then exit 0; fi
+  sleep 0.2
+done
+exit 1
+''')
+            worker.chmod(0o700)
+            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused',
+                   '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice',
+                   '--lock', str(tmp / 'lock'), '--sync-python', str(worker)]
+            ack = tmp / 'ack'
+            with subprocess.Popen(cmd, env={**os.environ, 'ACK': str(ack)}, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True) as child:
+                log = []
+                assert child.stdout is not None
+                for line in child.stdout:
+                    log.append(line)
+                    if 'step git source-snapshot elapsed=0.100s' in line:
+                        ack.touch()
+                self.assertEqual(child.wait(timeout=5), 0, ''.join(log))
+            output = ''.join(log)
+            self.assertIn('repository 1/1 started', output)
+            self.assertIn('repository 1/1 release 1/2 started', output)
+            self.assertIn('repository 1/1 asset 1/2 started', output)
+            self.assertIn('assets uploaded=1 updated=0 skipped=1 retried=0 upload_failed=0', output)
+            self.assertIn('repository 1/1 completed', output)
+            self.assertIn('===== Summary =====', output)
+            self.assertNotIn('SECRET', output)
+            self.assertNotIn('private.example', output)
+
     def test_parser_rejects_unsafe_names_and_lookalike_host(self):
         from repo_mirror.forgejo_schedule import validate_sources
         for source in ('https://github.com.evil.example/a/b',
