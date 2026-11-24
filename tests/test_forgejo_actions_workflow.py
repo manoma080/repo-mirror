@@ -12,14 +12,21 @@ WORKFLOW = ROOT / 'scheduler/forgejo-actions.yml'
 
 
 class ForgejoActionsWorkflowTests(unittest.TestCase):
-    def test_manual_input_names_and_defaults_match(self):
+    def test_forgejo_sorted_controls_match_github_order_and_defaults(self):
         def inputs(path):
             text = path.read_text().split('    inputs:\n', 1)[1]
             text = re.split(r'\n[^ \n]', text, maxsplit=1)[0]
-            return dict(re.findall(r'^      ([a-z_]+):\n(?:^        .*\n)*?^        default: (.*)$', text, re.M))
+            return re.findall(r'^      ([a-z0-9_]+):\n(?:^        .*\n)*?^        default: (.*)$', text, re.M)
         expected = inputs(ROOT / '.github/workflows/mirror.yml')
         self.assertEqual(len(expected), 6)
-        self.assertEqual(inputs(WORKFLOW), expected)
+        actual = sorted(inputs(WORKFLOW))  # Forgejo sorts input keys before rendering.
+        self.assertEqual(actual, [(f'input_{i:02d}_{key}', default)
+                                  for i, (key, default) in enumerate(expected, 1)])
+        text = WORKFLOW.read_text()
+        variables = ['SOURCE_URLS', 'ADD', 'DESTINATION', 'VISIBILITY', 'REMOVE', 'IGNORE_RELEASES']
+        for (key, _), env in zip(actual, variables, strict=True):
+            self.assertIn(f'{env}: ${{{{ inputs.{key} }}}}', text)
+        self.assertIn('config.json in repo-mirror-control-config', text)
 
     def test_shell_only_forwards_manual_options_as_data(self):
         body = WORKFLOW.read_text().split('        run: |\n', 1)[1]

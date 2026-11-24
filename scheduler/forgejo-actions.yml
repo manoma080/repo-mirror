@@ -5,22 +5,23 @@ on:
       timezone: Europe/Helsinki
   workflow_dispatch:
     inputs:
-      source_urls:
+      # Forgejo sorts these keys alphabetically in the dispatch form.
+      input_01_source_urls:
         description: 'Comma-separated source URLs (blank mirrors all)'
         required: false
         type: string
         default: ''
-      add_to_config:
-        description: 'Save these URLs to config-forgejo.json in repo-mirror-config'
+      input_02_add_to_config:
+        description: 'Save these URLs to config.json in repo-mirror-control-config (unticked = one-time mirror only)'
         required: false
         type: boolean
         default: false
-      destination_name:
+      input_03_destination_name:
         description: 'Optional destination name (one source URL only)'
         required: false
         type: string
         default: ''
-      visibility:
+      input_04_visibility:
         description: 'Visibility for newly created destinations only'
         required: false
         type: choice
@@ -29,12 +30,12 @@ on:
           - private
           - public
         default: unchanged
-      remove_from_config:
+      input_05_remove_from_config:
         description: 'Remove URLs from config only; no mirroring'
         required: false
         type: boolean
         default: false
-      ignore_releases:
+      input_06_ignore_releases:
         description: 'Ignore releases for these URLs (keep = use each saved repository setting)'
         required: false
         type: choice
@@ -54,12 +55,12 @@ jobs:
       - name: Run installed launcher
         env:
           EVENT: ${{ forgejo.event_name }}
-          SOURCE_URLS: ${{ inputs.source_urls }}
-          ADD: ${{ inputs.add_to_config }}
-          REMOVE: ${{ inputs.remove_from_config }}
-          DESTINATION: ${{ inputs.destination_name }}
-          VISIBILITY: ${{ inputs.visibility }}
-          IGNORE_RELEASES: ${{ inputs.ignore_releases }}
+          SOURCE_URLS: ${{ inputs.input_01_source_urls }}
+          ADD: ${{ inputs.input_02_add_to_config }}
+          REMOVE: ${{ inputs.input_05_remove_from_config }}
+          DESTINATION: ${{ inputs.input_03_destination_name }}
+          VISIBILITY: ${{ inputs.input_04_visibility }}
+          IGNORE_RELEASES: ${{ inputs.input_06_ignore_releases }}
         run: |
           set -eu
           unset FORGEJO_MANUAL_INPUTS
