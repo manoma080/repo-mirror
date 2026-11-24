@@ -639,9 +639,16 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                                   else entry['url'])
             public_target = bool(entry and entry.get('visibility') == 'public')
 
+            # A public repository can have authenticated-only drafts and
+            # assets. The source must be read anonymously for a public mirror.
+            if public_target and source['type'] == 'github':
+                source, source_token, src, source_name = source_pipeline(_source_url(identity, entry), None)
+
             def verify_public_github():
                 if public_target and source['type'] == 'github':
                     metadata = src.request('GET', upstream)
+                    if not isinstance(metadata, dict):
+                        raise ValueError('public mirror requires a public source')
                     sid = entry.get('source_id') if entry else None
                     verify_source_pin(identity, metadata, sid if sid is not None else metadata.get('id'))
                     if metadata.get('private') is not False:
@@ -680,6 +687,8 @@ def _sync_requested(args, requested, dest, token, local_token, secret, journal_d
                     dest.revalidate(name, recovery_identity, expected)
             guard()
             recovery_options = {'recovery_identity': recovery_identity} if entry and 'legacy_identity' in entry else {}
+            if public_target and source['type'] == 'github':
+                recovery_options['anonymous_github'] = True
             sync_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)
             guard()
             before = snapshot_refs(dest, name, git_source, source_token=source_token, expected=expected, **recovery_options)

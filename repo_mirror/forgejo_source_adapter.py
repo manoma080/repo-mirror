@@ -4,10 +4,10 @@ import sys
 import time
 from urllib.error import HTTPError
 from urllib.parse import unquote, urlsplit
-from urllib.request import ProxyHandler, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
 
 from repo_mirror.forgejo_local import source_identity
-from repo_mirror.forgejo_releases import GitHubReleases, _id
+from repo_mirror.forgejo_releases import GitHubReleases, _download, _id
 from repo_mirror.github_api import SafeRedirect, SourceAPI, https_origin, transient_transfer_error, transfer_retry_delay
 
 
@@ -34,6 +34,7 @@ class ForgejoSourceAdapter:
         if isinstance(self.api, SourceAPI):
             self.api.restrict_origin('https://api.github.com')
         self.client = client if client is not None else GitHubReleases(owner_repo, token)
+        self.anonymous = token is None and client is None
         if client is None:
             self.client.api.opener = build_opener(ProxyHandler({}), _AssetRedirect())
         self._assets = {}
@@ -77,6 +78,10 @@ class ForgejoSourceAdapter:
             output.seek(position)
             output.truncate()
             try:
+                if self.anonymous:
+                    req = Request(url, headers={'User-Agent': 'repo-mirror'})
+                    with self.client.api.opener.open(req, timeout=60) as response:
+                        return _download(response, self._assets[url], output, retry_truncated=True)
                 return self.client._download_once(self._assets[url], output, retry_truncated=True)
             except Exception as exc:
                 output.seek(position)
