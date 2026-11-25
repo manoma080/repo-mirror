@@ -81,6 +81,8 @@ def main(argv=None):
         config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
     named_config = isinstance(config, dict) and ('destinations' in config or 'repositories' in config)
     config = normalize_config(config)
+    if config.get('auto_discoveries'):
+        raise ValueError('auto_discoveries is not implemented yet; configure explicit repositories')
     if 'destination_profile' in config:
         from repo_mirror.destination_profile import validate_runtime
         validate_runtime(config['destination_profile'], 'github', 'https://github.com', owner, 'mirrorbot')

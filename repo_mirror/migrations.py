@@ -91,7 +91,7 @@ def _source_of(repository):
     source = repository.get('source')
     if not isinstance(source, dict) or not isinstance(source.get('url'), str):
         raise ValueError('migration configuration invalid')
-    kind, base, owner, name = parse_repo_url(source['url'])
+    kind, base, owner, name = parse_repo_url(source['url'], source_type=source.get('type'))
     return kind, base, owner, name
 
 
@@ -363,6 +363,11 @@ def rewrite_config(raw, entry):
     if profile != entry['destination']['profile']:
         raise ValueError('migration destination identity mismatch')
     updated = json.loads(json.dumps(repository))
+    if 'discovered_by' in updated:
+        _, old_base, old_owner, _ = _source_of(repository)
+        if (old_base.lower() != canonical_origin(entry['source']['origin']).lower()
+                or old_owner.lower() != entry['source']['owner'].lower()):
+            updated.pop('discovered_by', None)
     updated['source']['url'] = _published_target(entry)
     updated['source']['id'] = entry['source']['id']
     target = updated['mirrors'][profile]
