@@ -155,6 +155,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "destination_account_type must be personal or organization",
         "sources must be a list",
         "duplicate destination repository",
+        "auto_discoveries is not implemented yet; configure explicit repositories",
         # Migration transaction failures: fixed reasons only, never free text.
         "migration configuration invalid",
         "migration configuration changed by another writer",

@@ -90,6 +90,20 @@ Exactly one destination profile and one mirror per repository are supported; ext
 
 Legacy `destination_account_type` and `sources` configurations remain supported, including `repos: "all"` (owned public repositories, not stars), custom `prefix`, and per-repository `destinations` mappings using `source_id` and `destination_id`. Do not mix the formats.
 
+### Auto-discoveries
+
+Named configurations also accept an optional top-level `auto_discoveries` array of owner/group rules and an optional per-repository `discovered_by` back-pointer matching a declared rule's canonical `url`. Schema validation is active—including requiring explicit `"type": "gitlab"` for self-hosted GitLab rules and positive integer `"id"` for all GitLab rules—while discovery execution is not yet implemented (running `cli.py` with any `auto_discoveries` rule raises `auto_discoveries is not implemented yet; configure explicit repositories`). See [docs/auto-discoveries.md](docs/auto-discoveries.md) for the full design and field reference.
+
+```json
+{
+  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "manoma080", "auth": "mirrorbot"}},
+  "repositories": [],
+  "auto_discoveries": [
+    {"url": "https://github.com/BlackBearRevived", "visibility": "private"}
+  ]
+}
+```
+
 ## GitLab sources
 
 These are code-level capabilities in this checkout, not a claim of a live deployment or end-to-end provider verification. Source access is anonymous and public-only by default, including releases and linked files; private projects are not supported. An optional read token raises gitlab.com's rate limits: set `MIRROR_GITLAB_TOKEN` for the workflow, or `--gitlab-token-file` (owner-only, single line) on the local runner. It applies only to `https://gitlab.com`; self-hosted GitLab origins stay anonymous. The token is sent as `PRIVATE-TOKEN` to that API origin only and never to asset downloads or redirect targets. Use a credential-free HTTPS origin and project URL. Nested group paths are supported; `gitlab.com` is recognized automatically, but a self-hosted GitLab source must be explicitly typed `gitlab`, otherwise it is treated as Forgejo. Obtain IDs from trusted provider records, independently verify the source, destination and ownership, and keep those pins and the source marker stable. GitLab IDs are scoped to their instance, not globally. Pin checks and operations are separate requests, not atomic protection against replacement or changes between checks.

@@ -12,11 +12,14 @@ Errors never echo the input, which may contain credentials.
 
 import json
 import os
+import re
 import sys
 from urllib.parse import urlsplit
 
 from repo_mirror.constants import NAME
 from repo_mirror.source_filter import entry_urls
+
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 
 
 def parse_repo_url(url, *, allow_forgejo_port=False, source_type=None):
@@ -56,6 +59,61 @@ def parse_repo_url(url, *, allow_forgejo_port=False, source_type=None):
         return "github", "https://github.com", owner, name
     authority = parsed.netloc if parsed.port is not None else host
     return kind, "https://" + authority, owner, name
+
+
+def parse_owner_url(url, *, allow_forgejo_port=False, source_type=None):
+    """Parse an exact credential-free HTTPS owner or GitLab group URL."""
+    if not isinstance(url, str) or not url:
+        raise ValueError("invalid source owner URL")
+    if source_type is not None and (not isinstance(source_type, str) or source_type not in ("github", "forgejo", "gitlab")):
+        raise ValueError("invalid source owner URL")
+    if not all(33 <= ord(c) <= 126 for c in url):
+        raise ValueError("invalid source owner URL")
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        raise ValueError("invalid source owner URL") from None
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or "@" in parsed.netloc
+        or (port is None and ":" in parsed.netloc)
+        or (port is not None and not (allow_forgejo_port and host != "github.com" and port > 0))
+        or host.startswith("github.com.")
+        or not all(_HOST_LABEL.fullmatch(label) for label in host.split("."))
+        or parsed.query
+        or parsed.fragment
+        or "?" in url
+        or "#" in url
+        or not parsed.path.startswith("/")
+        or parsed.path.endswith("/")
+    ):
+        raise ValueError("invalid source owner URL")
+    segments = tuple(parsed.path.split("/")[1:])
+    if not segments or any(
+        not seg or not NAME.fullmatch(seg) or seg in (".", "..") or seg.lower().endswith(".git")
+        for seg in segments
+    ):
+        raise ValueError("invalid source owner URL")
+    kind = source_type if source_type is not None else (
+        "github" if host == "github.com" else "gitlab" if host == "gitlab.com" else "forgejo"
+    )
+    if (
+        (host == "github.com" and kind != "github")
+        or (kind == "github" and host != "github.com")
+        or (host == "gitlab.com" and kind != "gitlab")
+    ):
+        raise ValueError("invalid source owner URL")
+    if kind != "gitlab" and len(segments) != 1:
+        raise ValueError("invalid source owner URL")
+    if host == "github.com":
+        return "github", "https://github.com", segments
+    authority = f"{host}:{port}" if port is not None else host
+    return kind, "https://" + authority, segments
 
 
 def _source_for(source_type, base_url, owner, name):
