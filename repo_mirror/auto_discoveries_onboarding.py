@@ -1,7 +1,8 @@
-"""Fail-closed onboarding pass for ``auto_discoveries`` rules on the GitHub runner."""
+"""Fail-closed onboarding pass for ``auto_discoveries`` rules."""
 
 import copy
 from dataclasses import dataclass
+from functools import partial
 import json
 import re
 import sys
@@ -10,11 +11,16 @@ from urllib.parse import quote
 
 from repo_mirror.adhoc import parse_owner_url, parse_repo_url
 from repo_mirror.config_json import unique_pairs
-from repo_mirror.config_named import normalize_config
+from repo_mirror.config_named import _normalize_auto_discoveries, normalize_config
 from repo_mirror.constants import GITHUB, NAME
+from repo_mirror.forgejo_git import APIError, ForgejoDestination, LocalForgejoAPI, _name, _source_marker
+from repo_mirror.forgejo_sync import parse_manifest, parse_source
 from repo_mirror.github_api import API as GitHubAPI, not_found
+from repo_mirror.gitlab_onboarding_forgejo import validate_groups
 from repo_mirror.gitlab_onboarding_github import OnboardingPublicationError
+from repo_mirror.host_limits import CONFIG_KEY
 from repo_mirror.logging_utils import error_detail, safe_label
+from repo_mirror.migrations import blob_sha
 from repo_mirror.repository import validate_source_clone_url
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker
 
@@ -211,8 +217,8 @@ def _listing_url(rule, owner_info):
     return f"{api_base}/users/{owner_info['id']}/projects"
 
 
-def discover_rule_repositories(rule, owner_info, api):
-    """Discover and validate all repositories as ``(name, source_id, clone_url, full_name)``."""
+def _discover_rule_repositories_detailed(rule, owner_info, api):
+    """Discover and validate repositories as ``(name, source_id, clone_url, full_name, source_is_public)``."""
     items = api.pages(_listing_url(rule, owner_info))
     if not isinstance(items, list):
         raise ValueError('pagination response is not an array')
@@ -233,11 +239,13 @@ def discover_rule_repositories(rule, owner_info, api):
             source_id = item.get('id')
             full_name = item.get('path_with_namespace')
             clone_url = item.get('http_url_to_repo')
+            source_is_public = True
         else:
             name = item.get('name')
             source_id = item.get('id')
             full_name = item.get('full_name')
             clone_url = item.get('clone_url')
+            source_is_public = item.get('private') is False
         if not isinstance(name, str) or not NAME.fullmatch(name) or name in ('.', '..'):
             raise ValueError('invalid discovered repository name')
         if type(source_id) is not int or source_id <= 0 or not isinstance(full_name, str):
@@ -255,17 +263,23 @@ def discover_rule_repositories(rule, owner_info, api):
             raise ValueError('duplicate discovered repository')
         seen_names.add(name.lower())
         seen_ids.add(source_id)
-        records.append((name, source_id, clone_url, full_name))
+        records.append((name, source_id, clone_url, full_name, source_is_public))
     records.sort(key=lambda record: (record[0].lower(), record[0]))
     return records
 
 
-def _parse_existing_entries(repositories, *, rewrite_rule_url=None, rewrite_owner=None):
+def discover_rule_repositories(rule, owner_info, api):
+    """Discover and validate all repositories as ``(name, source_id, clone_url, full_name)``."""
+    return [record[:4] for record in _discover_rule_repositories_detailed(rule, owner_info, api)]
+
+
+def _parse_existing_entries(repositories, *, rewrite_rule_url=None, rewrite_owner=None, allow_forgejo_port=False):
     parsed = []
     for idx, entry in enumerate(repositories):
         kind, base, owner, name = parse_repo_url(
             entry['source']['url'],
             source_type=entry['source'].get('type'),
+            allow_forgejo_port=allow_forgejo_port,
         )
         if rewrite_rule_url is not None and entry.get('discovered_by') == rewrite_rule_url:
             owner = rewrite_owner
@@ -273,18 +287,23 @@ def _parse_existing_entries(repositories, *, rewrite_rule_url=None, rewrite_owne
     return parsed
 
 
-def _configured_child_dest_name(rule, child, profile):
+def _configured_child_dest_name(rule, child, profile, *, allow_forgejo_port=False):
     mirror = child['mirrors'][profile]
     if 'name' in mirror:
         return mirror['name']
-    _, _, _, child_name = parse_repo_url(child['source']['url'], source_type=child['source'].get('type'))
+    _, _, _, child_name = parse_repo_url(
+        child['source']['url'],
+        source_type=child['source'].get('type'),
+        allow_forgejo_port=allow_forgejo_port,
+    )
     ov = next((v for k, v in rule['overrides'].items() if k.lower() == child_name.lower()), None)
     if ov and 'name' in ov:
         return ov['name']
     return f"{rule['destination_name_prefix']}-{child_name}"
 
 
-def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, api):
+def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, api, *, runner='github'):
+    allow_forgejo_port = runner == 'forgejo'
     owner_info = resolve_owner(rule, api)
     needs_id_pin = 'id' not in rule
     relocated_to = owner_info.get('relocated_owner')
@@ -302,7 +321,11 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
                 mirror = child['mirrors'][profile]
                 if 'name' not in mirror:
                     continue
-                _, _, _, child_name = parse_repo_url(child['source']['url'], source_type=child['source'].get('type'))
+                _, _, _, child_name = parse_repo_url(
+                    child['source']['url'],
+                    source_type=child['source'].get('type'),
+                    allow_forgejo_port=allow_forgejo_port,
+                )
                 ov = next((v for k, v in rule['overrides'].items() if k.lower() == child_name.lower()), None)
                 if ov and 'name' in ov:
                     continue
@@ -320,7 +343,7 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
     else:
         effective_rule = rule
 
-    discovered = discover_rule_repositories(effective_rule, owner_info, api)
+    discovered = _discover_rule_repositories_detailed(effective_rule, owner_info, api)
     if not discovered and rule_children:
         raise ValueError('auto-discovery returned zero repositories for a rule with existing entries')
 
@@ -328,13 +351,14 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
         repositories,
         rewrite_rule_url=old_rule_url if relocated_to is not None else None,
         rewrite_owner=relocated_to,
+        allow_forgejo_port=allow_forgejo_port,
     )
     exclude_lower = {name.lower() for name in effective_rule['exclude']}
     excluded_count = 0
     tracked_count = 0
     planned = []
 
-    for name, source_id, clone_url, full_name in discovered:
+    for name, source_id, clone_url, full_name, source_is_public in discovered:
         if name.lower() in exclude_lower:
             excluded_count += 1
             continue
@@ -382,7 +406,11 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
             or _GENERATED.fullmatch(dest_name)
         ):
             raise ValueError('invalid destination repository name')
-        visibility = ov['visibility'] if (ov and 'visibility' in ov) else effective_rule['visibility']
+        requested_visibility = ov['visibility'] if (ov and 'visibility' in ov) else effective_rule['visibility']
+        if runner == 'forgejo':
+            visibility = 'public' if (requested_visibility == 'public' and source_is_public) else 'private'
+        else:
+            visibility = requested_visibility
         ignore_releases = ov['ignore_releases'] if (ov and 'ignore_releases' in ov) else effective_rule['ignore_releases']
         planned.append(
             PlannedInduction(
@@ -400,17 +428,20 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
             )
         )
 
-    raw_discovered_ids = {source_id for _, source_id, _, _ in discovered}
+    raw_discovered_ids = {source_id for _, source_id, _, _, _ in discovered}
     orphaned_children = []
     for child in rule_children:
         if child['source'].get('id') not in raw_discovered_ids:
             _, _, c_owner, c_name = parse_repo_url(
                 child['source']['url'],
                 source_type=child['source'].get('type'),
+                allow_forgejo_port=allow_forgejo_port,
             )
             if relocated_to is not None:
                 c_owner = relocated_to
-            orphaned_children.append((c_owner, c_name, _configured_child_dest_name(effective_rule, child, profile)))
+            orphaned_children.append(
+                (c_owner, c_name, _configured_child_dest_name(effective_rule, child, profile, allow_forgejo_port=allow_forgejo_port))
+            )
 
     return RulePlan(
         index=rule_index,
@@ -431,6 +462,222 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
     )
 
 
+class CASConfigStore:
+    """Adapt a byte-level CAS (``read()`` / ``replace(before, after)``) to ``store``."""
+
+    def __init__(self, cas):
+        self.cas = cas
+
+    def read(self):
+        data = self.cas.read()
+        if not isinstance(data, bytes):
+            raise ValueError('invalid configuration bytes')
+        return data, blob_sha(data)
+
+    def publish(self, expected_sha, replacement):
+        current, sha = self.read()
+        if sha != expected_sha:
+            raise ValueError('authoritative configuration differs from checkout')
+        self.cas.replace(current, replacement)
+
+
+class GitHubDestinationOnboardingAdapter:
+    """Destination adapter for GitHub onboarding (byte-identical to original GitHub flow)."""
+
+    def __init__(self, dst, owner, account_type):
+        self.dst = dst
+        self.owner = owner
+        self.account_type = account_type
+        self._created_state = {}
+
+    def marker_for(self, item):
+        source_stub = {'type': item.source_type, 'base_url': item.base_url, 'owner': item.owner}
+        return source_marker(source_stub, item.name)
+
+    def _repo_target(self, dest_name):
+        return f"{GITHUB}/repos/{quote(self.owner, safe='')}/{quote(dest_name, safe='')}"
+
+    def owner_identity(self):
+        if self.account_type != 'personal':
+            return self.owner
+        identity = self.dst.request('GET', GITHUB + '/user')
+        if not isinstance(identity, dict) or str(identity.get('login', '')).lower() != self.owner.lower():
+            raise RuntimeError('authenticated GitHub user does not match configured destination')
+        return identity['login']
+
+    def get_repository(self, dest_name):
+        return get_existing(self.dst, self._repo_target(dest_name))
+
+    def create_repository(self, dest_name, private, marker):
+        payload = {
+            'name': dest_name,
+            'private': private,
+            'auto_init': False,
+            'description': marker + ' [repo-mirror:initializing:v1]',
+        }
+        if self.account_type == 'personal' and isinstance(self.dst, GitHubAPI):
+            created = self.dst.create_personal_repository(self.owner, payload)
+        else:
+            if self.account_type == 'personal':
+                self.owner_identity()
+            endpoint = '/user/repos' if self.account_type == 'personal' else '/orgs/' + quote(self.owner, safe='') + '/repos'
+            created = self.dst.request('POST', GITHUB + endpoint, payload)
+        if not isinstance(created, dict) or str(created.get('full_name', '')).lower() != (self.owner + '/' + dest_name).lower():
+            raise RuntimeError('created repository owner does not match configured destination')
+        created_id = created.get('id')
+        if type(created_id) is not int or created_id <= 0:
+            raise ValueError('invalid created destination repository id')
+        if 'private' in created and created['private'] is not private:
+            raise ValueError('created destination repository identity not verified')
+        check_existing(created, marker)
+        self._created_state[dest_name] = {'private': private, 'marker': marker}
+        return created_id
+
+    def disable_actions(self, dest_name):
+        target = self._repo_target(dest_name)
+        self.dst.request('PUT', target + '/actions/permissions', {'enabled': False})
+        permissions = self.dst.request('GET', target + '/actions/permissions')
+        if not isinstance(permissions, dict) or permissions.get('enabled') is not False:
+            raise ValueError('destination Actions not verified disabled')
+
+    def verify_repository(self, dest_name, expected_id, *, private=None, marker=None):
+        state = self._created_state.get(dest_name, {})
+        if private is None:
+            private = state.get('private')
+        if marker is None:
+            marker = state.get('marker')
+        readback = self.get_repository(dest_name)
+        if (
+            not isinstance(readback, dict)
+            or type(readback.get('id')) is not int
+            or readback['id'] != expected_id
+            or str(readback.get('full_name', '')).lower() != (self.owner + '/' + dest_name).lower()
+            or ('private' in readback and private is not None and readback['private'] is not private)
+        ):
+            raise ValueError('created destination repository identity not verified')
+        if marker is not None:
+            check_existing(readback, marker)
+        return readback
+
+
+class ForgejoDestinationOnboardingAdapter:
+    """Destination adapter for local Forgejo onboarding via the sync API path."""
+
+    def __init__(self, api, owner, *, organization=False):
+        self.api = api
+        self.owner = _name(owner)
+        self.organization = bool(organization)
+        self._created_state = {}
+
+    def _helper(self):
+        return ForgejoDestination(self.api, self.owner, organization=self.organization)
+
+    def marker_for(self, item):
+        identity = parse_source(f'{item.base_url}/{item.owner}/{item.name}', item.source_type)
+        return _source_marker(identity)
+
+    def owner_identity(self):
+        if self.organization:
+            return self.owner
+        request = self.api.request
+        if isinstance(self.api, LocalForgejoAPI):
+            request = partial(request, token=self.api.token())
+        identity = request('GET', '/api/v1/user')
+        login = identity.get('login') if isinstance(identity, dict) else None
+        if not isinstance(login, str) or not login or login.lower() != self.owner.lower():
+            raise RuntimeError('authenticated Forgejo user does not match configured destination')
+        return login
+
+    def get_repository(self, dest_name):
+        dest_name = _name(dest_name)
+        try:
+            return self.api.request('GET', f'/api/v1/repos/{self.owner}/{dest_name}')
+        except APIError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def create_repository(self, dest_name, private, marker):
+        dest_name = _name(dest_name)
+        request = self.api.request
+        if not self.organization:
+            if isinstance(self.api, LocalForgejoAPI):
+                request = partial(request, token=self.api.token())
+            identity = request('GET', '/api/v1/user')
+            login = identity.get('login') if isinstance(identity, dict) else None
+            if not isinstance(login, str) or not login or login.lower() != self.owner.lower():
+                raise RuntimeError('authenticated Forgejo user does not match configured destination')
+        endpoint = f'/api/v1/orgs/{self.owner}/repos' if self.organization else '/api/v1/user/repos'
+        created = request(
+            'POST',
+            endpoint,
+            {
+                'name': dest_name,
+                'private': private,
+                'auto_init': False,
+                'description': marker + ' [repo-mirror:initializing:v1]',
+                'has_actions': False,
+            },
+        )
+        self._helper()._verify(created, dest_name, marker, actions=False, private=private)
+        self._created_state[dest_name] = {
+            'private': private,
+            'marker': marker,
+            'description': created['description'],
+            'has_actions': created.get('has_actions'),
+        }
+        return created['id']
+
+    def disable_actions(self, dest_name):
+        state = self._created_state.get(dest_name)
+        if state is not None and state.get('has_actions') is not False:
+            raise RuntimeError('Forgejo repository identity, provenance, privacy or Actions not verified')
+
+    def verify_repository(self, dest_name, expected_id, *, private=None, marker=None):
+        dest_name = _name(dest_name)
+        state = self._created_state.get(dest_name, {})
+        if private is None:
+            private = state.get('private', True)
+        if marker is None:
+            marker = state.get('marker')
+        readback = self.get_repository(dest_name)
+        if marker is None:
+            raise ValueError('destination changed during creation')
+        self._helper()._verify(readback, dest_name, marker, actions=True, private=private)
+        if readback['id'] != expected_id:
+            raise ValueError('destination changed during creation')
+        expected_description = state.get('description')
+        if expected_description is not None and readback.get('description') != expected_description:
+            raise ValueError('destination changed during creation')
+        return readback
+
+
+def _validate_document(doc, runner):
+    if runner == 'github':
+        return normalize_config(doc)
+    if runner != 'forgejo':
+        raise ValueError('invalid onboarding runner')
+    if not isinstance(doc, dict):
+        raise ValueError('invalid named manifest')
+    if 'groups' in doc:
+        validate_groups(doc['groups'])
+        if set(doc) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'}:
+            raise ValueError('invalid group manifest')
+        worker_doc = {k: v for k, v in doc.items() if k != 'groups'}
+    else:
+        worker_doc = doc
+    parse_manifest(worker_doc)
+    return worker_doc
+
+
+def _extract_rules(raw_config, validated, runner):
+    if runner == 'github':
+        return validated.get('auto_discoveries', [])
+    if 'auto_discoveries' in raw_config:
+        return _normalize_auto_discoveries(raw_config['auto_discoveries'])
+    return []
+
+
 def _build_repository_entry(item, profile, dest_id):
     source_obj = {'url': f'{item.base_url}/{item.owner}/{item.name}', 'id': item.source_id}
     if item.source_type == 'gitlab' and item.base_url.lower() != 'https://gitlab.com':
@@ -449,7 +696,7 @@ def _build_repository_entry(item, profile, dest_id):
     }
 
 
-def _collect_existing_destination_names(raw_config, profile, rules_by_url):
+def _collect_existing_destination_names(raw_config, profile, rules_by_url, *, forgejo=False):
     names = set()
     for entry in raw_config['repositories']:
         mirror = entry['mirrors'][profile]
@@ -457,16 +704,22 @@ def _collect_existing_destination_names(raw_config, profile, rules_by_url):
             names.add(mirror['name'].lower())
         elif 'discovered_by' in entry:
             rule = rules_by_url[entry['discovered_by']]
-            names.add(_configured_child_dest_name(rule, entry, profile).lower())
+            names.add(_configured_child_dest_name(rule, entry, profile, allow_forgejo_port=forgejo).lower())
         else:
             kind, base, owner, name = parse_repo_url(
                 entry['source']['url'],
                 source_type=entry['source'].get('type'),
+                allow_forgejo_port=forgejo,
             )
-            names.add(destination_name({'type': kind, 'base_url': base, 'owner': owner, 'repos': [name]}, name).lower())
+            if forgejo:
+                names.add(name.lower())
+            else:
+                names.add(destination_name({'type': kind, 'base_url': base, 'owner': owner, 'repos': [name]}, name).lower())
         legacy = mirror.get('legacy')
-        if isinstance(legacy, dict) and isinstance(legacy.get('destination_name'), str):
-            names.add(legacy['destination_name'].lower())
+        if isinstance(legacy, dict):
+            for legacy_key in ('destination_name', 'name'):
+                if isinstance(legacy.get(legacy_key), str):
+                    names.add(legacy[legacy_key].lower())
     return names
 
 
@@ -479,7 +732,8 @@ def _log_rule_failure(rule_plan, exc, stream):
     )
 
 
-def _prevalidate_plans(raw_config, profile, plans, dst, owner, stream):
+def _prevalidate_plans(raw_config, profile, plans, destination_adapter, stream, *, runner='github'):
+    allow_forgejo_port = runner == 'forgejo'
     rules_by_url = {plan.rule['url']: plan.rule for plan in plans}
     planned_dests = set()
     projected = copy.deepcopy(raw_config)
@@ -496,10 +750,16 @@ def _prevalidate_plans(raw_config, profile, plans, dst, owner, stream):
     for entry in projected['repositories']:
         rule_plan = reloc_by_old_url.get(entry.get('discovered_by'))
         if rule_plan is not None:
-            _, _, _, child_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
+            _, _, _, child_name = parse_repo_url(
+                entry['source']['url'],
+                source_type=entry['source'].get('type'),
+                allow_forgejo_port=allow_forgejo_port,
+            )
             entry['source']['url'] = f"{rule_plan.rule['base_url']}/{rule_plan.relocated_to}/{child_name}"
             entry['discovered_by'] = rule_plan.rule['url']
-    existing_dests = _collect_existing_destination_names(projected, profile, rules_by_url)
+    existing_dests = _collect_existing_destination_names(
+        projected, profile, rules_by_url, forgejo=allow_forgejo_port
+    )
     for rule_plan in plans:
         for item in rule_plan.planned:
             key = item.dest_name.lower()
@@ -510,7 +770,7 @@ def _prevalidate_plans(raw_config, profile, plans, dst, owner, stream):
             planned_dests.add(key)
             projected['repositories'].append(_build_repository_entry(item, profile, 1))
     try:
-        normalize_config(projected)
+        _validate_document(projected, runner)
     except Exception as exc:
         if plans:
             target_plan = next((p for p in plans if p.relocated_to is not None), plans[0])
@@ -519,9 +779,8 @@ def _prevalidate_plans(raw_config, profile, plans, dst, owner, stream):
 
     for rule_plan in plans:
         for item in rule_plan.planned:
-            target = f"{GITHUB}/repos/{quote(owner, safe='')}/{quote(item.dest_name, safe='')}"
             try:
-                existing = get_existing(dst, target)
+                existing = destination_adapter.get_repository(item.dest_name)
             except Exception as exc:
                 _log_rule_failure(rule_plan, exc, stream)
                 raise
@@ -531,54 +790,17 @@ def _prevalidate_plans(raw_config, profile, plans, dst, owner, stream):
                 raise exc
 
 
-def _create_destination(item, dst, owner, account_type):
-    source_stub = {'type': item.source_type, 'base_url': item.base_url, 'owner': item.owner}
-    marker = source_marker(source_stub, item.name)
+def _create_destination(item, destination_adapter):
+    marker = destination_adapter.marker_for(item)
     private = item.visibility != 'public'
-    payload = {
-        'name': item.dest_name,
-        'private': private,
-        'auto_init': False,
-        'description': marker + ' [repo-mirror:initializing:v1]',
-    }
-    if account_type == 'personal' and isinstance(dst, GitHubAPI):
-        created = dst.create_personal_repository(owner, payload)
-    else:
-        if account_type == 'personal':
-            identity = dst.request('GET', GITHUB + '/user')
-            if not isinstance(identity, dict) or str(identity.get('login', '')).lower() != owner.lower():
-                raise RuntimeError('authenticated GitHub user does not match configured destination')
-        endpoint = '/user/repos' if account_type == 'personal' else '/orgs/' + quote(owner, safe='') + '/repos'
-        created = dst.request('POST', GITHUB + endpoint, payload)
-    if not isinstance(created, dict) or str(created.get('full_name', '')).lower() != (owner + '/' + item.dest_name).lower():
-        raise RuntimeError('created repository owner does not match configured destination')
-    created_id = created.get('id')
-    if type(created_id) is not int or created_id <= 0:
-        raise ValueError('invalid created destination repository id')
-    if 'private' in created and created['private'] is not private:
-        raise ValueError('created destination repository identity not verified')
-    check_existing(created, marker)
-
-    target = f"{GITHUB}/repos/{quote(owner, safe='')}/{quote(item.dest_name, safe='')}"
-    dst.request('PUT', target + '/actions/permissions', {'enabled': False})
-    permissions = dst.request('GET', target + '/actions/permissions')
-    if not isinstance(permissions, dict) or permissions.get('enabled') is not False:
-        raise ValueError('destination Actions not verified disabled')
-
-    readback = get_existing(dst, target)
-    if (
-        not isinstance(readback, dict)
-        or type(readback.get('id')) is not int
-        or readback['id'] != created_id
-        or str(readback.get('full_name', '')).lower() != (owner + '/' + item.dest_name).lower()
-        or ('private' in readback and readback['private'] is not private)
-    ):
-        raise ValueError('created destination repository identity not verified')
-    check_existing(readback, marker)
+    created_id = destination_adapter.create_repository(item.dest_name, private, marker)
+    destination_adapter.disable_actions(item.dest_name)
+    destination_adapter.verify_repository(item.dest_name, created_id, private=private, marker=marker)
     return created_id
 
 
-def _publish_rule(store, config_bytes, rule_plan, created_entries, profile):
+def _publish_rule(store, config_bytes, rule_plan, created_entries, profile, *, runner='github'):
+    allow_forgejo_port = runner == 'forgejo'
     current, sha = store.read()
     if current != config_bytes:
         raise ValueError('authoritative configuration differs from checkout')
@@ -596,11 +818,15 @@ def _publish_rule(store, config_bytes, rule_plan, created_entries, profile):
             raw_rule['destination_name_prefix'] = rule_plan.preserve_prefix
         for entry in doc['repositories']:
             if entry.get('discovered_by') == rule_plan.old_rule_url:
-                _, _, _, child_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
+                _, _, _, child_name = parse_repo_url(
+                    entry['source']['url'],
+                    source_type=entry['source'].get('type'),
+                    allow_forgejo_port=allow_forgejo_port,
+                )
                 entry['source']['url'] = f"{rule_plan.rule['base_url']}/{rule_plan.relocated_to}/{child_name}"
                 entry['discovered_by'] = rule_plan.rule['url']
     doc['repositories'].extend(created_entries)
-    normalize_config(doc)
+    _validate_document(doc, runner)
     after = (json.dumps(doc, indent=2, ensure_ascii=False) + '\n').encode('utf-8')
     store.publish(sha, after)
     observed, _ = store.read()
@@ -609,7 +835,7 @@ def _publish_rule(store, config_bytes, rule_plan, created_entries, profile):
     return after
 
 
-def _find_orphaned_legacy(raw_config, profile):
+def _find_orphaned_legacy(raw_config, profile, *, allow_forgejo_port=False):
     orphans = []
     for entry in raw_config['repositories']:
         if 'discovered_by' in entry:
@@ -620,21 +846,35 @@ def _find_orphaned_legacy(raw_config, profile):
         kind, _, owner, name = parse_repo_url(
             entry['source']['url'],
             source_type=entry['source'].get('type'),
+            allow_forgejo_port=allow_forgejo_port,
         )
         if kind == 'gitlab':
             orphans.append((owner, name, mirror_name))
     return tuple(orphans)
 
 
-def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, account_type, stream=None):
+def onboard_auto_discoveries(
+    config_bytes,
+    store,
+    source_client,
+    dst=None,
+    *,
+    owner=None,
+    account_type='personal',
+    stream=None,
+    destination_adapter=None,
+    runner='github',
+):
     """Run fail-closed discovery, destination creation, and per-rule CAS publication."""
     stream = sys.stderr if stream is None else stream
+    if destination_adapter is None:
+        destination_adapter = GitHubDestinationOnboardingAdapter(dst, owner, account_type)
     current, _ = store.read()
     if current != config_bytes:
         raise ValueError('authoritative configuration differs from checkout')
     raw_config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
-    normalized = normalize_config(raw_config)
-    rules = normalized.get('auto_discoveries', [])
+    validated = _validate_document(raw_config, runner)
+    rules = _extract_rules(raw_config, validated, runner)
     profile = next(iter(raw_config['destinations']))
 
     plans = []
@@ -650,6 +890,7 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
                     profile,
                     raw_config['repositories'],
                     source_client(rule),
+                    runner=runner,
                 )
             )
         except Exception as exc:
@@ -660,7 +901,7 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
             )
             raise
 
-    _prevalidate_plans(raw_config, profile, plans, dst, owner, stream)
+    _prevalidate_plans(raw_config, profile, plans, destination_adapter, stream, runner=runner)
 
     any_writes = False
     inducted_total = 0
@@ -678,9 +919,11 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
             try:
                 for item in rule_plan.planned:
                     attempted.append(item.dest_name)
-                    dest_id = _create_destination(item, dst, owner, account_type)
+                    dest_id = _create_destination(item, destination_adapter)
                     created_entries.append(_build_repository_entry(item, profile, dest_id))
-                config_bytes = _publish_rule(store, config_bytes, rule_plan, created_entries, profile)
+                config_bytes = _publish_rule(
+                    store, config_bytes, rule_plan, created_entries, profile, runner=runner
+                )
             except Exception as exc:
                 if attempted:
                     wrapped = PartialOnboarding(attempted)
@@ -720,7 +963,9 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
             raise ValueError('authoritative configuration differs from checkout')
 
     final_config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
-    orphaned_legacy = _find_orphaned_legacy(final_config, profile)
+    orphaned_legacy = _find_orphaned_legacy(
+        final_config, profile, allow_forgejo_port=(runner == 'forgejo')
+    )
     return OnboardingResult(
         config_bytes=config_bytes,
         rule_reports=tuple(rule_reports),
@@ -728,6 +973,29 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
         orphaned_legacy=orphaned_legacy,
         inducted_total=inducted_total,
         relocated_rules=tuple(relocated_rules),
+    )
+
+
+def onboard_auto_discoveries_forgejo(
+    config_bytes,
+    cas,
+    source_client,
+    destination_api,
+    *,
+    owner,
+    organization=False,
+    stream=None,
+):
+    """Run fail-closed ``auto_discoveries`` onboarding for the Forgejo runner."""
+    store = CASConfigStore(cas)
+    adapter = ForgejoDestinationOnboardingAdapter(destination_api, owner, organization=organization)
+    return onboard_auto_discoveries(
+        config_bytes,
+        store,
+        source_client,
+        destination_adapter=adapter,
+        runner='forgejo',
+        stream=stream,
     )
 
 

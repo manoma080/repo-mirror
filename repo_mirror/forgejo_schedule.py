@@ -94,6 +94,73 @@ def prepare_manual(args, secret, manifest_bytes, inputs):
     return prepare(args, secret, manifest_bytes, inputs)
 
 
+class _GitLabDiscoveryClient:
+    """Origin-bound GitLab client supporting bounded pagination for onboarding."""
+
+    def __init__(self, origin, token=None):
+        from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
+        self._adapter = GitLabSourceAdapter(origin, 'placeholder/project', 1, token=token)
+
+    def request(self, method, url):
+        if method != 'GET':
+            raise ValueError('read-only GitLab API')
+        return self._adapter._get(url)[0]
+
+    def pages(self, url):
+        result = []
+        page = 1
+        separator = '&' if '?' in url else '?'
+        while page <= 10000:
+            data, headers = self._adapter._get(f'{url}{separator}per_page=100&page={page}')
+            if not isinstance(data, list):
+                raise ValueError('pagination response is not an array')
+            result.extend(data)
+            following = headers.get('X-Next-Page', '')
+            if not following:
+                if len(data) < 100:
+                    return result
+                page += 1
+                continue
+            if not following.isascii() or not following.isdigit() or int(following) <= page:
+                raise ValueError('invalid pagination')
+            page = int(following)
+        raise ValueError('pagination exceeded safety limit')
+
+
+def _build_auto_discovery_source_client(args):
+    from repo_mirror.forgejo_sync import read_owner_secret, read_secure_file
+    from repo_mirror.github_api import AppTokenProvider, SourceAPI
+
+    clients = {}
+
+    def source_client(rule):
+        kind = rule['type']
+        origin = rule['base_url'].rstrip('/')
+        key = (kind, origin.lower())
+        if key in clients:
+            return clients[key]
+        if kind == 'github':
+            if args.app_id and args.private_key_file:
+                private_key = read_secure_file(args.private_key_file)[0]
+                token = AppTokenProvider(args.app_id, private_key, 'manoma080')
+            else:
+                token = os.environ.get('GITHUB_TOKEN') or None
+                if token and ('\n' in token or '\r' in token):
+                    raise ValueError('invalid GITHUB_TOKEN')
+            client = SourceAPI(token)
+            client.restrict_origin('https://api.github.com')
+        elif kind == 'gitlab' and args.gitlab_token_file and origin.lower() == 'https://gitlab.com':
+            gitlab_token = read_owner_secret(args.gitlab_token_file, 'GitLab token')
+            client = _GitLabDiscoveryClient(origin, token=gitlab_token)
+        else:
+            client = SourceAPI(None)
+            client.restrict_origin(origin)
+        clients[key] = client
+        return client
+
+    return source_client
+
+
 def main(argv=None):
     started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -143,21 +210,24 @@ def main(argv=None):
             print('GitLab group discovery is not supported by the Forgejo scheduler', file=sys.stderr)
             return 2
         groups = sources.get('groups') if isinstance(sources, dict) else None
+        auto_discoveries = sources.get('auto_discoveries') if isinstance(sources, dict) else None
         if groups is not None:
             from repo_mirror.gitlab_onboarding_forgejo import validate_groups
             validate_groups(groups)
-            if set(sources) - {CONFIG_KEY} != {'destinations', 'repositories', 'groups'} or not has_authority or args.asset_max_bytes is None:
+            if set(sources) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'} or not has_authority or args.asset_max_bytes is None:
                 raise ValueError('group onboarding requires authoritative config and asset limit')
             worker_manifest = {k: v for k, v in sources.items() if k != 'groups'}
-            if worker_manifest.get('repositories'):
-                validate_sources(worker_manifest)
-            else:
-                # Validate destination profile even for a group-only document.
-                if not isinstance(worker_manifest.get('destinations'), dict) or len(worker_manifest['destinations']) != 1:
-                    raise ValueError('invalid destination')
+            validate_sources(worker_manifest)
         else:
             worker_manifest = sources
             validate_sources(sources)
+        if auto_discoveries:
+            if not has_authority:
+                raise ValueError('auto-discovery onboarding requires authoritative management configuration')
+            from repo_mirror.config_named import _normalize_auto_discoveries
+            if args.asset_max_bytes is None and any(
+                    rule['type'] == 'gitlab' for rule in _normalize_auto_discoveries(auto_discoveries)):
+                raise ValueError('Forgejo asset byte limit must be configured')
         if isinstance(sources, dict):
             settings = next(iter(sources['destinations'].values()))
             if 'type' in settings:
@@ -173,6 +243,7 @@ def main(argv=None):
             # removed entirely; retained pins alone do not authorize a sync.
             entries = [entry for entry in entries if not (
                 entry.get('source_type') == 'gitlab' and
+                not entry.get('discovered_by') and
                 re.fullmatch(r'gitlab-[0-9a-f]{24}', entry.get('destination_name', '')))]
         if args.asset_max_bytes is None and any(
                 e.get('source_type') == 'gitlab' or e['url'].startswith('https://gitlab.com/') for e in entries):
@@ -298,6 +369,7 @@ def main(argv=None):
                     except Exception:
                         print('Migration: FAILED: unexpected migration failure', flush=True)
                         return 1
+                active_bindings = set()
                 if groups and selected is None:
                     if recorded:
                         print('Group onboarding: FAILED: pending migration requires reconciliation', flush=True)
@@ -305,10 +377,10 @@ def main(argv=None):
                     try:
                         from repo_mirror.gitlab_onboarding_forgejo import AnonymousGroupAPI, PartialOnboarding, onboard
                         from repo_mirror.forgejo_git import LocalForgejoAPI
-                        transaction = forgejo_migration.build_migration(args, secret)
+                        if transaction is None:
+                            transaction = forgejo_migration.build_migration(args, secret)
                         destination_api = LocalForgejoAPI(f'http://127.0.0.1:{args.port}', args.token_file)
                         source_api = AnonymousGroupAPI({g['base_url'] for g in groups})
-                        active_bindings = set()
                         manifest_bytes = onboard(manifest_bytes, source_api, destination_api, transaction.cas, args.owner,
                                                  organization=args.organization, active_bindings=active_bindings)
                         expanded = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
@@ -318,7 +390,7 @@ def main(argv=None):
                             source = repo['source']
                             name = repo['mirrors'][profile].get('name', '')
                             if source.get('type') == 'gitlab' and re.fullmatch(r'gitlab-[0-9a-f]{24}', name):
-                                return (source.get('url'), source.get('id'), name) in active_bindings
+                                return bool(repo.get('discovered_by')) or (source.get('url'), source.get('id'), name) in active_bindings
                             return True
                         worker_manifest['repositories'] = [r for r in worker_manifest['repositories'] if scheduled(r)]
                         entries = parse_manifest(worker_manifest) if worker_manifest['repositories'] else []
@@ -328,6 +400,56 @@ def main(argv=None):
                         return 1
                     except Exception:
                         print('Group onboarding: FAILED: discovery or publication refused', flush=True)
+                        return 1
+                onboarding_result = None
+                if auto_discoveries and selected is None:
+                    if recorded:
+                        print('Auto-discovery onboarding: FAILED: pending migration requires reconciliation', flush=True)
+                        return 1
+                    try:
+                        from repo_mirror.auto_discoveries_onboarding import PartialOnboarding, onboard_auto_discoveries_forgejo
+                        from repo_mirror.forgejo_git import LocalForgejoAPI
+                        if transaction is None:
+                            transaction = forgejo_migration.build_migration(args, secret)
+                        if transaction is None:
+                            raise ValueError('auto-discovery onboarding requires authoritative management configuration')
+                        destination_api = getattr(getattr(transaction, 'destination', None), 'api', None)
+                        if destination_api is None:
+                            destination_api = LocalForgejoAPI(f'http://127.0.0.1:{args.port}', args.token_file)
+                        source_client = _build_auto_discovery_source_client(args)
+                        onboarding_result = onboard_auto_discoveries_forgejo(
+                            manifest_bytes,
+                            transaction.cas,
+                            source_client,
+                            destination_api,
+                            owner=args.owner,
+                            organization=args.organization,
+                            stream=sys.stdout,
+                        )
+                        manifest_bytes = onboarding_result.config_bytes
+                        expanded = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
+                        worker_manifest = {k: v for k, v in expanded.items() if k != 'groups'}
+                        profile = next(iter(expanded['destinations']))
+                        def scheduled_auto(repo):
+                            source = repo['source']
+                            name = repo['mirrors'][profile].get('name', '')
+                            if source.get('type') == 'gitlab' and re.fullmatch(r'gitlab-[0-9a-f]{24}', name):
+                                return bool(repo.get('discovered_by')) or (source.get('url'), source.get('id'), name) in active_bindings
+                            return True
+                        worker_manifest['repositories'] = [r for r in worker_manifest['repositories'] if scheduled_auto(r)]
+                        entries = parse_manifest(worker_manifest) if worker_manifest['repositories'] else []
+                        if args.asset_max_bytes is None and any(
+                                e.get('source_type') == 'gitlab' or e['url'].startswith('https://gitlab.com/') for e in entries):
+                            raise ValueError('Forgejo asset byte limit must be configured')
+                        if 'groups' in expanded:
+                            snapshot.write_text(json.dumps(worker_manifest), encoding='utf-8')
+                        else:
+                            snapshot.write_bytes(manifest_bytes)
+                    except PartialOnboarding as exc:
+                        print('Auto-discovery onboarding: FAILED: ' + str(exc), flush=True)
+                        return 1
+                    except Exception:
+                        print('Auto-discovery onboarding: FAILED: discovery or publication refused', flush=True)
                         return 1
                 # A resumed intent already synced its repository; do not repeat
                 # that sync against a configuration the transaction just changed.
@@ -531,6 +653,9 @@ def main(argv=None):
                     summary += f', {inactive} inactive'
                 print('\n===== Summary =====', flush=True)
                 print(summary, flush=True)
+                if onboarding_result is not None:
+                    from repo_mirror.auto_discoveries_onboarding import report_orphans
+                    report_orphans(onboarding_result, stream=sys.stdout)
                 print(f'runtime total elapsed={time.monotonic() - started:.3f}s', flush=True)
                 return 1 if failures else 0
     except KeyboardInterrupt:

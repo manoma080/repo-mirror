@@ -130,9 +130,14 @@ def parse_source(value, source_type=None):
 
 
 def normalize_named(sources):
+    from repo_mirror.adhoc import parse_repo_url
+    from repo_mirror.config_named import _GENERATED, _normalize_auto_discoveries
+    from repo_mirror.constants import NAME
     from repo_mirror.host_limits import CONFIG_KEY
-    if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY} != {'destinations', 'repositories'}:
+    if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories'}:
         raise ValueError('invalid named manifest')
+    normalized_rules = _normalize_auto_discoveries(sources['auto_discoveries']) if 'auto_discoveries' in sources else []
+    rules_by_url = {r['url']: r for r in normalized_rules}
     destinations, repositories = sources['destinations'], sources['repositories']
     if not isinstance(destinations, dict) or len(destinations) != 1 or not isinstance(repositories, list):
         raise ValueError('invalid named manifest')
@@ -146,8 +151,13 @@ def normalize_named(sources):
     elif settings not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
         raise ValueError('invalid destination')
     result = []
+    seen_destinations = {}
     for repo in repositories:
-        if not isinstance(repo, dict) or set(repo) != {'source', 'mirrors'}:
+        if (
+            not isinstance(repo, dict)
+            or not {'source', 'mirrors'} <= set(repo)
+            or set(repo) - {'source', 'mirrors', 'discovered_by'}
+        ):
             raise ValueError('invalid repository')
         source, mirrors = repo['source'], repo['mirrors']
         if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id', 'type'} or not isinstance(mirrors, dict) or set(mirrors) != {destination}:
@@ -172,7 +182,46 @@ def normalize_named(sources):
             if not isinstance(legacy, dict) or set(legacy) != {'url', 'name', 'signature'}:
                 raise ValueError('invalid legacy mapping')
             item.update(legacy_url=legacy['url'], legacy_destination_name=legacy['name'], signature=legacy['signature'])
+        kind, base, owner, name = parse_repo_url(source['url'], source_type=source.get('type'), allow_forgejo_port=True)
+        identity = (base.lower(), owner.lower(), name.lower())
+        if 'discovered_by' in repo:
+            discovered_by = repo['discovered_by']
+            if not isinstance(discovered_by, str) or discovered_by not in rules_by_url:
+                raise ValueError('orphan discovered_by')
+            rule = rules_by_url[discovered_by]
+            if kind != rule['type'] or base.lower() != rule['base_url'].lower() or owner.lower() != rule['owner'].lower():
+                raise ValueError('discovered_by source mismatch')
+            ov = next((v for k, v in rule['overrides'].items() if k.lower() == name.lower()), None)
+            planned_name = ov['name'] if ov and 'name' in ov else f"{rule['destination_name_prefix']}-{name}"
+            if len(planned_name) > 100 or not NAME.fullmatch(planned_name) or planned_name in ('.', '..'):
+                raise ValueError('invalid destination repository name')
+            if 'name' in mirror:
+                dest_name = mirror['name']
+                if dest_name != planned_name and not (rule['type'] == 'gitlab' and _GENERATED.fullmatch(dest_name)):
+                    raise ValueError('discovered_by destination name mismatch')
+            else:
+                item['destination_name'] = planned_name
+            item['discovered_by'] = discovered_by
+        dest_key = item['destination_name'].lower()
+        if dest_key in seen_destinations:
+            raise ValueError('conflicting destination')
+        seen_destinations[dest_key] = identity
+        if 'legacy_destination_name' in item and isinstance(item['legacy_destination_name'], str):
+            legacy_key = item['legacy_destination_name'].lower()
+            existing_legacy_id = seen_destinations.get(legacy_key)
+            if existing_legacy_id is not None and existing_legacy_id != identity:
+                raise ValueError('conflicting destination')
+            seen_destinations[legacy_key] = identity
         result.append(item)
+    for rule in normalized_rules:
+        for repo_key, ov in rule['overrides'].items():
+            ov_identity = (rule['base_url'].lower(), rule['owner'].lower(), repo_key.lower())
+            planned = ov['name'] if 'name' in ov else f"{rule['destination_name_prefix']}-{repo_key}"
+            dest_key = planned.lower()
+            existing_identity = seen_destinations.get(dest_key)
+            if existing_identity is not None and existing_identity != ov_identity:
+                raise ValueError('conflicting destination')
+            seen_destinations[dest_key] = ov_identity
     return result
 
 
@@ -190,7 +239,7 @@ def parse_manifest(sources):
             identity = parse_source(url)
             entry = {'url': url, 'identity': identity, 'destination_name': identity.rsplit('/', 1)[-1]}
         elif named and isinstance(item, dict) and set(item) <= {'url', 'destination_name', 'source_id', 'destination_id', 'source_type',
-                                                                'ignore_releases', 'visibility'} and {'url', 'destination_name'} <= set(item):
+                                                                'ignore_releases', 'visibility', 'discovered_by'} and {'url', 'destination_name'} <= set(item):
             if not isinstance(item['url'], str):
                 raise ValueError('invalid source URL')
             identity = parse_source(item['url'], item.get('source_type'))
@@ -203,7 +252,7 @@ def parse_manifest(sources):
             if 'ignore_releases' in item and not isinstance(item['ignore_releases'], bool):
                 raise ValueError('invalid ignore-releases setting')
             entry = {**item, 'identity': identity}
-        elif isinstance(item, dict) and set(item) - ({'ignore_releases', 'visibility', 'source_type'} if named else {'ignore_releases'}) == {
+        elif isinstance(item, dict) and set(item) - ({'ignore_releases', 'visibility', 'source_type', 'discovered_by'} if named else {'ignore_releases'}) == {
                 'url', 'source_id', 'destination_id', 'destination_name',
                 'legacy_url', 'legacy_destination_name', 'signature'}:
             if not isinstance(item['signature'], str) or not re.fullmatch(r'[0-9a-f]{64}', item['signature']):

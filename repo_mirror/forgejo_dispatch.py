@@ -88,7 +88,7 @@ def _url_key(route):
 
 
 def _validated(document, owner, port):
-    if set(document) - {'groups', CONFIG_KEY} != {'destinations', 'repositories'}:
+    if set(document) - {'groups', CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories'}:
         raise DispatchError('invalid named manifest')
     if 'groups' in document:
         validate_groups(document['groups'])
