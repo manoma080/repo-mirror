@@ -772,6 +772,54 @@ class RoundTripAndRuntimeGuardTests(unittest.TestCase):
                 result = cli.main(["--config", str(path)])
         self.assertEqual(result, [])
 
+    def test_relocated_rule_preserving_destination_name_prefix_round_trips(self):
+        doc = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "auto_discoveries": [
+                {
+                    "url": "https://github.com/AliceNew",
+                    "id": 101,
+                    "destination_name_prefix": "mirror-Alice",
+                }
+            ],
+            "repositories": [
+                {
+                    "source": {"url": "https://github.com/Other/explicit", "id": 1},
+                    "mirrors": {"main": {"name": "mirror-Other-explicit", "id": 2}},
+                },
+                {
+                    "source": {"url": "https://github.com/AliceNew/alpha", "id": 11},
+                    "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 12}},
+                    "discovered_by": "https://github.com/AliceNew",
+                },
+            ],
+        }
+        normalized = normalize_config(doc)
+        self.assertEqual(normalized["sources"][1]["owner"], "AliceNew")
+        self.assertEqual(normalized["sources"][1]["discovered_by"], "https://github.com/AliceNew")
+
+        raw = (json.dumps(doc, indent=2) + "\n").encode("utf-8")
+        secret = "fixture-signing-secret-0123456789abcdef"
+        explicit_relocation = {
+            "source_origin": "https://api.github.com",
+            "source_id": 1,
+            "original_owner": "Other",
+            "original_name": "explicit",
+            "owner": "OtherNew",
+            "name": "explicit-renamed",
+            "destination": {"profile": "main", "owner": "dest", "name": "mirror-Other-explicit", "id": 2},
+        }
+        entry = plan_migration(
+            explicit_relocation,
+            {"document": copy.deepcopy(doc), "path": "config.json", "base_sha": blob_sha(raw)},
+            secret=secret,
+        )
+        rewritten = rewrite_config(raw, entry)
+        parsed = json.loads(rewritten)
+        self.assertEqual(parsed["repositories"][1]["mirrors"]["main"]["name"], "mirror-Alice-alpha")
+        self.assertEqual(parsed["repositories"][1]["discovered_by"], "https://github.com/AliceNew")
+        normalize_config(parsed)
+
 
 if __name__ == "__main__":
     unittest.main()

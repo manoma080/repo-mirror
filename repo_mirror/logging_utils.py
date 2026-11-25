@@ -174,6 +174,13 @@ SAFE_ERROR_MESSAGES = frozenset(
         "authoritative configuration differs from checkout",
         "configuration readback mismatch",
         "pending migration requires reconciliation",
+        "ambiguous owner or repository URL",
+        "ambiguous source URL matches both an auto-discovery rule and a repository entry",
+        "destination name is derived per repository for a discovery rule",
+        "overlapping auto-discovery rule and child repository URL",
+        "one-time mirroring is not supported for owner URLs; enable add_to_config",
+        "duplicate auto-discovery rule",
+        "unknown or unsupported source repository URL",
         # Migration transaction failures: fixed reasons only, never free text.
         "migration configuration invalid",
         "migration configuration changed by another writer",

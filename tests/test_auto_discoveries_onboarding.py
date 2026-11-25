@@ -849,5 +849,273 @@ class CliIntegrationTests(unittest.TestCase):
                     cli.main(["--config", str(path)])
 
 
+class RuleRelocationTests(unittest.TestCase):
+    def test_github_relocation_rewrites_rule_and_children_in_one_cas_write_and_steady_state(self):
+        child = {
+            "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+            "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/Alice",
+        }
+        doc = _base_doc([{"url": "https://github.com/Alice", "id": 100}], [child])
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI()
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "AliceNew", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/AliceNew/repos?type=owner": [
+                    {
+                        "id": 11,
+                        "name": "alpha",
+                        "full_name": "AliceNew/alpha",
+                        "clone_url": "https://github.com/AliceNew/alpha.git",
+                    },
+                    {
+                        "id": 12,
+                        "name": "beta",
+                        "full_name": "AliceNew/beta",
+                        "clone_url": "https://github.com/AliceNew/beta.git",
+                    },
+                ]
+            },
+        )
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            raw, store, lambda _: src, dst, owner="dest", account_type="personal", stream=stream
+        )
+        self.assertEqual(store.publish_calls, 1)
+        self.assertEqual(res.inducted_total, 1)
+        self.assertEqual(res.relocated_rules, (("https://github.com/Alice", "https://github.com/AliceNew"),))
+
+        published = json.loads(res.config_bytes)
+        rule = published["auto_discoveries"][0]
+        self.assertEqual(rule["url"], "https://github.com/AliceNew")
+        self.assertEqual(rule["id"], 100)
+        self.assertEqual(rule["destination_name_prefix"], "mirror-Alice")
+
+        relocated_alpha, inducted_beta = published["repositories"]
+        self.assertEqual(relocated_alpha["source"], {"url": "https://github.com/AliceNew/alpha", "id": 11})
+        self.assertEqual(relocated_alpha["mirrors"]["main"], {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"})
+        self.assertEqual(relocated_alpha["discovered_by"], "https://github.com/AliceNew")
+
+        self.assertEqual(inducted_beta["source"], {"url": "https://github.com/AliceNew/beta", "id": 12})
+        self.assertEqual(inducted_beta["mirrors"]["main"]["name"], "mirror-Alice-beta")
+        self.assertEqual(inducted_beta["discovered_by"], "https://github.com/AliceNew")
+
+        log = stream.getvalue()
+        self.assertIn("auto_discovery 1/1 (Alice): relocated to AliceNew", log)
+        self.assertIn("auto_discovery 1/1 (AliceNew): OK discovered=2 inducted=1 excluded=0 tracked=1", log)
+        self.assertNotIn("https://", log)
+
+        # Steady-state re-run after relocation is a complete no-op.
+        dst.calls.clear()
+        steady_src = FakeSourceAPI(
+            routes={"https://api.github.com/users/AliceNew": {"id": 100, "login": "AliceNew", "type": "User"}},
+            pages_routes=src.pages_routes,
+        )
+        steady_stream = io.StringIO()
+        steady = onboard_auto_discoveries(
+            res.config_bytes,
+            store,
+            lambda _: steady_src,
+            dst,
+            owner="dest",
+            account_type="personal",
+            stream=steady_stream,
+        )
+        self.assertEqual(steady.config_bytes, res.config_bytes)
+        self.assertEqual(steady.relocated_rules, ())
+        self.assertEqual(store.publish_calls, 1)
+        self.assertEqual(dst.calls, [])
+        self.assertNotIn("relocated to", steady_stream.getvalue())
+        self.assertIn("auto_discovery 1/1 (AliceNew): OK discovered=2 inducted=0 excluded=0 tracked=2", steady_stream.getvalue())
+
+    def test_forgejo_and_gitlab_relocations_preserve_explicit_mirror_names(self):
+        # Forgejo org rename
+        forgejo_doc = _base_doc(
+            [{"url": "https://forge.example/OldOrg", "id": 55, "destination_name_prefix": "custom"}],
+            [
+                {
+                    "source": {"url": "https://forge.example/OldOrg/tool", "id": 77},
+                    "mirrors": {"main": {"name": "custom-tool", "id": 5001, "visibility": "private"}},
+                    "discovered_by": "https://forge.example/OldOrg",
+                }
+            ],
+        )
+        forgejo_raw = _encode(forgejo_doc)
+        forgejo_store = FakeStore(forgejo_raw)
+        forgejo_src = FakeSourceAPI(
+            routes={"https://forge.example/api/v1/orgs/OldOrg": {"id": 55, "name": "NewOrg"}},
+            pages_routes={
+                "https://forge.example/api/v1/orgs/NewOrg/repos": [
+                    {
+                        "id": 77,
+                        "name": "tool",
+                        "full_name": "NewOrg/tool",
+                        "clone_url": "https://forge.example/NewOrg/tool.git",
+                    }
+                ]
+            },
+        )
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            forgejo_raw,
+            forgejo_store,
+            lambda _: forgejo_src,
+            FakeDestinationAPI(),
+            owner="dest",
+            account_type="personal",
+            stream=stream,
+        )
+        self.assertEqual(forgejo_store.publish_calls, 1)
+        published = json.loads(res.config_bytes)
+        self.assertEqual(published["auto_discoveries"][0]["url"], "https://forge.example/NewOrg")
+        self.assertEqual(published["repositories"][0]["source"]["url"], "https://forge.example/NewOrg/tool")
+        self.assertEqual(published["repositories"][0]["mirrors"]["main"]["name"], "custom-tool")
+        self.assertIn("auto_discovery 1/1 (OldOrg): relocated to NewOrg", stream.getvalue())
+
+        # GitLab group full_path rename
+        gl_doc = _base_doc(
+            [{"url": "https://gitlab.com/old-team/sub", "type": "gitlab", "id": 7}],
+            [
+                {
+                    "source": {"url": "https://gitlab.com/old-team/sub/proj", "id": 701},
+                    "mirrors": {"main": {"name": "mirror-old-team-sub-proj", "id": 6001, "visibility": "private"}},
+                    "discovered_by": "https://gitlab.com/old-team/sub",
+                }
+            ],
+        )
+        gl_raw = _encode(gl_doc)
+        gl_store = FakeStore(gl_raw)
+        gl_src = FakeSourceAPI(
+            routes={
+                "https://gitlab.com/api/v4/groups/old-team%2Fsub": {
+                    "id": 7,
+                    "visibility": "public",
+                    "full_path": "new-team/sub",
+                }
+            },
+            pages_routes={
+                "https://gitlab.com/api/v4/groups/new-team%2Fsub/projects?include_subgroups=false&with_shared=false": [
+                    {
+                        "id": 701,
+                        "path": "proj",
+                        "visibility": "public",
+                        "path_with_namespace": "new-team/sub/proj",
+                        "http_url_to_repo": "https://gitlab.com/new-team/sub/proj.git",
+                    }
+                ]
+            },
+        )
+        gl_stream = io.StringIO()
+        gl_res = onboard_auto_discoveries(
+            gl_raw,
+            gl_store,
+            lambda _: gl_src,
+            FakeDestinationAPI(),
+            owner="dest",
+            account_type="personal",
+            stream=gl_stream,
+        )
+        self.assertEqual(gl_store.publish_calls, 1)
+        gl_pub = json.loads(gl_res.config_bytes)
+        self.assertEqual(gl_pub["auto_discoveries"][0]["url"], "https://gitlab.com/new-team/sub")
+        self.assertEqual(gl_pub["auto_discoveries"][0]["destination_name_prefix"], "mirror-old-team-sub")
+        self.assertEqual(gl_pub["repositories"][0]["source"]["url"], "https://gitlab.com/new-team/sub/proj")
+        self.assertEqual(gl_pub["repositories"][0]["mirrors"]["main"]["name"], "mirror-old-team-sub-proj")
+        self.assertIn("auto_discovery 1/1 (old-team/sub): relocated to new-team/sub", gl_stream.getvalue())
+
+    def test_id_mismatch_and_unpinned_login_mismatch_still_fail_closed(self):
+        # Pinned id mismatch with different login fails closed.
+        doc = _base_doc([{"url": "https://github.com/Alice", "id": 100}])
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI()
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 999, "login": "AliceNew", "type": "User"}}
+        )
+        with self.assertRaisesRegex(ValueError, "source owner identity mismatch"):
+            onboard_auto_discoveries(raw, store, lambda _: src, dst, owner="dest", account_type="personal")
+        self.assertEqual(store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+
+        # Unpinned rule cannot relocate on login mismatch.
+        unpinned = _base_doc([{"url": "https://github.com/Alice"}])
+        unpinned_raw = _encode(unpinned)
+        unpinned_src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "AliceNew", "type": "User"}}
+        )
+        with self.assertRaisesRegex(ValueError, "source owner identity mismatch"):
+            onboard_auto_discoveries(
+                unpinned_raw, FakeStore(unpinned_raw), lambda _: unpinned_src, dst, owner="dest", account_type="personal"
+            )
+        self.assertEqual(dst.calls, [])
+
+    def test_relocation_computed_before_404_preflight(self):
+        # Alice relocates to Bob when a Bob rule already exists -> fails during prevalidation before any 404 GETs.
+        doc = _base_doc(
+            [
+                {"url": "https://github.com/Alice", "id": 100},
+                {"url": "https://github.com/Bob", "id": 200},
+            ]
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI()
+        alice_src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Bob", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Bob/repos?type=owner": [
+                    {"id": 11, "name": "alpha", "full_name": "Bob/alpha", "clone_url": "https://github.com/Bob/alpha.git"}
+                ]
+            },
+        )
+        bob_src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Bob": {"id": 200, "login": "Bob", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Bob/repos?type=owner": [
+                    {"id": 21, "name": "beta", "full_name": "Bob/beta", "clone_url": "https://github.com/Bob/beta.git"}
+                ]
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate auto-discovery rule"):
+            onboard_auto_discoveries(
+                raw,
+                store,
+                lambda r: alice_src if r["owner"] == "Alice" else bob_src,
+                dst,
+                owner="dest",
+                account_type="personal",
+            )
+        self.assertEqual(dst.calls, [])
+        self.assertEqual(store.publish_calls, 0)
+
+    def test_no_relocation_when_nothing_moved(self):
+        # Case-only difference on GitHub (Alice vs alice) is not a relocation.
+        child = {
+            "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+            "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/Alice",
+        }
+        doc = _base_doc([{"url": "https://github.com/Alice", "id": 100}], [child])
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI()
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {"id": 11, "name": "alpha", "full_name": "alice/alpha", "clone_url": "https://github.com/alice/alpha.git"}
+                ]
+            },
+        )
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(raw, store, lambda _: src, dst, owner="dest", account_type="personal", stream=stream)
+        self.assertEqual(res.relocated_rules, ())
+        self.assertEqual(store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+        self.assertNotIn("relocated to", stream.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,7 @@ import sys
 from urllib.error import HTTPError
 from urllib.parse import quote
 
-from repo_mirror.adhoc import parse_repo_url
+from repo_mirror.adhoc import parse_owner_url, parse_repo_url
 from repo_mirror.config_json import unique_pairs
 from repo_mirror.config_named import normalize_config
 from repo_mirror.constants import GITHUB, NAME
@@ -57,6 +57,10 @@ class RulePlan:
     missing_upstream_count: int
     planned: tuple[PlannedInduction, ...]
     orphaned_children: tuple[tuple[str, str, str], ...]
+    old_rule_url: str = ''
+    old_owner: str = ''
+    relocated_to: str | None = None
+    preserve_prefix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,7 @@ class OnboardingResult:
     orphaned_children: tuple[tuple[str, str, str], ...]
     orphaned_legacy: tuple[tuple[str, str, str], ...]
     inducted_total: int
+    relocated_rules: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,9 +92,11 @@ def _resolve_github_owner(api_base, owner, api):
     account_type = data.get('type')
     if type(owner_id) is not int or owner_id <= 0 or not isinstance(login, str) or account_type not in ('User', 'Organization'):
         raise ValueError('invalid source owner metadata')
-    if login.lower() != owner.lower():
-        raise ValueError('source owner identity mismatch')
-    return {'id': owner_id, 'kind': 'organization' if account_type == 'Organization' else 'user'}
+    return {
+        'id': owner_id,
+        'kind': 'organization' if account_type == 'Organization' else 'user',
+        'canonical_owner': login,
+    }
 
 
 def _resolve_forgejo_owner(api_base, owner, api):
@@ -109,10 +116,9 @@ def _resolve_forgejo_owner(api_base, owner, api):
         raise ValueError('invalid source owner metadata')
     if kind == 'user':
         present = [data[k] for k in ('login', 'username') if k in data and data[k] is not None]
-        if not present or any(not isinstance(v, str) for v in present):
+        if not present or any(not isinstance(v, str) for v in present) or len(set(present)) != 1:
             raise ValueError('invalid source owner metadata')
-        if any(v != owner for v in present):
-            raise ValueError('source owner identity mismatch')
+        canonical = present[0]
     else:
         if 'username' in data and data['username'] is not None:
             canonical = data['username']
@@ -122,9 +128,7 @@ def _resolve_forgejo_owner(api_base, owner, api):
             canonical = data.get('login')
         if not isinstance(canonical, str):
             raise ValueError('invalid source owner metadata')
-        if canonical != owner:
-            raise ValueError('source owner identity mismatch')
-    return {'id': owner_id, 'kind': kind}
+    return {'id': owner_id, 'kind': kind, 'canonical_owner': canonical}
 
 
 def _resolve_gitlab_owner(api_base, owner, api):
@@ -145,18 +149,16 @@ def _resolve_gitlab_owner(api_base, owner, api):
             username = user.get('username')
             if type(owner_id) is not int or owner_id <= 0 or not isinstance(username, str):
                 raise ValueError('invalid source owner metadata')
-            if username != owner:
-                raise ValueError('source owner identity mismatch')
-            return {'id': owner_id, 'kind': 'user'}
+            return {'id': owner_id, 'kind': 'user', 'canonical_owner': username}
         raise
     if not isinstance(data, dict):
         raise ValueError('invalid source owner metadata')
     owner_id = data.get('id')
-    if type(owner_id) is not int or owner_id <= 0:
+    if type(owner_id) is not int or owner_id <= 0 or not isinstance(data.get('full_path'), str):
         raise ValueError('invalid source owner metadata')
-    if data.get('visibility') != 'public' or data.get('full_path') != owner:
+    if data.get('visibility') != 'public':
         raise ValueError('source owner identity mismatch')
-    return {'id': owner_id, 'kind': 'group'}
+    return {'id': owner_id, 'kind': 'group', 'canonical_owner': data['full_path']}
 
 
 def resolve_owner(rule, api):
@@ -176,6 +178,18 @@ def resolve_owner(rule, api):
         raise ValueError('invalid auto_discoveries type')
     if 'id' in rule and info['id'] != rule['id']:
         raise ValueError('source owner identity mismatch')
+    canonical = info.pop('canonical_owner')
+    changed = canonical.lower() != owner.lower() if kind == 'github' else canonical != owner
+    if changed:
+        if 'id' not in rule:
+            raise ValueError('source owner identity mismatch')
+        try:
+            _, _, segments = parse_owner_url(f"{rule['base_url']}/{canonical}", source_type=kind)
+        except ValueError:
+            raise ValueError('invalid source owner metadata') from None
+        if '/'.join(segments) != canonical:
+            raise ValueError('invalid source owner metadata')
+        return {'id': info['id'], 'kind': info['kind'], 'relocated_owner': canonical}
     return info
 
 
@@ -246,13 +260,15 @@ def discover_rule_repositories(rule, owner_info, api):
     return records
 
 
-def _parse_existing_entries(repositories):
+def _parse_existing_entries(repositories, *, rewrite_rule_url=None, rewrite_owner=None):
     parsed = []
     for idx, entry in enumerate(repositories):
         kind, base, owner, name = parse_repo_url(
             entry['source']['url'],
             source_type=entry['source'].get('type'),
         )
+        if rewrite_rule_url is not None and entry.get('discovered_by') == rewrite_rule_url:
+            owner = rewrite_owner
         parsed.append(_ExistingEntry(idx, entry, kind, base, owner, name))
     return parsed
 
@@ -268,16 +284,52 @@ def _configured_child_dest_name(rule, child, profile):
     return f"{rule['destination_name_prefix']}-{child_name}"
 
 
-def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
+def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, api):
     owner_info = resolve_owner(rule, api)
     needs_id_pin = 'id' not in rule
-    discovered = discover_rule_repositories(rule, owner_info, api)
-    rule_children = [entry for entry in repositories if entry.get('discovered_by') == rule['url']]
+    relocated_to = owner_info.get('relocated_owner')
+    old_rule_url = rule['url']
+    old_owner = rule['owner']
+    rule_children = [entry for entry in repositories if entry.get('discovered_by') == old_rule_url]
+    preserve_prefix = None
+    if relocated_to is not None:
+        new_url = f"{rule['base_url']}/{relocated_to}"
+        new_default_prefix = 'mirror-' + relocated_to.replace('/', '-')
+        effective_prefix = rule['destination_name_prefix']
+        if 'destination_name_prefix' not in raw_rule:
+            needs_preserve = False
+            for child in rule_children:
+                mirror = child['mirrors'][profile]
+                if 'name' not in mirror:
+                    continue
+                _, _, _, child_name = parse_repo_url(child['source']['url'], source_type=child['source'].get('type'))
+                ov = next((v for k, v in rule['overrides'].items() if k.lower() == child_name.lower()), None)
+                if ov and 'name' in ov:
+                    continue
+                if rule['type'] == 'gitlab' and _GENERATED.fullmatch(mirror['name']):
+                    continue
+                if mirror['name'] != f"{new_default_prefix}-{child_name}":
+                    needs_preserve = True
+                    break
+            if needs_preserve:
+                preserve_prefix = rule['destination_name_prefix']
+                effective_prefix = rule['destination_name_prefix']
+            else:
+                effective_prefix = new_default_prefix
+        effective_rule = {**rule, 'url': new_url, 'owner': relocated_to, 'destination_name_prefix': effective_prefix}
+    else:
+        effective_rule = rule
+
+    discovered = discover_rule_repositories(effective_rule, owner_info, api)
     if not discovered and rule_children:
         raise ValueError('auto-discovery returned zero repositories for a rule with existing entries')
 
-    parsed_existing = _parse_existing_entries(repositories)
-    exclude_lower = {name.lower() for name in rule['exclude']}
+    parsed_existing = _parse_existing_entries(
+        repositories,
+        rewrite_rule_url=old_rule_url if relocated_to is not None else None,
+        rewrite_owner=relocated_to,
+    )
+    exclude_lower = {name.lower() for name in effective_rule['exclude']}
     excluded_count = 0
     tracked_count = 0
     planned = []
@@ -288,13 +340,13 @@ def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
             continue
         id_matches = [
             rec for rec in parsed_existing
-            if rec.kind == rule['type']
-            and rec.base.lower() == rule['base_url'].lower()
+            if rec.kind == effective_rule['type']
+            and rec.base.lower() == effective_rule['base_url'].lower()
             and rec.entry['source'].get('id') == source_id
         ]
         if len(id_matches) > 1:
             raise ValueError('existing source mapping conflicts')
-        url_identity = (rule['base_url'].lower(), rule['owner'].lower(), name.lower())
+        url_identity = (effective_rule['base_url'].lower(), effective_rule['owner'].lower(), name.lower())
         if len(id_matches) == 1:
             matched = id_matches[0]
             other_url_matches = [
@@ -304,7 +356,7 @@ def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
             ]
             if other_url_matches:
                 raise ValueError('existing source mapping conflicts')
-            if 'discovered_by' in matched.entry and matched.entry['discovered_by'] != rule['url']:
+            if 'discovered_by' in matched.entry and matched.entry['discovered_by'] != old_rule_url:
                 raise ValueError('existing source mapping conflicts')
             if 'discovered_by' in matched.entry:
                 mirror = matched.entry['mirrors'][profile]
@@ -320,8 +372,8 @@ def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
         if url_matches:
             raise ValueError('source repository id mismatch or missing')
 
-        ov = next((v for k, v in rule['overrides'].items() if k.lower() == name.lower()), None)
-        dest_name = ov['name'] if (ov and 'name' in ov) else f"{rule['destination_name_prefix']}-{name}"
+        ov = next((v for k, v in effective_rule['overrides'].items() if k.lower() == name.lower()), None)
+        dest_name = ov['name'] if (ov and 'name' in ov) else f"{effective_rule['destination_name_prefix']}-{name}"
         if (
             not isinstance(dest_name, str)
             or not (1 <= len(dest_name) <= 100)
@@ -330,8 +382,8 @@ def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
             or _GENERATED.fullmatch(dest_name)
         ):
             raise ValueError('invalid destination repository name')
-        visibility = ov['visibility'] if (ov and 'visibility' in ov) else rule['visibility']
-        ignore_releases = ov['ignore_releases'] if (ov and 'ignore_releases' in ov) else rule['ignore_releases']
+        visibility = ov['visibility'] if (ov and 'visibility' in ov) else effective_rule['visibility']
+        ignore_releases = ov['ignore_releases'] if (ov and 'ignore_releases' in ov) else effective_rule['ignore_releases']
         planned.append(
             PlannedInduction(
                 name=name,
@@ -341,10 +393,10 @@ def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
                 dest_name=dest_name,
                 visibility=visibility,
                 ignore_releases=ignore_releases,
-                source_type=rule['type'],
-                base_url=rule['base_url'],
-                owner=rule['owner'],
-                rule_url=rule['url'],
+                source_type=effective_rule['type'],
+                base_url=effective_rule['base_url'],
+                owner=effective_rule['owner'],
+                rule_url=effective_rule['url'],
             )
         )
 
@@ -356,12 +408,14 @@ def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
                 child['source']['url'],
                 source_type=child['source'].get('type'),
             )
-            orphaned_children.append((c_owner, c_name, _configured_child_dest_name(rule, child, profile)))
+            if relocated_to is not None:
+                c_owner = relocated_to
+            orphaned_children.append((c_owner, c_name, _configured_child_dest_name(effective_rule, child, profile)))
 
     return RulePlan(
         index=rule_index,
         total=total_rules,
-        rule=rule,
+        rule=effective_rule,
         owner_id=owner_info['id'],
         needs_id_pin=needs_id_pin,
         discovered_count=len(discovered),
@@ -370,6 +424,10 @@ def _plan_rule(rule_index, total_rules, rule, profile, repositories, api):
         missing_upstream_count=len(orphaned_children),
         planned=tuple(planned),
         orphaned_children=tuple(orphaned_children),
+        old_rule_url=old_rule_url,
+        old_owner=old_owner,
+        relocated_to=relocated_to,
+        preserve_prefix=preserve_prefix,
     )
 
 
@@ -423,12 +481,26 @@ def _log_rule_failure(rule_plan, exc, stream):
 
 def _prevalidate_plans(raw_config, profile, plans, dst, owner, stream):
     rules_by_url = {plan.rule['url']: plan.rule for plan in plans}
-    existing_dests = _collect_existing_destination_names(raw_config, profile, rules_by_url)
     planned_dests = set()
     projected = copy.deepcopy(raw_config)
+    reloc_by_old_url = {}
     for rule_plan in plans:
         if rule_plan.needs_id_pin:
             projected['auto_discoveries'][rule_plan.index - 1]['id'] = rule_plan.owner_id
+        if rule_plan.relocated_to is not None:
+            raw_rule = projected['auto_discoveries'][rule_plan.index - 1]
+            raw_rule['url'] = rule_plan.rule['url']
+            if rule_plan.preserve_prefix is not None:
+                raw_rule['destination_name_prefix'] = rule_plan.preserve_prefix
+            reloc_by_old_url[rule_plan.old_rule_url] = rule_plan
+    for entry in projected['repositories']:
+        rule_plan = reloc_by_old_url.get(entry.get('discovered_by'))
+        if rule_plan is not None:
+            _, _, _, child_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
+            entry['source']['url'] = f"{rule_plan.rule['base_url']}/{rule_plan.relocated_to}/{child_name}"
+            entry['discovered_by'] = rule_plan.rule['url']
+    existing_dests = _collect_existing_destination_names(projected, profile, rules_by_url)
+    for rule_plan in plans:
         for item in rule_plan.planned:
             key = item.dest_name.lower()
             if key in existing_dests or key in planned_dests:
@@ -441,7 +513,8 @@ def _prevalidate_plans(raw_config, profile, plans, dst, owner, stream):
         normalize_config(projected)
     except Exception as exc:
         if plans:
-            _log_rule_failure(plans[0], exc, stream)
+            target_plan = next((p for p in plans if p.relocated_to is not None), plans[0])
+            _log_rule_failure(target_plan, exc, stream)
         raise
 
     for rule_plan in plans:
@@ -517,6 +590,15 @@ def _publish_rule(store, config_bytes, rule_plan, created_entries, profile):
         raw_rule['id'] = rule_plan.owner_id
     elif raw_rule.get('id') != rule_plan.owner_id:
         raise ValueError('source owner identity mismatch')
+    if rule_plan.relocated_to is not None:
+        raw_rule['url'] = rule_plan.rule['url']
+        if rule_plan.preserve_prefix is not None:
+            raw_rule['destination_name_prefix'] = rule_plan.preserve_prefix
+        for entry in doc['repositories']:
+            if entry.get('discovered_by') == rule_plan.old_rule_url:
+                _, _, _, child_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
+                entry['source']['url'] = f"{rule_plan.rule['base_url']}/{rule_plan.relocated_to}/{child_name}"
+                entry['discovered_by'] = rule_plan.rule['url']
     doc['repositories'].extend(created_entries)
     normalize_config(doc)
     after = (json.dumps(doc, indent=2, ensure_ascii=False) + '\n').encode('utf-8')
@@ -557,8 +639,19 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
 
     plans = []
     for index, rule in enumerate(rules, 1):
+        raw_rule = raw_config['auto_discoveries'][index - 1]
         try:
-            plans.append(_plan_rule(index, len(rules), rule, profile, raw_config['repositories'], source_client(rule)))
+            plans.append(
+                _plan_rule(
+                    index,
+                    len(rules),
+                    rule,
+                    raw_rule,
+                    profile,
+                    raw_config['repositories'],
+                    source_client(rule),
+                )
+            )
         except Exception as exc:
             print(
                 f"auto_discovery {index}/{len(rules)} ({safe_label(rule['owner'])}): FAILED: {error_detail(exc)}",
@@ -573,8 +666,9 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
     inducted_total = 0
     all_orphaned_children = []
     rule_reports = []
+    relocated_rules = []
     for rule_plan in plans:
-        if rule_plan.planned or rule_plan.needs_id_pin:
+        if rule_plan.planned or rule_plan.needs_id_pin or rule_plan.relocated_to is not None:
             if store.read()[0] != config_bytes:
                 exc = ValueError('authoritative configuration differs from checkout')
                 _log_rule_failure(rule_plan, exc, stream)
@@ -597,6 +691,15 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
             any_writes = True
             inducted_total += len(created_entries)
 
+        if rule_plan.relocated_to is not None:
+            reloc_line = (
+                f"auto_discovery {rule_plan.index}/{rule_plan.total} "
+                f"({safe_label(rule_plan.old_owner)}): relocated to {safe_label(rule_plan.relocated_to)}"
+            )
+            print(reloc_line, file=stream, flush=True)
+            rule_reports.append(reloc_line)
+            relocated_rules.append((rule_plan.old_rule_url, rule_plan.rule['url']))
+
         line = (
             f"auto_discovery {rule_plan.index}/{rule_plan.total} "
             f"({safe_label(rule_plan.rule['owner'])}): OK "
@@ -616,13 +719,15 @@ def onboard_auto_discoveries(config_bytes, store, source_client, dst, *, owner, 
         if observed != config_bytes:
             raise ValueError('authoritative configuration differs from checkout')
 
-    orphaned_legacy = _find_orphaned_legacy(raw_config, profile)
+    final_config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
+    orphaned_legacy = _find_orphaned_legacy(final_config, profile)
     return OnboardingResult(
         config_bytes=config_bytes,
         rule_reports=tuple(rule_reports),
         orphaned_children=tuple(all_orphaned_children),
         orphaned_legacy=orphaned_legacy,
         inducted_total=inducted_total,
+        relocated_rules=tuple(relocated_rules),
     )
 
 
