@@ -266,13 +266,13 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         flush=True,
     )
     dest_name = destination_name(source, name)
-    settings = source.get("destinations", {}).get(name.lower(), {})
+    settings = source.get("mirror", {})
     if "legacy" in settings:
-        validate_source(source)
+        validate_source({**source, "name": source.get("name", name)})
         from repo_mirror.migration_attestation import github_claim, verify
         verify(github_claim(source, name, owner), settings["legacy"].get("signature"), os.environ.get("MIRROR_TIMESTAMP_SECRET", ""))
     if "legacy" in settings:
-        validate_source(source)
+        validate_source({**source, "name": source.get("name", name)})
         legacy = settings["legacy"]
         historical_source = {**source, "owner": legacy["source_owner"]}
         historical_name = legacy["source_name"]
@@ -311,7 +311,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     try:
         clone_url = validate_source_clone_url(source, source_name, metadata)
     except ValueError:
-        if source['type'] != 'github' or not {'source_id', 'destination_id'} <= settings.keys() or source['repos'] == 'all':
+        if source['type'] != 'github' or not {'source_id', 'destination_id'} <= settings.keys():
             raise
         from repo_mirror.sources import verified_source_identity
         try:
@@ -366,7 +366,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
     if repo is None:
         payload = {
             "name": dest_name,
-            "private": source.get("destinations", {}).get(name.lower(), {}).get("visibility", "private") != "public",
+            "private": settings.get("visibility", "private") != "public",
             "auto_init": False,
             "description": marker + " [repo-mirror:initializing:v1]",
         }
@@ -809,7 +809,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
     recovery_target = recovery_target or target
     journal_source = journal_source or source
     journal_name = journal_name or name
-    settings = source.get("destinations", {}).get((settings_name or name).lower(), {})
+    settings = source.get("mirror", {})
     if journal_identity is None and {"source_id", "destination_id"} <= settings.keys():
         parsed_target = urlparse(target)
         journal_identity = (source["base_url"], settings["source_id"],

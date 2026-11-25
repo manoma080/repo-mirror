@@ -7,8 +7,8 @@ from repo_mirror.sources import source_marker, validate_source
 
 class GitHubRepositoryPinsTest(unittest.TestCase):
     def source(self):
-        return {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"],
-                "destinations": {"demo": {"source_id": 11, "destination_id": 22}}}
+        return {"type": "github", "base_url": "https://github.com", "owner": "alice", "name": "demo",
+                "mirror": {"source_id": 11, "destination_id": 22}}
 
     def test_destination_replaced_during_git_never_enters_release_sync(self):
         source = self.source()
@@ -39,7 +39,7 @@ class GitHubRepositoryPinsTest(unittest.TestCase):
             for value in (True, False, 0, -1, 1.0, "1", None):
                 with self.subTest(key=key, value=value):
                     source = self.source()
-                    source["destinations"]["demo"][key] = value
+                    source["mirror"][key] = value
                     with self.assertRaises(ValueError):
                         validate_source(source)
 
@@ -47,7 +47,7 @@ class GitHubRepositoryPinsTest(unittest.TestCase):
         for key, value in (("source_id", True), ("destination_id", True)):
             with self.subTest(key=key):
                 source = self.source()
-                source["destinations"]["demo"][key] = value
+                source["mirror"][key] = value
                 src, dst = Mock(), Mock()
                 src.request.return_value = {"id": 1 if key == "source_id" else 11, "clone_url": "https://github.com/alice/demo.git"}
                 dst.request.return_value = {"id": 1 if key == "destination_id" else 22, "description": source_marker(source, "demo")}

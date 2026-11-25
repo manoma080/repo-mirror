@@ -120,7 +120,7 @@ def destination_plan(relocation, document):
     # worker then used the derived name, so that derivation is what was
     # configured. Any explicit name must match what the worker reported.
     derived_before = destination_name(
-        {'type': kind, 'base_url': base, 'owner': owner, 'repos': [name]}, name)
+        {'type': kind, 'base_url': base, 'owner': owner}, name)
     configured = mirror.get('name')
     if configured is None:
         configured = derived_before
@@ -136,7 +136,7 @@ def destination_plan(relocation, document):
     if configured.lower() != derived_before.lower():
         return profile, mirror, repository, configured, configured
     target = destination_name(
-        {'type': kind, 'base_url': base, 'owner': relocation['owner'], 'repos': [relocation['name']]},
+        {'type': kind, 'base_url': base, 'owner': relocation['owner']},
         relocation['name'])
     return profile, mirror, repository, configured, target
 

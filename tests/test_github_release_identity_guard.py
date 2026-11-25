@@ -19,7 +19,7 @@ class ReleaseIdentityGuardTests(unittest.TestCase):
 
     def test_initialization_marker_is_not_patched_after_source_replacement(self):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice',
-                  'repos': ['repo'], 'destinations': {'repo': {'name': 'repo', 'source_id': 1, 'destination_id': 2}}}
+                  'name': 'repo', 'mirror': {'name': 'repo', 'source_id': 1, 'destination_id': 2}}
         marker = source_marker(source, 'repo')
         state = {'id': 1}
         src, dst = Mock(), Mock()
@@ -35,7 +35,7 @@ class ReleaseIdentityGuardTests(unittest.TestCase):
 
     def test_destination_change_between_release_operations_blocks_next_read(self):
         source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice',
-                  'repos': ['repo'], 'destinations': {'repo': {'name': 'repo', 'source_id': 1, 'destination_id': 2}}}
+                  'name': 'repo', 'mirror': {'name': 'repo', 'source_id': 1, 'destination_id': 2}}
         marker = source_marker(source, 'repo')
         src = Mock()
         src.request.return_value = {'id': 1, 'clone_url': 'https://github.com/alice/repo.git', 'default_branch': 'main'}

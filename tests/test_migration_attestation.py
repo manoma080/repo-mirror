@@ -19,9 +19,9 @@ class MigrationAttestationTests(unittest.TestCase):
 
     def test_signed_mapping_is_bound_to_all_fields(self):
         from repo_mirror.migration_attestation import github_claim, sign, verify
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
-                  'destinations': {'repo': {'name': 'new-target', 'source_id': 1, 'destination_id': 2,
-                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'old-target'}}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'name': 'repo',
+                  'mirror': {'name': 'new-target', 'source_id': 1, 'destination_id': 2,
+                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'old-target'}}}
         claim = github_claim(source, 'repo', 'dest')
         signature = sign(claim, 'fixture-signing-secret-0123456789abcdef')
         verify(claim, signature, 'fixture-signing-secret-0123456789abcdef')
@@ -37,8 +37,8 @@ class MigrationAttestationTests(unittest.TestCase):
     def test_independent_provider_keys_cannot_verify_each_others_claims(self):
         from repo_mirror.migration_attestation import github_claim, forgejo_claim, sign, verify
         github = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new',
-                  'destinations': {'repo': {'name': 'target', 'source_id': 1, 'destination_id': 2,
-                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'old'}}}}
+                  'mirror': {'name': 'target', 'source_id': 1, 'destination_id': 2,
+                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'old'}}}
         forgejo = {'url': 'https://git.example/new/repo', 'legacy_url': 'https://git.example/old/repo',
                    'source_id': 1, 'destination_id': 2, 'destination_name': 'target', 'legacy_destination_name': 'old'}
         keys = ['github-independent-key-0123456789abcdef', 'forgejo-independent-key-0123456789abcd']
@@ -55,12 +55,12 @@ class MigrationAttestationTests(unittest.TestCase):
     def test_weak_key_forgery_rejected_before_repository_access(self):
         import hashlib, hmac, json
         from repo_mirror.migration_attestation import DOMAIN, github_claim
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
-                  'destinations': {'repo': {'name': 'target', 'source_id': 1, 'destination_id': 2,
-                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'old'}}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'name': 'repo',
+                  'mirror': {'name': 'target', 'source_id': 1, 'destination_id': 2,
+                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'old'}}}
         claim = github_claim(source, 'repo', 'dest')
         payload = json.dumps(claim, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode('ascii')
-        source['destinations']['repo']['legacy']['signature'] = hmac.new(b'weak', DOMAIN + payload, hashlib.sha256).hexdigest()
+        source['mirror']['legacy']['signature'] = hmac.new(b'weak', DOMAIN + payload, hashlib.sha256).hexdigest()
         src, dst = Mock(), Mock()
         with patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'weak'}), self.assertRaises(ValueError):
             mirror_repository(source, 'repo', 'dest', src, dst, 'token')

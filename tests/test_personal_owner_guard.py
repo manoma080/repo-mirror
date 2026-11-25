@@ -16,8 +16,8 @@ class PersonalOwnerGuardTests(unittest.TestCase):
                 return {'full_name': 'wrong/copy'}
         class Source:
             def request(self, method, url): return {'clone_url': 'https://github.com/Alice/demo.git'}
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'Alice',
-                  'destinations': {'demo': {'name': 'copy', 'visibility': 'public'}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'Alice', 'name': 'demo',
+                  'mirror': {'name': 'copy', 'visibility': 'public'}}
         dst = Destination()
         with self.assertRaises(RuntimeError):
             mirror_repository(source, 'demo', 'dest', Source(), dst, 'secret', 'personal')

@@ -15,7 +15,7 @@ FIELDS = {'source_provider', 'source_origin', 'old_source_owner', 'old_source_na
 
 
 def github_claim(source, name, owner):
-    settings = source['destinations'][name.lower()]
+    settings = source['mirror']
     legacy = settings['legacy']
     return dict(source_provider=source['type'], source_origin=source['base_url'].rstrip('/'),
                 old_source_owner=legacy['source_owner'], old_source_name=legacy['source_name'],

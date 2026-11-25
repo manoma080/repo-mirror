@@ -28,11 +28,13 @@ class FailureJournalTest(unittest.TestCase):
             )
 
     def test_main_supplies_journal_to_repository_sync(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.json"
             path = Path(directory) / "failures.json"
-            config.write_text(json.dumps({"destination_account_type": "personal", "sources": [source]}))
+            config.write_text(json.dumps({
+                "destinations": {"main": {"account_type": "personal"}},
+                "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
+            }))
             with (
                 patch.dict("os.environ", {"GH_TOKEN": "example", "DESTINATION_OWNER": "bob"}),
                 patch_everywhere("get_existing", return_value=None),
@@ -42,7 +44,7 @@ class FailureJournalTest(unittest.TestCase):
             self.assertIsInstance(sync.call_args.kwargs["journal"], mirror.FailureJournal)
 
     def test_failed_upload_is_recorded_then_cleared_after_retry(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "name": "demo"}
 
         class Source:
             def request(self, method, url, data=None):

@@ -10,8 +10,7 @@ from repo_mirror.sources import source_marker
 
 class AutomaticMoveTests(unittest.TestCase):
     def test_cli_mirrors_verified_move_to_original_target_and_reports_it(self):
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old',
-                  'repos': ['repo'], 'destinations': {'repo': {'name': 'copy', 'source_id': 1, 'destination_id': 2}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'name': 'repo'}
         metadata = {'id': 1, 'full_name': 'new/renamed', 'html_url': 'https://github.com/new/renamed',
                     'clone_url': 'https://github.com/new/renamed.git', 'default_branch': 'main'}
         src, dst = Mock(), Mock()
@@ -20,7 +19,9 @@ class AutomaticMoveTests(unittest.TestCase):
         env = {'MIRROR_TIMESTAMP_SECRET': 'fixture-signing-secret-0123456789abcdef', 'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'config.json'
-            original = {'destination_account_type': 'personal', 'sources': [source]}
+            original = {'destinations': {'main': {'account_type': 'personal'}},
+                        'repositories': [{'source': {'url': 'https://github.com/old/repo', 'id': 1},
+                                          'mirrors': {'main': {'name': 'copy', 'id': 2}}}]}
             config.write_text(json.dumps(original))
             stderr = Mock()
             with patch.dict('os.environ', env, clear=True), patch.object(cli, 'SourceAPI', return_value=src), \
@@ -46,10 +47,21 @@ class AutomaticMoveTests(unittest.TestCase):
     def test_cli_retains_preexisting_signed_legacy_identity_after_another_move(self):
         from repo_mirror.migration_attestation import github_claim, sign
         secret = 'fixture-signing-secret-0123456789abcdef'
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'middle',
-                  'repos': ['repo'], 'destinations': {'repo': {'name': 'copy', 'source_id': 1, 'destination_id': 2,
-                      'legacy': {'source_owner': 'old', 'source_name': 'original', 'destination_name': 'old-copy'}}}}
-        source['destinations']['repo']['legacy']['signature'] = sign(github_claim(source, 'repo', 'dest'), secret)
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'middle', 'name': 'repo',
+                  'mirror': {'name': 'copy', 'source_id': 1, 'destination_id': 2,
+                      'legacy': {'source_owner': 'old', 'source_name': 'original', 'destination_name': 'old-copy'}}}
+        signature = sign(github_claim(source, 'repo', 'dest'), secret)
+        named_config = {
+            'destinations': {'main': {'account_type': 'personal'}},
+            'repositories': [{
+                'source': {'url': 'https://github.com/middle/repo', 'id': 1},
+                'mirrors': {'main': {
+                    'name': 'copy', 'id': 2,
+                    'legacy': {'source_owner': 'old', 'source_name': 'original', 'destination_name': 'old-copy',
+                               'signature': signature},
+                }},
+            }],
+        }
         original = {**source, 'owner': 'old'}
         marker = source_marker(original, 'original')
         src, dst = Mock(), Mock()
@@ -58,7 +70,7 @@ class AutomaticMoveTests(unittest.TestCase):
         dst.request.return_value = {'id': 2, 'description': marker, 'default_branch': 'main'}
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'config.json'
-            config.write_text(json.dumps({'destination_account_type': 'personal', 'sources': [source]}))
+            config.write_text(json.dumps(named_config))
             with patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': secret, 'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}, clear=True), \
                  patch.object(cli, 'SourceAPI', return_value=src), patch.object(cli, 'API', side_effect=[Mock(), dst]), \
                  patch('repo_mirror.repository.mirror_git'), patch('repo_mirror.repository.mirror_releases') as releases:

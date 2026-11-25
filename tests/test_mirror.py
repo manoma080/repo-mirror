@@ -16,19 +16,6 @@ def pending(asset_name, size, url, name=None):
     return "[repo-mirror:pending:v1]" + base64.urlsafe_b64encode(json.dumps([name, digest]).encode()).decode()
 
 
-class DiscoveryTests(unittest.TestCase):
-    def test_forgejo_all_discovery_paginates(self):
-        class API:
-            def pages(self, url):
-                self.url = url
-                return [{"name": "a"}, {"name": "b"}]
-
-        api = API()
-        source = {"type": "forgejo", "base_url": "https://code.example", "owner": "alice", "repos": "all"}
-        self.assertEqual(mirror.discover(source, api), ["a", "b"])
-        self.assertEqual(api.url, "https://code.example/api/v1/users/alice/repos")
-
-
 class EngineTests(unittest.TestCase):
     def test_existing_repo_is_secured_and_release_assets_reconciled(self):
         class API:
@@ -108,8 +95,8 @@ class EngineTests(unittest.TestCase):
             "type": "forgejo",
             "base_url": "https://src.example",
             "owner": "alice",
-            "repos": ["demo"],
-            "prefix": "pre-",
+            "name": "demo",
+            "mirror": {"name": "pre-demo"},
         }
         with patch_everywhere("mirror_git") as git:
             mirror.mirror_repository(source, "demo", "dest", src, dst, "secret")
@@ -125,7 +112,7 @@ class EngineTests(unittest.TestCase):
     def test_rejects_non_https_and_credentialed_sources(self):
         for base in ("http://evil.example", "https://secret@evil.example"):
             with self.assertRaises(ValueError):
-                mirror.validate_source({"type": "github", "base_url": base, "owner": "a", "repos": ["b"]})
+                mirror.validate_source({"type": "github", "base_url": base, "owner": "a", "name": "b"})
 
     def test_forgejo_source_assets_are_loaded_directly(self):
         class API:
@@ -220,7 +207,7 @@ class EngineTests(unittest.TestCase):
 
 class SafetyTests(unittest.TestCase):
     def test_default_destination_name_and_marker(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "name": "demo"}
         self.assertEqual(mirror.destination_name(source, "demo"), "mirror-Alice-demo")
         self.assertIn("Alice/demo", mirror.source_marker(source, "demo"))
 
@@ -231,7 +218,7 @@ class SafetyTests(unittest.TestCase):
                     raise __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(url, 404, "", {}, None)
                 return {"private": True, "description": "unrelated"}
 
-        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "name": "demo"}
         with patch_everywhere("mirror_git") as git:
             with self.assertRaisesRegex(RuntimeError, "collision"):
                 mirror.mirror_repository(source, "demo", "dest", API(), API(), "token")
@@ -270,14 +257,14 @@ class SafetyTests(unittest.TestCase):
                 return []
 
         dst = Destination()
-        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "name": "demo"}
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(source, "demo", "dest", Source(), dst, "token", "personal")
         self.assertTrue(any(method == "POST" and url.endswith("/user/repos") for method, url, _ in dst.calls))
         self.assertTrue(any(method == "GET" and url.endswith("/user") for method, url, _ in dst.calls))
 
     def test_asset_same_size_different_bytes_fails_without_deletion(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "name": "demo"}
 
         class Src:
             def request(self, *a):
@@ -321,7 +308,7 @@ class SafetyTests(unittest.TestCase):
         self.assertFalse(any(method == "DELETE" for method, url in dst.calls))
 
     def test_public_marked_mirror_with_no_releases_succeeds_without_visibility_change(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "Alice", "name": "demo"}
 
         class Src:
             def request(self, *args):

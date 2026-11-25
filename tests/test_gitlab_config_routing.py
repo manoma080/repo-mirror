@@ -4,13 +4,6 @@ from repo_mirror.adhoc import parse_repo_url
 
 
 class GitLabConfigRoutingTests(unittest.TestCase):
-    def test_manual_selection_matches_typed_self_hosted_gitlab(self):
-        from repo_mirror.adhoc import add_to_config
-        config = {'sources': [{'type': 'gitlab', 'base_url': 'https://code.example',
-                               'owner': 'group/sub', 'repos': ['project']}]}
-        self.assertFalse(add_to_config(config, 'https://code.example/group/sub/project'))
-        self.assertEqual(len(config['sources']), 1)
-
     def test_named_manual_selection_preserves_self_hosted_binding(self):
         from repo_mirror.adhoc import add_to_config
         config = {'destinations': {'d': {'account_type': 'personal'}}, 'repositories': [
@@ -31,22 +24,15 @@ class GitLabConfigRoutingTests(unittest.TestCase):
         from repo_mirror.config_named import normalize_config
         config = {'destinations': {'d': {'account_type': 'personal'}}, 'repositories': [
             {'source': {'type': 'gitlab', 'url': 'https://code.example/group/sub/project', 'id': 12}, 'mirrors': {'d': {'name': 'project', 'id': 34}}}]}
-        source = normalize_config(config)['sources'][0]
+        source = normalize_config(config)['repositories'][0]
         assert source['type'] == 'gitlab'
         assert source['owner'] == 'group/sub'
-        assert source['destinations']['project'] == {'name': 'project', 'source_id': 12, 'destination_id': 34}
+        assert source['mirror'] == {'name': 'project', 'source_id': 12, 'destination_id': 34}
 
 
-    def test_gitlab_discovery_uses_direct_group_projects_and_slug(self):
-        from repo_mirror.sources import discover, destination_name
-        class API:
-            def pages(self, url):
-                self.url = url
-                return [{'path': 'project'}]
-        api = API()
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub', 'repos': 'all'}
-        assert discover(source, api) == ['project']
-        assert api.url == 'https://gitlab.com/api/v4/groups/group%2Fsub/projects?include_subgroups=false&with_shared=false'
+    def test_gitlab_destination_name_slug(self):
+        from repo_mirror.sources import destination_name
+        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub', 'name': 'project'}
         assert destination_name(source, 'project') == 'mirror-group-sub-project'
 
 

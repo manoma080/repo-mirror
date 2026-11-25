@@ -102,11 +102,6 @@ class AdditionalIntegrationTests(unittest.TestCase):
         adhoc.add_to_config_pinned(cfg, 'https://codeberg.org/alice/project', Never(), Forge(), Destination(), owner='bot', account_type='personal')
         self.assertEqual(cfg['repositories'][0]['source']['id'], 44)
 
-    def test_legacy_config_pins_existing_github_api_base(self):
-        cfg = {'destination_account_type': 'personal', 'sources': [{'type': 'github', 'base_url': 'https://api.github.com', 'owner': 'alice', 'repos': ['project']}]}
-        adhoc.add_to_config_pinned(cfg, URL, Source(), Source(), Destination(), owner='bot', account_type='personal')
-        self.assertEqual(cfg['sources'][0]['destinations']['project']['source_id'], 11)
-
     def test_existing_source_pin_mismatch_is_not_replaced(self):
         cfg = config()
         dest = Destination()

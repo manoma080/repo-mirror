@@ -85,11 +85,16 @@ class SourceAuthTests(unittest.TestCase):
         )
 
     def test_main_uses_separate_clients_for_github_and_forgejo(self):
-        github = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["one"]}
-        forge = {"type": "forgejo", "base_url": "https://api.github.com", "owner": "bob", "repos": ["two"]}
+        config_doc = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},
+                {"source": {"type": "forgejo", "url": "https://api.github.com/bob/two"}, "mirrors": {"main": {}}},
+            ],
+        }
         gh_client, forge_client, dest = Mock(), Mock(), Mock()
         with tempfile.NamedTemporaryFile(mode="w") as config:
-            json.dump({"destination_account_type": "personal", "sources": [github, forge]}, config)
+            json.dump(config_doc, config)
             config.flush()
             with (
                 patch.dict(os.environ, {"GH_TOKEN": "secret", "DESTINATION_OWNER": "dest"}),

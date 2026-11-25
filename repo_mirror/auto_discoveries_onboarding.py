@@ -21,7 +21,6 @@ from repo_mirror.gitlab_onboarding_forgejo import (
     group_origin_key,
     translate_groups,
 )
-from repo_mirror.gitlab_onboarding_github import OnboardingPublicationError
 from repo_mirror.host_limits import CONFIG_KEY
 from repo_mirror.logging_utils import error_detail, safe_label
 from repo_mirror.migrations import blob_sha
@@ -29,6 +28,10 @@ from repo_mirror.repository import validate_source_clone_url
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker
 
 _GENERATED = re.compile(r'gitlab-[0-9a-f]{24}', re.IGNORECASE)
+
+
+class OnboardingPublicationError(RuntimeError):
+    """Publication failed or its result is uncertain; reconciliation is required."""
 
 
 class PartialOnboarding(OnboardingPublicationError):
@@ -746,7 +749,7 @@ def _collect_existing_destination_names(raw_config, profile, rules_by_url, *, fo
             if forgejo:
                 names.add(name.lower())
             else:
-                names.add(destination_name({'type': kind, 'base_url': base, 'owner': owner, 'repos': [name]}, name).lower())
+                names.add(destination_name({'type': kind, 'base_url': base, 'owner': owner}, name).lower())
         legacy = mirror.get('legacy')
         if isinstance(legacy, dict):
             for legacy_key in ('destination_name', 'name'):

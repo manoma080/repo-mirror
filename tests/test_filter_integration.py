@@ -15,19 +15,17 @@ class FilterIntegrationTests(unittest.TestCase):
         secret.start()
         self.addCleanup(secret.stop)
 
-    def run_case(self, fail=False):
-        sources = [
-            dict(type="github", base_url="https://github.com", owner="alice", repos=["one", "two"]),
-            dict(type="github", base_url="https://github.com", owner="bob", repos=["three"]),
-        ]
-
-        def discover(source, api):
-            if fail and source["owner"] == "bob":
-                raise OSError("failure")
-            return source["repos"]
-
+    def test_selected_only(self):
+        config = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},
+                {"source": {"url": "https://github.com/alice/two"}, "mirrors": {"main": {}}},
+                {"source": {"url": "https://github.com/bob/three"}, "mirrors": {"main": {}}},
+            ],
+        }
         with tempfile.NamedTemporaryFile(mode="w") as f:
-            json.dump(dict(destination_account_type="personal", sources=sources), f)
+            json.dump(config, f)
             f.flush()
             env = {
                 "GH_TOKEN": "token",
@@ -36,19 +34,8 @@ class FilterIntegrationTests(unittest.TestCase):
             }
             with (
                 patch.dict(os.environ, env),
-                patch_everywhere("discover", side_effect=discover),
                 patch_everywhere("get_existing", return_value=None),
                 patch_everywhere("mirror_repository") as run,
             ):
-                if fail:
-                    with self.assertRaises(RuntimeError):
-                        mirror.main(["--config", f.name])
-                else:
-                    mirror.main(["--config", f.name])
-                return [call.args[1] for call in run.call_args_list]
-
-    def test_selected_only(self):
-        self.assertEqual(self.run_case(), ["two"])
-
-    def test_discovery_failure_prevents_all_writes(self):
-        self.assertEqual(self.run_case(fail=True), [])
+                mirror.main(["--config", f.name])
+                self.assertEqual([call.args[1] for call in run.call_args_list], ["two"])

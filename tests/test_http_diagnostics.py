@@ -20,9 +20,9 @@ class HTTPDiagnosticsTests(unittest.TestCase):
 
     def test_sync_http_error_reports_status_without_untrusted_url_or_reason(self):
         config = {
-            "destination_account_type": "personal",
-            "sources": [
-                {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}
             ],
         }
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as f:

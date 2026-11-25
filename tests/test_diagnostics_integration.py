@@ -15,7 +15,8 @@ import mirror
 
 class DiagnosticsIntegrationTests(unittest.TestCase):
     def run_main(self, source, destination):
-        config = {"destination_account_type": "organization", "sources": [{**SOURCE, "repos": ["demo"]}]}
+        config = {"destinations": {"main": {"account_type": "organization"}},
+                  "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}]}
         output = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as f:
             json.dump(config, f)

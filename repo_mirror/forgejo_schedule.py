@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from repo_mirror import forgejo_migration
-from repo_mirror.config_json import unique_pairs
+from repo_mirror.config_json import LEGACY_CONFIG_ERROR, is_legacy_config, unique_pairs
 from repo_mirror.forgejo_progress import ProgressReader
 from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, RELOCATION_FIELDS, RELOCATION_PREFIX,
                                       SAFE_REASONS, parse_asset_max_bytes, parse_manifest)
@@ -208,10 +208,8 @@ def main(argv=None):
             parse_asset_max_bytes(args.asset_max_bytes)
         manifest_bytes = Path(args.manifest).read_bytes()
         sources = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
-        if isinstance(sources, dict) and isinstance(sources.get('sources'), list) and any(
-                isinstance(s, dict) and s.get('type') == 'gitlab' and s.get('repos') == 'all'
-                for s in sources['sources']):
-            print('GitLab group discovery is not supported by the Forgejo scheduler', file=sys.stderr)
+        if is_legacy_config(sources):
+            print(LEGACY_CONFIG_ERROR, file=sys.stderr)
             return 2
         groups = sources.get('groups') if isinstance(sources, dict) else None
         auto_discoveries = sources.get('auto_discoveries') if isinstance(sources, dict) else None

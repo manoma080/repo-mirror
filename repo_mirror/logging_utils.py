@@ -109,10 +109,11 @@ def timed_repository(fn):
 
 SAFE_ERROR_MESSAGES = frozenset(
     {
-        "source type must be github or forgejo",
+        "legacy configuration format is no longer supported",
+        "source type must be github, forgejo or gitlab",
         "source base_url must be credential-free HTTPS",
-        "invalid owner or prefix",
-        "repos must be all or a list of repository names",
+        "invalid owner",
+        "invalid repository name",
         "invalid discovered repository name",
         "invalid destination repository name",
         "destination collision: repository has no matching source marker",
@@ -152,8 +153,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "Forgejo empty source body cannot be safely mirrored; inspect any pending release and reconcile manually before retrying",
         "GH_TOKEN and valid DESTINATION_OWNER are required",
         "config must be an object",
-        "destination_account_type must be personal or organization",
-        "sources must be a list",
+        "repositories must be a list",
         "duplicate destination repository",
         "auto-discovery returned zero repositories for a rule with existing entries",
         "source owner identity mismatch",

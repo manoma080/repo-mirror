@@ -60,11 +60,11 @@ class LegacyBindingTests(unittest.TestCase):
         from unittest.mock import Mock
         from repo_mirror.repository import mirror_repository
         from repo_mirror.sources import source_marker
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
-                  'destinations': {'repo': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
-                     'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'name': 'repo',
+                  'mirror': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
+                     'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}
         from repo_mirror.migration_attestation import github_claim, sign
-        source['destinations']['repo']['legacy']['signature'] = sign(github_claim(source, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
+        source['mirror']['legacy']['signature'] = sign(github_claim(source, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
         for source_id, destination_id in ((3, 2), (1, 3)):
             src, dst = Mock(), Mock()
             src.request.return_value = {'id': source_id, 'clone_url': 'https://github.com/new/repo.git'}
@@ -82,11 +82,11 @@ class LegacyBindingTests(unittest.TestCase):
         from unittest.mock import Mock
         from repo_mirror.repository import mirror_repository
         from repo_mirror.sources import source_marker
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
-                  'destinations': {'repo': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
-                     'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'name': 'repo',
+                  'mirror': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
+                     'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}
         from repo_mirror.migration_attestation import github_claim, sign
-        source['destinations']['repo']['legacy']['signature'] = sign(github_claim(source, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
+        source['mirror']['legacy']['signature'] = sign(github_claim(source, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
         src, dst = Mock(), Mock()
         src.request.return_value = {'id': 1, 'clone_url': 'https://github.com/new/repo.git'}
         dst.request.return_value = {'id': 2, 'description': source_marker({**source, 'owner': 'old'}, 'repo')}
@@ -98,22 +98,15 @@ class LegacyBindingTests(unittest.TestCase):
         self.assertEqual(kwargs['journal_source']['owner'], 'old')
         self.assertEqual(kwargs['journal_name'], 'repo')
 
-    def test_relocation_mapping_with_discovery_all_is_rejected(self):
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': 'all',
-                  'destinations': {'repo': {'source_id': 1, 'destination_id': 2,
-                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}}
-        with self.assertRaises(ValueError):
-            validate_source(source)
-
     def test_legacy_binding_requires_both_repository_pins(self):
-        base = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
-                'destinations': {'repo': {'source_id': 1, 'destination_id': 2,
-                    'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}}
-        base['destinations']['repo']['legacy']['signature'] = 'a' * 64
+        base = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'name': 'repo',
+                'mirror': {'source_id': 1, 'destination_id': 2,
+                    'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}
+        base['mirror']['legacy']['signature'] = 'a' * 64
         validate_source(base)
         for key in ('source_id', 'destination_id'):
-            source = {**base, 'destinations': {'repo': dict(base['destinations']['repo'])}}
-            source['destinations']['repo'].pop(key)
+            source = {**base, 'mirror': dict(base['mirror'])}
+            source['mirror'].pop(key)
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_source(source)
 

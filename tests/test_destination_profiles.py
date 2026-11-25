@@ -20,8 +20,8 @@ def manifest(profile, settings):
 class ProfileTests(unittest.TestCase):
     def test_github_profile_preserves_pins(self):
         result = normalize_config(manifest('github-manoma080', GITHUB))
-        self.assertEqual(result['destination_account_type'], 'personal')
-        self.assertEqual(result['sources'][0]['destinations']['mirror-demo']['destination_id'], 456)
+        self.assertEqual(result['account_type'], 'personal')
+        self.assertEqual(result['repositories'][0]['mirror']['destination_id'], 456)
 
     def test_runtime_profile_pins_fail_closed(self):
         from repo_mirror.destination_profile import validate_runtime

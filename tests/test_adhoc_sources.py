@@ -32,41 +32,43 @@ class ParseRepoUrlTests(unittest.TestCase):
 class AddToConfigTests(unittest.TestCase):
     def setUp(self):
         self.config = {
-            "destination_account_type": "personal",
-            "sources": [
-                {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["one"]},
-                {"type": "github", "base_url": "https://github.com", "owner": "bob", "repos": "all"},
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},
+            ],
+            "auto_discoveries": [
+                {"url": "https://github.com/bob"},
             ],
         }
 
     def test_adds_new_repo_to_existing_owner(self):
         self.assertTrue(add_to_config(self.config, "https://github.com/alice/two"))
-        self.assertEqual(self.config["sources"][0]["repos"], ["one", "two"])
-        self.assertEqual(len(self.config["sources"]), 2)
+        self.assertEqual(len(self.config["repositories"]), 2)
+        self.assertEqual(self.config["repositories"][1]["source"]["url"], "https://github.com/alice/two")
 
     def test_adds_new_owner_entry(self):
         self.assertTrue(add_to_config(self.config, "https://git.example/carol/x"))
         self.assertEqual(
-            self.config["sources"][-1],
-            {"type": "forgejo", "base_url": "https://git.example", "owner": "carol", "repos": ["x"]},
+            self.config["repositories"][-1],
+            {"source": {"url": "https://git.example/carol/x"}, "mirrors": {"main": {}}},
         )
 
-    def test_noop_when_already_present_or_covered(self):
-        self.assertFalse(add_to_config(self.config, "https://github.com/alice/one,https://github.com/bob/any"))
-        self.assertEqual(self.config["sources"][0]["repos"], ["one"])
+    def test_noop_when_already_present(self):
+        self.assertFalse(add_to_config(self.config, "https://github.com/alice/one"))
+        self.assertEqual(len(self.config["repositories"]), 1)
 
 
 class OneTimeSourcesTests(unittest.TestCase):
     def setUp(self):
-        self.configured = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["one"]}
+        self.configured = {"type": "github", "base_url": "https://github.com", "owner": "alice", "name": "one"}
         self.plan = [(1, self.configured, "one")]
 
     def test_uncovered_url_becomes_source_and_config_untouched(self):
         sources = one_time_sources("https://github.com/bob/new", self.plan)
         self.assertEqual(
-            sources, [{"type": "github", "base_url": "https://github.com", "owner": "bob", "repos": ["new"]}]
+            sources, [{"type": "github", "base_url": "https://github.com", "owner": "bob", "name": "new"}]
         )
-        self.assertEqual(self.configured["repos"], ["one"])
+        self.assertEqual(self.configured["name"], "one")
 
     def test_covered_url_is_not_duplicated(self):
         self.assertEqual(one_time_sources("https://github.com/alice/one", self.plan), [])
@@ -88,12 +90,12 @@ class ConfigWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.json")
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"sources": []}, f, indent=2)
+                json.dump({"destinations": {"main": {"account_type": "personal"}}, "repositories": []}, f, indent=2)
                 f.write("\n")
             adhoc.main(["--config", path, "--urls", "https://github.com/alice/one"])
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            self.assertEqual(data["sources"][0]["repos"], ["one"])
+            self.assertEqual(data["repositories"][0]["source"]["url"], "https://github.com/alice/one")
             self.assertTrue(open(path, encoding="utf-8").read().endswith("}\n"))
 
 

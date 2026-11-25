@@ -19,7 +19,7 @@ class StarterAssetTests(unittest.TestCase):
         self.addCleanup(secret.stop)
 
     def test_zero_byte_starter_requires_manual_removal_even_for_empty_source(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "name": "demo"}
 
         class Src:
             def request(self, *args):
@@ -67,7 +67,7 @@ class StarterAssetTests(unittest.TestCase):
         self.assertFalse(any(method in ("DELETE", "UPLOAD", "PATCH") for method, url in dst.calls))
 
     def test_main_reports_changed_manifest_recovery_without_source_data(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}
+        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "name": "demo"}
 
         class Src:
             def request(self, *args):
@@ -96,7 +96,10 @@ class StarterAssetTests(unittest.TestCase):
 
         stderr = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:
-            json.dump({"destination_account_type": "personal", "sources": [source]}, f)
+            json.dump({
+                "destinations": {"main": {"account_type": "personal"}},
+                "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
+            }, f)
             f.flush()
             with (
                 patch.dict(os.environ, {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest"}),
@@ -114,10 +117,12 @@ class StarterAssetTests(unittest.TestCase):
         self.assertNotIn("secret", stderr.getvalue())
 
     def test_main_reports_manual_action_for_starter_asset(self):
-        source = {"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}
         stderr = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:
-            json.dump({"destination_account_type": "personal", "sources": [source]}, f)
+            json.dump({
+                "destinations": {"main": {"account_type": "personal"}},
+                "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
+            }, f)
             f.flush()
             with (
                 patch.dict(os.environ, {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest"}),

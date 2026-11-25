@@ -769,10 +769,8 @@ def main(argv=None):
                     manifest = config_snapshot / 'config-forgejo.json'
                 stage = 'manifest validation'
                 sources = json.loads(manifest.read_text(encoding='utf-8'), object_pairs_hook=unique_pairs)
-                if isinstance(sources, dict) and isinstance(sources.get('sources'), list) and any(
-                        isinstance(s, dict) and s.get('type') == 'gitlab' and s.get('repos') == 'all'
-                        for s in sources['sources']):
-                    print('GitLab group discovery is not supported by the Forgejo scheduler', file=sys.stderr)
+                if isinstance(sources, dict) and ({'sources', 'destination_account_type'} & sources.keys()):
+                    print('legacy configuration format is no longer supported', file=sys.stderr)
                     return 2
                 if not valid_manifest(sources):
                     raise ValueError('invalid manifest')

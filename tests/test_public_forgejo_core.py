@@ -53,7 +53,7 @@ class PublicForgejoCoreTests(unittest.TestCase):
             self.assertEqual(_sync_requested(args, [identity], dest, 'github-secret', 'local-secret', 'signing-secret', '/tmp'), 0)
             self.assertEqual(refs.call_args.kwargs['source_token'], None)
             descriptor, name = releases.call_args.args[:2]
-            self.assertEqual(descriptor, {'type': 'forgejo', 'base_url': 'https://code.example.org', 'owner': 'alice', 'repos': ['project']})
+            self.assertEqual(descriptor, {'type': 'forgejo', 'base_url': 'https://code.example.org', 'owner': 'alice', 'name': 'project'})
             self.assertEqual(name, 'project')
             self.assertEqual(releases.call_args.args[5], 'https://code.example.org/api/v1/repos/alice/project')
 

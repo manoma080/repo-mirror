@@ -130,7 +130,7 @@ def parse_owner_url(url, *, allow_forgejo_port=False, source_type=None):
 
 
 def _source_for(source_type, base_url, owner, name):
-    return {"type": source_type, "base_url": base_url, "owner": owner, "repos": [name]}
+    return {"type": source_type, "base_url": base_url, "owner": owner, "name": name}
 
 
 def _matches_owner(source, kind, base, owner):
@@ -241,7 +241,7 @@ def _probe_gitlab_single_segment(username, gitlab_api=None):
 def _configured_gitlab_sources(config):
     if not isinstance(config, dict):
         return []
-    sources = list(config.get('sources', []))
+    sources = []
     for rule in config.get('auto_discoveries', []):
         if isinstance(rule, dict) and rule.get('type') == 'gitlab' and isinstance(rule.get('url'), str):
             try:
@@ -252,13 +252,16 @@ def _configured_gitlab_sources(config):
     for entry in config.get('repositories', []):
         if not isinstance(entry, dict):
             continue
-        src = entry.get('source', {})
-        if isinstance(src, dict) and src.get('type') == 'gitlab' and isinstance(src.get('url'), str):
-            try:
-                _, base, owner, _ = parse_repo_url(src['url'], source_type='gitlab')
-            except ValueError:
-                continue
-            sources.append({'type': 'gitlab', 'base_url': base, 'owner': owner})
+        if 'source' in entry:
+            src = entry.get('source', {})
+            if isinstance(src, dict) and src.get('type') == 'gitlab' and isinstance(src.get('url'), str):
+                try:
+                    _, base, owner, _ = parse_repo_url(src['url'], source_type='gitlab')
+                except ValueError:
+                    continue
+                sources.append({'type': 'gitlab', 'base_url': base, 'owner': owner})
+        elif entry.get('type') == 'gitlab' and isinstance(entry.get('base_url'), str) and isinstance(entry.get('owner'), str):
+            sources.append({'type': 'gitlab', 'base_url': entry['base_url'].rstrip('/'), 'owner': entry['owner']})
     return sources
 
 
@@ -293,55 +296,42 @@ def classify_source_url(url, config=None, *, gitlab_api=None, probe_live=True):
                 )
                 break
 
-        if 'repositories' in config:
-            for entry in config.get('repositories', []):
-                if not isinstance(entry, dict):
-                    continue
+        for entry in config.get('repositories', []):
+            if not isinstance(entry, dict):
+                continue
+            if 'source' in entry:
                 src = entry.get('source', {})
                 if not isinstance(src, dict) or not isinstance(src.get('url'), str):
                     continue
                 try:
                     e_kind, e_base, e_owner, e_name = parse_repo_url(src['url'], source_type=src.get('type'))
-                    u_kind, u_base, u_owner, u_name = parse_repo_url(url, source_type=e_kind)
                 except ValueError:
                     continue
-                if (u_base.lower(), u_owner.lower(), u_name.lower()) == (
-                    e_base.lower(),
-                    e_owner.lower(),
-                    e_name.lower(),
-                ):
-                    repo_match = ClassifiedURL(
-                        kind='repository',
-                        source_type=e_kind,
-                        base_url=e_base,
-                        owner=e_owner,
-                        name=e_name,
-                        url=f'{e_base}/{e_owner}/{e_name}',
-                        existing=True,
-                    )
-                    break
-        elif 'sources' in config:
-            for src in config.get('sources', []):
-                if not isinstance(src, dict) or src.get('repos') == 'all':
-                    continue
-                try:
-                    u_kind, u_base, u_owner, u_name = parse_repo_url(url, source_type=src.get('type'))
-                except ValueError:
-                    continue
-                if _matches_owner(src, u_kind, u_base, u_owner):
-                    saved_name = next((r for r in src.get('repos', []) if r.lower() == u_name.lower()), None)
-                    if saved_name is not None:
-                        base_norm = 'https://github.com' if src.get('type') == 'github' and str(src.get('base_url', '')).rstrip('/').lower() == 'https://api.github.com' else str(src.get('base_url', '')).rstrip('/')
-                        repo_match = ClassifiedURL(
-                            kind='repository',
-                            source_type=src['type'],
-                            base_url=base_norm,
-                            owner=src['owner'],
-                            name=saved_name,
-                            url=f"{base_norm}/{src['owner']}/{saved_name}",
-                            existing=True,
-                        )
-                        break
+            elif all(isinstance(entry.get(k), str) for k in ('type', 'base_url', 'owner', 'name')):
+                e_kind, e_base, e_owner, e_name = entry['type'], entry['base_url'].rstrip('/'), entry['owner'], entry['name']
+                if e_kind == 'github' and e_base.lower() == 'https://api.github.com':
+                    e_base = 'https://github.com'
+            else:
+                continue
+            try:
+                u_kind, u_base, u_owner, u_name = parse_repo_url(url, source_type=e_kind)
+            except ValueError:
+                continue
+            if (u_base.lower(), u_owner.lower(), u_name.lower()) == (
+                e_base.lower(),
+                e_owner.lower(),
+                e_name.lower(),
+            ):
+                repo_match = ClassifiedURL(
+                    kind='repository',
+                    source_type=e_kind,
+                    base_url=e_base,
+                    owner=e_owner,
+                    name=e_name,
+                    url=f'{e_base}/{e_owner}/{e_name}',
+                    existing=True,
+                )
+                break
 
     if rule_match is not None and repo_match is not None:
         raise ValueError('ambiguous source URL matches both an auto-discovery rule and a repository entry')
@@ -414,7 +404,7 @@ def classify_source_url(url, config=None, *, gitlab_api=None, probe_live=True):
     )
 
 
-def _add_to_config_named(config, classified, destination="", visibility=None, ignore_releases=None):
+def _add_to_config_named(config, classified, destination="", visibility=None, ignore_releases=None, *, protect_pins=True):
     from repo_mirror.config_named import normalize_config
     import copy
 
@@ -471,7 +461,7 @@ def _add_to_config_named(config, classified, destination="", visibility=None, ig
         if destination:
             _, _, saved_owner, saved_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
             current_name = mirror.get('name', 'mirror-' + saved_owner + '-' + saved_name)
-            if 'id' in mirror and destination != current_name:
+            if protect_pins and 'id' in mirror and destination != current_name:
                 raise ValueError('cannot rename pinned destination without explicit reconciliation')
             mirror['name'] = destination
         if visibility is not None:
@@ -490,58 +480,11 @@ def _add_to_config_named(config, classified, destination="", visibility=None, ig
 
 def add_to_config(config, source_urls, destination="", visibility=None, *, protect_pins=True, ignore_releases=None, gitlab_api=None):
     """Add URLs and optional per-repository or rule-level destination settings."""
-    if 'repositories' in config or 'destinations' in config:
-        classified = [classify_source_url(part.strip(), config, gitlab_api=gitlab_api) for part in source_urls.split(',')]
-        return _add_to_config_named(config, classified, destination, visibility, ignore_releases)
-    parts = source_urls.split(",")
-    parsed = [parse_selected_url(part.strip(), config['sources']) for part in parts]
-    identities = [tuple(part.lower() for part in item) for item in parsed]
-    if len(set(identities)) != len(identities):
-        raise ValueError("duplicate source repository")
-    if visibility not in (None, "private", "public"):
-        raise ValueError("invalid visibility")
-    if destination and (len(parsed) != 1 or len(destination) > 100 or not NAME.fullmatch(destination) or destination in (".", "..")):
-        raise ValueError("custom destination requires one URL and a valid repository name")
-    changed = False
-    for source_type, base_url, owner, name in parsed:
-        matching_owners = [s for s in config["sources"]
-                           if _matches_owner(s, source_type, base_url, owner)]
-        # Prefer the source that already owns this repository. Named configs
-        # normalize to one source per repo, including multiple entries per owner.
-        match = next((s for s in matching_owners
-                      if s["repos"] != "all" and name.lower() in {r.lower() for r in s["repos"]}), None)
-        if match is None:
-            match = next((s for s in matching_owners if s["repos"] == "all"), None)
-        if match is None:
-            match = next(iter(matching_owners), None)
-        if match is None:
-            match = _source_for(source_type, base_url, owner, name)
-            config["sources"].append(match)
-            changed = True
-        elif match["repos"] != "all" and name.lower() not in {r.lower() for r in match["repos"]}:
-            match["repos"].append(name)
-            changed = True
-        if destination or visibility is not None or ignore_releases is not None:
-            mappings = match.setdefault("destinations", {})
-            old = mappings.get(name.lower(), {})
-            if protect_pins and destination and 'destination_id' in old:
-                from repo_mirror.sources import destination_name
-                saved_name = next((r for r in match['repos'] if r.lower() == name.lower()), name) if match['repos'] != 'all' else name
-                if destination != destination_name(match, saved_name):
-                    raise ValueError('cannot rename pinned destination without explicit reconciliation')
-            new = dict(old)
-            if visibility is not None:
-                new["visibility"] = visibility
-            if destination:
-                new["name"] = destination
-            if ignore_releases is True:
-                new["ignore_releases"] = True
-            elif ignore_releases is False:
-                new.pop("ignore_releases", None)
-            if old != new:
-                mappings[name.lower()] = new
-                changed = True
-    return changed
+    from repo_mirror.config_named import normalize_config
+
+    normalize_config(config)
+    classified = [classify_source_url(part.strip(), config, gitlab_api=gitlab_api) for part in source_urls.split(',')]
+    return _add_to_config_named(config, classified, destination, visibility, ignore_releases, protect_pins=protect_pins)
 
 
 def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst, *, owner, account_type, destination='', visibility=None, ignore_releases=None, gitlab_api=None):
@@ -556,30 +499,24 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
     from repo_mirror.constants import GITHUB
     from repo_mirror.github_api import API
     from repo_mirror.repository import GitHubAPI, validate_source_clone_url
-    from repo_mirror.sources import (check_existing, destination_name, discover, get_existing,
+    from repo_mirror.sources import (check_existing, destination_name, get_existing,
                                      source_api_base, source_marker, validate_source)
 
     candidate = copy.deepcopy(config)
+    normalize_config(candidate)
     probe_client = gitlab_api if gitlab_api is not None else (
         None if (isinstance(API, type) and isinstance(forgejo_source, API)) else forgejo_source
     )
-    is_named = 'repositories' in candidate or 'destinations' in candidate
-    if is_named:
-        classified = [classify_source_url(part.strip(), candidate, gitlab_api=probe_client) for part in source_urls.split(',')]
-        _add_to_config_named(candidate, classified, destination, visibility, ignore_releases)
-        repo_items = [item for item in classified if item.kind == 'repository']
-        requested = [(item.source_type, item.base_url.lower(), item.owner.lower(), item.name.lower()) for item in repo_items]
-    else:
-        add_to_config(candidate, source_urls, destination, visibility, ignore_releases=ignore_releases)
-        requested = None
+    classified = [classify_source_url(part.strip(), candidate, gitlab_api=probe_client) for part in source_urls.split(',')]
+    _add_to_config_named(candidate, classified, destination, visibility, ignore_releases)
+    repo_items = [item for item in classified if item.kind == 'repository']
+    requested = [(item.source_type, item.base_url.lower(), item.owner.lower(), item.name.lower()) for item in repo_items]
     normalized = normalize_config(candidate)
     profile = normalized.get('destination_profile')
     if profile and (profile['url'] != 'https://github.com' or profile['owner'].lower() != owner.lower()):
         raise ValueError('destination profile runtime mismatch')
     if account_type not in ('personal', 'organization') or not isinstance(owner, str) or not NAME.fullmatch(owner):
         raise ValueError('invalid destination account')
-    if requested is None:
-        requested = [tuple(x.lower() for x in parse_selected_url(part.strip(), normalized['sources'])) for part in source_urls.split(',')]
     if not requested:
         changed = candidate != config
         if changed:
@@ -615,23 +552,22 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
         return metadata
 
     selected, seen = [], set()
-    for source in normalized['sources']:
+    for source in normalized['repositories']:
         validate_source(source)
-        names = discover(source, source_client(source))
-        for name in names:
-            target_name = destination_name(source, name)
-            if target_name.lower() in seen:
-                raise ValueError('duplicate destination repository')
-            seen.add(target_name.lower())
-            for identity in requested:
-                if _matches_owner(source, *identity[:3]) and name.lower() == identity[3]:
-                    selected.append((source, name, target_name))
+        name = source['name']
+        target_name = destination_name(source, name)
+        if target_name.lower() in seen:
+            raise ValueError('duplicate destination repository')
+        seen.add(target_name.lower())
+        for identity in requested:
+            if _matches_owner(source, *identity[:3]) and name.lower() == identity[3]:
+                selected.append((source, name, target_name))
     if len(selected) != len(requested):
         raise ValueError('selected repository not discovered in config')
     # Validate all source IDs before making any destination writes.
     prepared = []
     for source, name, target_name in selected:
-        settings = source.get('destinations', {}).get(name.lower(), {})
+        settings = source.get('mirror', {})
         if 'legacy' in settings:
             from repo_mirror.migration_attestation import github_claim, verify
             verify(github_claim(source, name, owner), settings['legacy']['signature'], os.environ.get('MIRROR_TIMESTAMP_SECRET', ''))
@@ -707,13 +643,9 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
         current = read_source(api, source, name, upstream)
         if not isinstance(current, dict) or type(current.get('id')) is not int or current['id'] != sid:
             raise ValueError('source repository id changed')
-        if 'repositories' in candidate:
-            entry = next(e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'], source_type=e['source'].get('type'))) == (source['type'], source['base_url'].lower(), source['owner'].lower(), name.lower()))
-            entry['source']['id'] = sid
-            entry['mirrors'][next(iter(candidate['destinations']))]['id'] = did
-        else:
-            # Normalization returns the original legacy structure.
-            source.setdefault('destinations', {}).setdefault(name.lower(), {}).update(source_id=sid, destination_id=did)
+        entry = next(e for e in candidate['repositories'] if tuple(x.lower() for x in parse_repo_url(e['source']['url'], source_type=e['source'].get('type'))) == (source['type'], source['base_url'].lower(), source['owner'].lower(), name.lower()))
+        entry['source']['id'] = sid
+        entry['mirrors'][next(iter(candidate['destinations']))]['id'] = did
     # Re-read every destination after the batch, including pre-existing pins.
     for target, marker, expected in verified_destinations:
         current = get_existing(dst, target)
@@ -735,108 +667,88 @@ def add_to_config_pinned(config, source_urls, github_source, forgejo_source, dst
 
 def remove_from_config(config, source_urls):
     """Remove repository entries or discovery rules from config without deleting mirrors."""
-    if 'repositories' in config or 'destinations' in config:
-        import copy
-        from repo_mirror.config_named import normalize_config
+    import copy
+    from repo_mirror.config_named import normalize_config
 
-        normalize_config(config)
-        candidate = copy.deepcopy(config)
-        profile = next(iter(candidate['destinations']))
-        classified = [
-            classify_source_url(part.strip(), candidate, probe_live=False)
-            for part in source_urls.split(',')
-        ]
-        rules = candidate.get('auto_discoveries', [])
-        rule_by_url = {}
+    normalize_config(config)
+    candidate = copy.deepcopy(config)
+    profile = next(iter(candidate['destinations']))
+    classified = [
+        classify_source_url(part.strip(), candidate, probe_live=False)
+        for part in source_urls.split(',')
+    ]
+    rules = candidate.get('auto_discoveries', [])
+    rule_by_url = {}
+    for rule in rules:
+        r_kind, r_base, r_segments = parse_owner_url(rule['url'], source_type=rule.get('type'))
+        canonical = f"{r_base}/{'/'.join(r_segments)}"
+        rule_by_url[canonical.lower()] = (rule, r_kind, '/'.join(r_segments))
+
+    repo_identities = {
+        (item.base_url.lower(), item.owner.lower(), item.name.lower())
+        for item in classified
+        if item.kind == 'repository'
+    }
+    kept_repos = []
+    for entry in candidate['repositories']:
+        _, e_base, e_owner, e_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
+        if (e_base.lower(), e_owner.lower(), e_name.lower()) in repo_identities:
+            discovered_by = entry.get('discovered_by')
+            if isinstance(discovered_by, str) and discovered_by.lower() in rule_by_url:
+                owner_rule, _, _ = rule_by_url[discovered_by.lower()]
+                exclude = owner_rule.setdefault('exclude', [])
+                if e_name.lower() not in {x.lower() for x in exclude}:
+                    exclude.append(e_name)
+                if isinstance(owner_rule.get('overrides'), dict):
+                    for ov_key in [k for k in owner_rule['overrides'] if k.lower() == e_name.lower()]:
+                        owner_rule['overrides'].pop(ov_key, None)
+                    if not owner_rule['overrides']:
+                        owner_rule.pop('overrides', None)
+            continue
+        kept_repos.append(entry)
+    candidate['repositories'] = kept_repos
+
+    rule_urls_to_remove = {item.url.lower() for item in classified if item.kind == 'rule' and item.existing}
+    if rule_urls_to_remove:
+        for entry in candidate['repositories']:
+            discovered_by = entry.get('discovered_by')
+            if isinstance(discovered_by, str) and discovered_by.lower() in rule_urls_to_remove:
+                rule_info = rule_by_url.get(discovered_by.lower())
+                mirror = entry['mirrors'][profile]
+                if 'name' not in mirror and rule_info is not None:
+                    owner_rule, r_kind, _ = rule_info
+                    _, _, c_owner, c_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
+                    ov = next(
+                        (v for k, v in owner_rule.get('overrides', {}).items() if k.lower() == c_name.lower()),
+                        None,
+                    )
+                    prefix = owner_rule.get('destination_name_prefix') or ('mirror-' + c_owner.replace('/', '-'))
+                    effective_name = ov['name'] if (ov and 'name' in ov) else f'{prefix}-{c_name}'
+                    default_owner = c_owner.replace('/', '-') if r_kind == 'gitlab' else c_owner
+                    if effective_name != f'mirror-{default_owner}-{c_name}':
+                        mirror['name'] = effective_name
+                entry.pop('discovered_by', None)
+        kept_rules = []
         for rule in rules:
             r_kind, r_base, r_segments = parse_owner_url(rule['url'], source_type=rule.get('type'))
             canonical = f"{r_base}/{'/'.join(r_segments)}"
-            rule_by_url[canonical.lower()] = (rule, r_kind, '/'.join(r_segments))
+            if canonical.lower() not in rule_urls_to_remove:
+                kept_rules.append(rule)
+        if 'auto_discoveries' in candidate:
+            candidate['auto_discoveries'] = kept_rules
 
-        repo_identities = {
-            (item.base_url.lower(), item.owner.lower(), item.name.lower())
-            for item in classified
-            if item.kind == 'repository'
-        }
-        kept_repos = []
-        for entry in candidate['repositories']:
-            _, e_base, e_owner, e_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
-            if (e_base.lower(), e_owner.lower(), e_name.lower()) in repo_identities:
-                discovered_by = entry.get('discovered_by')
-                if isinstance(discovered_by, str) and discovered_by.lower() in rule_by_url:
-                    owner_rule, _, _ = rule_by_url[discovered_by.lower()]
-                    exclude = owner_rule.setdefault('exclude', [])
-                    if e_name.lower() not in {x.lower() for x in exclude}:
-                        exclude.append(e_name)
-                    if isinstance(owner_rule.get('overrides'), dict):
-                        for ov_key in [k for k in owner_rule['overrides'] if k.lower() == e_name.lower()]:
-                            owner_rule['overrides'].pop(ov_key, None)
-                        if not owner_rule['overrides']:
-                            owner_rule.pop('overrides', None)
-                continue
-            kept_repos.append(entry)
-        candidate['repositories'] = kept_repos
-
-        rule_urls_to_remove = {item.url.lower() for item in classified if item.kind == 'rule' and item.existing}
-        if rule_urls_to_remove:
-            for entry in candidate['repositories']:
-                discovered_by = entry.get('discovered_by')
-                if isinstance(discovered_by, str) and discovered_by.lower() in rule_urls_to_remove:
-                    rule_info = rule_by_url.get(discovered_by.lower())
-                    mirror = entry['mirrors'][profile]
-                    if 'name' not in mirror and rule_info is not None:
-                        owner_rule, r_kind, _ = rule_info
-                        _, _, c_owner, c_name = parse_repo_url(entry['source']['url'], source_type=entry['source'].get('type'))
-                        ov = next(
-                            (v for k, v in owner_rule.get('overrides', {}).items() if k.lower() == c_name.lower()),
-                            None,
-                        )
-                        prefix = owner_rule.get('destination_name_prefix') or ('mirror-' + c_owner.replace('/', '-'))
-                        effective_name = ov['name'] if (ov and 'name' in ov) else f'{prefix}-{c_name}'
-                        default_owner = c_owner.replace('/', '-') if r_kind == 'gitlab' else c_owner
-                        if effective_name != f'mirror-{default_owner}-{c_name}':
-                            mirror['name'] = effective_name
-                    entry.pop('discovered_by', None)
-            kept_rules = []
-            for rule in rules:
-                r_kind, r_base, r_segments = parse_owner_url(rule['url'], source_type=rule.get('type'))
-                canonical = f"{r_base}/{'/'.join(r_segments)}"
-                if canonical.lower() not in rule_urls_to_remove:
-                    kept_rules.append(rule)
-            if 'auto_discoveries' in candidate:
-                candidate['auto_discoveries'] = kept_rules
-
-        normalize_config(candidate)
-        changed = candidate != config
-        if changed:
-            config.clear()
-            config.update(candidate)
-        return changed
-    parsed = [parse_repo_url(part.strip()) for part in source_urls.split(",")]
-    for kind, base, owner, name in parsed:
-        for source in config["sources"]:
-            if _matches_owner(source, kind, base, owner) and source.get("repos") == "all":
-                raise ValueError("cannot remove individual repositories from an all source")
-    changed = False
-    for kind, base, owner, name in parsed:
-        for source in list(config["sources"]):
-            if _matches_owner(source, kind, base, owner):
-                repos = source["repos"]
-                kept = [repo for repo in repos if repo.lower() != name.lower()]
-                if len(kept) != len(repos):
-                    source["repos"] = kept
-                    source.get("destinations", {}).pop(name.lower(), None)
-                    changed = True
-                    if not kept:
-                        config["sources"].remove(source)
+    normalize_config(candidate)
+    changed = candidate != config
+    if changed:
+        config.clear()
+        config.update(candidate)
     return changed
 
 
 def one_time_sources(source_urls, plan, configured_sources=(), *, auto_discoveries=(), gitlab_api=None):
     """Return sources for URLs not already covered by the config-discovered plan.
 
-    Each returned source lists exactly one repository and is never written to config.
-    A selected repository under a configured all source must have been discovered.
+    Each returned source lists one repository and is never written to config.
     Unconfigured owner URLs are rejected.
     """
     if source_urls is None or not source_urls.strip():
@@ -844,7 +756,7 @@ def one_time_sources(source_urls, plan, configured_sources=(), *, auto_discoveri
     covered = set()
     for _, source, name in plan:
         covered |= {url.lower() for url in entry_urls(source, name)}
-    lookup_cfg = {'sources': list(configured_sources), 'auto_discoveries': list(auto_discoveries)}
+    lookup_cfg = {'repositories': list(configured_sources), 'auto_discoveries': list(auto_discoveries)}
     sources = []
     for part in source_urls.split(","):
         url = part.strip()
@@ -855,9 +767,6 @@ def one_time_sources(source_urls, plan, configured_sources=(), *, auto_discoveri
             raise ValueError("one-time mirroring is not supported for owner URLs; enable add_to_config")
         source_type, base_url, owner, name = item.source_type, item.base_url, item.owner, item.name
         if url.lower() not in covered:
-            if any(source.get("repos") == "all" and _matches_owner(source, source_type, base_url, owner)
-                   for source in configured_sources):
-                raise ValueError("selected repository not discovered in all source")
             sources.append(_source_for(source_type, base_url, owner, name))
     return sources
 
@@ -891,13 +800,13 @@ def main(argv=None):
         from repo_mirror.destination_profile import validate_runtime
         runtime = normalize_config(config)
         owner = os.environ.get('DESTINATION_OWNER', '')
-        account_type = runtime.get('destination_account_type')
+        account_type = runtime.get('account_type')
         configured_type = os.environ.get('DESTINATION_ACCOUNT_TYPE')
         if configured_type and account_type and configured_type != account_type:
             raise ValueError('destination account type mismatch')
         account_type = configured_type or account_type
         if account_type not in ('personal', 'organization'):
-            raise ValueError('destination_account_type must be personal or organization')
+            raise ValueError('account_type must be personal or organization')
         if runtime.get('destination_profile'):
             validate_runtime(runtime['destination_profile'], 'github', 'https://github.com', owner, 'mirrorbot')
         app_id = os.environ.get('MIRROR_APP_ID', '')
@@ -917,31 +826,15 @@ def main(argv=None):
                                  None if args.visibility == "unchanged" else args.visibility,
                                  ignore_releases=ignore_releases))
     if not args.remove and not args.auto_pin:
-        from repo_mirror.sources import destination_name, validate_source, discover
-        from repo_mirror.github_api import API, SourceAPI
-        seen = set()
-        requested = [
-            (item.source_type, item.base_url, item.owner, item.name)
-            for item in (classify_source_url(part.strip(), config, probe_live=False) for part in args.urls.split(","))
-            if item.kind == 'repository'
-        ]
-        github_api, other_api = SourceAPI(os.environ.get("GH_TOKEN")), API()
-        if callable(getattr(github_api, 'restrict_origin', None)):
-            github_api.restrict_origin('https://api.github.com')
         from repo_mirror.config_named import normalize_config
-        for source in normalize_config(config)["sources"]:
+        from repo_mirror.sources import destination_name, validate_source
+        seen = set()
+        for source in normalize_config(config)["repositories"]:
             validate_source(source)
-            names = discover(source, github_api if source["type"] == "github" else other_api)
-            if source["repos"] == "all":
-                discovered = {name.lower() for name in names}
-                for kind, base, owner, name in requested:
-                    if _matches_owner(source, kind, base, owner) and name.lower() not in discovered:
-                        raise ValueError("selected repository not discovered in all source")
-            for name in names:
-                target = destination_name(source, name).lower()
-                if target in seen:
-                    raise ValueError("duplicate destination repository")
-                seen.add(target)
+            target = destination_name(source, source["name"]).lower()
+            if target in seen:
+                raise ValueError("duplicate destination repository")
+            seen.add(target)
     if changed:
         with open(args.config, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)

@@ -15,7 +15,7 @@ from test_reconcile_assets import Source, Destination, SOURCE
 class ReleaseIdentityTests(unittest.TestCase):
   @patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'fixture-signing-secret-0123456789abcdef'})
   def test_pinned_retry_survives_source_rename_and_clears(self):
-    old = {**SOURCE, 'destinations': {'demo': {'source_id': 12, 'destination_id': 34}}}
+    old = {**SOURCE, 'mirror': {'source_id': 12, 'destination_id': 34}}
     new = {**old, 'owner': 'bob'}
     dest = Destination()
     with tempfile.TemporaryDirectory() as directory:
@@ -35,7 +35,7 @@ class ReleaseIdentityTests(unittest.TestCase):
   @patch.dict('os.environ', {'MIRROR_TIMESTAMP_SECRET': 'fixture-signing-secret-0123456789abcdef'})
   def test_legacy_record_migrates_and_clears_after_success(self):
     old = {**SOURCE, 'owner': 'old'}
-    new = {**SOURCE, 'owner': 'new', 'destinations': {'demo': {'source_id': 12, 'destination_id': 34}}}
+    new = {**SOURCE, 'owner': 'new', 'mirror': {'source_id': 12, 'destination_id': 34}}
     dest = Destination()
     dest.fail = False
     with tempfile.TemporaryDirectory() as directory:
@@ -49,7 +49,7 @@ class ReleaseIdentityTests(unittest.TestCase):
 
   def test_selection_scopes_stable_keys_to_destination_origin_and_id(self):
     from repo_mirror import repository
-    source = {**SOURCE, 'destinations': {'demo': {'source_id': 12, 'destination_id': 34}}}
+    source = {**SOURCE, 'mirror': {'source_id': 12, 'destination_id': 34}}
     releases = [{'id': 1, 'tag_name': 'v3'}, {'id': 2, 'tag_name': 'v2'}, {'id': 3, 'tag_name': 'v1'}]
     class Src:
         def pages(self, url):

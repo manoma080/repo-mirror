@@ -240,7 +240,7 @@ class AutoDiscoveriesRejectionTests(unittest.TestCase):
 
     def test_rejects_auto_discoveries_in_legacy_config_without_named_keys(self):
         cfg = {"destination_account_type": "personal", "sources": [], "auto_discoveries": []}
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "legacy configuration format is no longer supported"):
             normalize_config(cfg)
 
     def test_rejects_non_list_auto_discoveries(self):
@@ -438,7 +438,7 @@ class DiscoveredByAndCollisionTests(unittest.TestCase):
             ],
         )
         normalized = normalize_config(cfg)
-        self.assertEqual(normalized["sources"][0]["discovered_by"], "https://github.com/Alice")
+        self.assertEqual(normalized["repositories"][0]["discovered_by"], "https://github.com/Alice")
 
     def test_rejects_orphan_discovered_by(self):
         cases = (
@@ -613,7 +613,7 @@ class DiscoveredByAndCollisionTests(unittest.TestCase):
             ],
         )
         normalized = normalize_config(cfg)
-        self.assertEqual(normalized["sources"][0]["discovered_by"], "https://github.com/Alice")
+        self.assertEqual(normalized["repositories"][0]["discovered_by"], "https://github.com/Alice")
 
     def test_retained_legacy_gitlab_24hex_name_allowed_with_discovered_by(self):
         cfg = _base_config(
@@ -627,7 +627,7 @@ class DiscoveredByAndCollisionTests(unittest.TestCase):
             ],
         )
         normalized = normalize_config(cfg)
-        self.assertEqual(normalized["sources"][0]["discovered_by"], "https://gitlab.com/team/sub")
+        self.assertEqual(normalized["repositories"][0]["discovered_by"], "https://gitlab.com/team/sub")
 
 
 class RoundTripAndRuntimeGuardTests(unittest.TestCase):
@@ -664,7 +664,7 @@ class RoundTripAndRuntimeGuardTests(unittest.TestCase):
         }
         normalized_before = normalize_config(doc)
         self.assertEqual(len(normalized_before["auto_discoveries"]), 1)
-        self.assertEqual(normalized_before["sources"][1]["discovered_by"], "https://github.com/Alice")
+        self.assertEqual(normalized_before["repositories"][1]["discovered_by"], "https://github.com/Alice")
 
         raw = (json.dumps(doc, indent=2) + "\n").encode("utf-8")
         secret = "fixture-signing-secret-0123456789abcdef"
@@ -795,8 +795,8 @@ class RoundTripAndRuntimeGuardTests(unittest.TestCase):
             ],
         }
         normalized = normalize_config(doc)
-        self.assertEqual(normalized["sources"][1]["owner"], "AliceNew")
-        self.assertEqual(normalized["sources"][1]["discovered_by"], "https://github.com/AliceNew")
+        self.assertEqual(normalized["repositories"][1]["owner"], "AliceNew")
+        self.assertEqual(normalized["repositories"][1]["discovered_by"], "https://github.com/AliceNew")
 
         raw = (json.dumps(doc, indent=2) + "\n").encode("utf-8")
         secret = "fixture-signing-secret-0123456789abcdef"

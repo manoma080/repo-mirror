@@ -194,7 +194,7 @@ class MigrationPipelineTests(unittest.TestCase):
         self.api.seed_repo('mirror-old-owner-repo', 2)
 
     def published(self):
-        return normalize_config(json.loads(self.api.config()))['sources'][0]
+        return normalize_config(json.loads(self.api.config()))['repositories'][0]
 
     # -- success ----------------------------------------------------------
     def test_success_renames_destination_and_publishes_configuration(self):
@@ -205,8 +205,8 @@ class MigrationPipelineTests(unittest.TestCase):
         self.assertEqual(self.pending_count(), 0)
         source = self.published()
         self.assertEqual(source['owner'], 'new-owner')
-        self.assertEqual(source['repos'], ['renamed'])
-        settings = source['destinations']['renamed']
+        self.assertEqual(source['name'], 'renamed')
+        settings = source['mirror']
         self.assertEqual(settings['name'], 'mirror-new-owner-renamed')
         self.assertEqual(settings['destination_id'], 2)
         self.assertEqual(settings['source_id'], 1)
@@ -288,8 +288,8 @@ class MigrationPipelineTests(unittest.TestCase):
         self.assertEqual(self.api.methods('PATCH'), [])
         self.assertIn('copy', self.api.repos)
         source = self.published()
-        self.assertEqual(source['destinations']['renamed']['name'], 'copy')
-        self.assertEqual(source['destinations']['renamed']['legacy']['destination_name'], 'copy')
+        self.assertEqual(source['mirror']['name'], 'copy')
+        self.assertEqual(source['mirror']['legacy']['destination_name'], 'copy')
         self.assertEqual(self.pending_count(), 0)
 
     def test_two_relocations_publish_sequentially(self):

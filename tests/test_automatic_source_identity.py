@@ -5,7 +5,7 @@ from repo_mirror import sources
 
 class AutomaticSourceIdentityTests(unittest.TestCase):
     def test_verified_rename_uses_canonical_identity(self):
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'repos': ['oldrepo']}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'name': 'oldrepo'}
         metadata = {'id': 42, 'full_name': 'new/newrepo', 'html_url': 'https://github.com/new/newrepo'}
         self.assertEqual(sources.verified_source_identity(source, 'oldrepo', 42, metadata),
                          'https://github.com/new/newrepo')
@@ -13,8 +13,8 @@ class AutomaticSourceIdentityTests(unittest.TestCase):
     def test_pinned_rename_mirrors_to_original_target_and_reports_move(self):
         from unittest.mock import Mock, patch
         from repo_mirror import repository
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'repos': ['oldrepo'],
-                  'destinations': {'oldrepo': {'source_id': 42, 'destination_id': 9}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'name': 'oldrepo',
+                  'mirror': {'source_id': 42, 'destination_id': 9}}
         src, dst = Mock(), Mock()
         src.request.return_value = {'id': 42, 'full_name': 'new/newrepo',
                                     'html_url': 'https://github.com/new/newrepo',
@@ -40,8 +40,8 @@ class AutomaticSourceIdentityTests(unittest.TestCase):
     def test_unverified_rename_never_writes_or_mirrors(self):
         from unittest.mock import Mock, patch
         from repo_mirror import repository
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'repos': ['oldrepo'],
-                  'destinations': {'oldrepo': {'source_id': 42, 'destination_id': 9}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'name': 'oldrepo',
+                  'mirror': {'source_id': 42, 'destination_id': 9}}
         for metadata in (
             {'id': 43, 'full_name': 'new/newrepo', 'html_url': 'https://github.com/new/newrepo',
              'clone_url': 'https://github.com/new/newrepo.git'},
@@ -63,7 +63,7 @@ class AutomaticSourceIdentityTests(unittest.TestCase):
                 releases.assert_not_called()
 
     def test_mismatch_missing_id_and_cross_origin_are_rejected(self):
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'repos': ['oldrepo']}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'name': 'oldrepo'}
         for metadata in ({'id': 43, 'full_name': 'new/repo', 'html_url': 'https://github.com/new/repo'},
                          {'full_name': 'new/repo', 'html_url': 'https://github.com/new/repo'},
                          {'id': 42, 'full_name': 'new/repo', 'html_url': 'https://evil.example/new/repo'}):

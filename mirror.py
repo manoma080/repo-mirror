@@ -28,7 +28,6 @@ from repo_mirror.repository import mirror_repository
 from repo_mirror.sources import (
     check_existing,
     destination_name,
-    discover,
     get_existing,
     source_marker,
     validate_source,
@@ -50,7 +49,6 @@ __all__ = [
     "check_existing",
     "copy_asset",
     "destination_name",
-    "discover",
     "error_detail",
     "get_existing",
     "main",

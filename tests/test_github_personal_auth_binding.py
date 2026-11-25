@@ -33,8 +33,8 @@ class PersonalAuthBindingTests(unittest.TestCase):
             def request(self, method, url): return {'clone_url': 'https://github.com/Alice/demo.git'}
         api = API(token)
         api.opener = Opener()
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'Alice',
-                  'destinations': {'demo': {'name': 'copy'}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'Alice', 'name': 'demo',
+                  'mirror': {'name': 'copy'}}
         try:
             mirror_repository(source, 'demo', expected, Source(), api, token, 'personal')
         except Exception as exc:

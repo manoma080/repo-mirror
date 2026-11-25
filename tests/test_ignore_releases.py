@@ -28,8 +28,8 @@ def named_config(ignore_releases=None):
 class ConfigSchemaTests(unittest.TestCase):
     def test_named_config_accepts_boolean_and_rejects_other_values(self):
         runtime = normalize_config(named_config(True))
-        self.assertEqual(runtime['sources'][0]['destinations']['demo']['ignore_releases'], True)
-        self.assertNotIn('ignore_releases', normalize_config(named_config())['sources'][0]['destinations']['demo'])
+        self.assertEqual(runtime['repositories'][0]['mirror']['ignore_releases'], True)
+        self.assertNotIn('ignore_releases', normalize_config(named_config())['repositories'][0]['mirror'])
         for value in ('true', 1, None, [], {}):
             with self.subTest(value=value):
                 config = named_config()
@@ -38,9 +38,9 @@ class ConfigSchemaTests(unittest.TestCase):
                     normalize_config(config)
 
     def test_validated_runtime_source_accepts_the_flag(self):
-        source = normalize_config(named_config(True))['sources'][0]
+        source = normalize_config(named_config(True))['repositories'][0]
         validate_source(source)
-        source['destinations']['demo']['ignore_releases'] = 'yes'
+        source['mirror']['ignore_releases'] = 'yes'
         with self.assertRaises(ValueError):
             validate_source(source)
 
@@ -64,10 +64,10 @@ class AdhocPersistenceTests(unittest.TestCase):
 
 class GitHubRunnerTests(unittest.TestCase):
     def source(self, ignore):
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo'],
-                  'destinations': {'demo': {'source_id': 11, 'destination_id': 22}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'name': 'demo',
+                  'mirror': {'source_id': 11, 'destination_id': 22}}
         if ignore is not None:
-            source['destinations']['demo']['ignore_releases'] = ignore
+            source['mirror']['ignore_releases'] = ignore
         return source
 
     def run_repository(self, ignore):
@@ -96,9 +96,11 @@ class CliOverrideTests(unittest.TestCase):
     def run_cli(self, override):
         with TemporaryDirectory() as directory:
             config = Path(directory) / 'config.json'
-            config.write_text(json.dumps({'destination_account_type': 'personal', 'sources': [{
-                'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo'],
-                'destinations': {'demo': {'source_id': 11, 'destination_id': 22}}}]}))
+            config.write_text(json.dumps({
+                'destinations': {'main': {'account_type': 'personal'}},
+                'repositories': [{'source': {'url': 'https://github.com/alice/demo', 'id': 11},
+                                  'mirrors': {'main': {'id': 22}}}],
+            }))
             env = {'MIRROR_TIMESTAMP_SECRET': 'fixture-signing-secret-0123456789abcdef',
                    'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest',
                    'MIRROR_SOURCE_URLS': 'https://github.com/alice/demo'}
@@ -107,14 +109,14 @@ class CliOverrideTests(unittest.TestCase):
             src, dst = Mock(), Mock()
             src.request.return_value = {'id': 11, 'clone_url': 'https://github.com/alice/demo.git'}
             dst.request.return_value = {'id': 22, 'description': source_marker({
-                'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice', 'repos': ['demo']}, 'demo')}
+                'type': 'github', 'base_url': 'https://github.com', 'owner': 'alice'}, 'demo')}
             with patch.dict('os.environ', env, clear=True), \
                     patch.object(cli, 'SourceAPI', return_value=src), \
                     patch.object(cli, 'API', side_effect=[Mock(), dst]), \
                     patch.object(cli, 'mirror_repository') as mirror, \
                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 cli.main(['--config', str(config)])
-            return mirror.call_args.args[0]['destinations']['demo']
+            return mirror.call_args.args[0]['mirror']
 
     def test_one_run_override_is_in_memory_only(self):
         self.assertIs(self.run_cli('true')['ignore_releases'], True)
