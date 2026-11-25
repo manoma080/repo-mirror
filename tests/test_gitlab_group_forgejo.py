@@ -42,9 +42,17 @@ class GroupOnboardingTests(unittest.TestCase):
             (root/'secret').write_text('x'*32); (root/'secret').chmod(0o600)
             (root/'journal').mkdir(mode=0o700)
             events = []
-            def onboard(*args, **kwargs):
+            from repo_mirror.auto_discoveries_onboarding import OnboardingResult
+            def fake_onboard(*args, **kwargs):
                 events.append('publish')
-                return published
+                return OnboardingResult(
+                    config_bytes=published,
+                    rule_reports=(),
+                    orphaned_children=(),
+                    orphaned_legacy=(),
+                    inducted_total=1,
+                    active_group_bindings=frozenset({('https://gitlab.com/team/p', 42, 'gitlab-p')}),
+                )
             def spawn(command, **kwargs):
                 snapshot = json.loads(Path(command[command.index('--config')+1]).read_text())
                 self.assertNotIn('groups', snapshot)
@@ -53,8 +61,8 @@ class GroupOnboardingTests(unittest.TestCase):
                 from unittest.mock import Mock
                 return Mock(poll=lambda: 0, pid=999999999, wait=lambda: 0)
             with patch('repo_mirror.forgejo_migration.build_migration', return_value=SimpleNamespace(cas=object())), \
-                 patch('repo_mirror.gitlab_onboarding_forgejo.onboard', side_effect=onboard), \
-                 patch('repo_mirror.gitlab_onboarding_forgejo.AnonymousGroupAPI'), \
+                 patch('repo_mirror.auto_discoveries_onboarding.onboard_auto_discoveries_forgejo', side_effect=fake_onboard), \
+                 patch('repo_mirror.forgejo_git.LocalForgejoAPI'), \
                  patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=spawn):
                 result = main(['run', '--manifest', str(root/'manifest'), '--token-file', 'unused',
                                '--timestamp-secret-file', str(root/'secret'), '--journal-dir', str(root/'journal'),
@@ -171,7 +179,7 @@ class GroupOnboardingTests(unittest.TestCase):
                 launched.append((command[-1], snapshot['repositories']))
                 return Mock(poll=lambda:0, pid=999999999, wait=lambda:0)
             with patch('repo_mirror.forgejo_migration.build_migration', return_value=SimpleNamespace(cas=CAS())), \
-                 patch('repo_mirror.gitlab_onboarding_forgejo.AnonymousGroupAPI', return_value=Source()), \
+                 patch('repo_mirror.forgejo_schedule._build_auto_discovery_source_client', return_value=lambda _: Source()), \
                  patch('repo_mirror.forgejo_git.LocalForgejoAPI'), \
                  patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=spawn):
                 status = main(['run','--manifest',str(root/'manifest'),'--token-file','unused','--timestamp-secret-file',str(root/'secret'),
@@ -211,7 +219,7 @@ class GroupOnboardingTests(unittest.TestCase):
                 if kwargs.get('scheduler'):
                     entered.append(True)
                     with patch('repo_mirror.forgejo_migration.build_migration',return_value=SimpleNamespace(cas=CAS())), \
-                         patch('repo_mirror.gitlab_onboarding_forgejo.AnonymousGroupAPI',return_value=Source()), \
+                         patch('repo_mirror.forgejo_schedule._build_auto_discovery_source_client',return_value=lambda _: Source()), \
                          patch('repo_mirror.forgejo_git.LocalForgejoAPI'):
                         return schedule(command[3:])
                 return real_checked(command, **kwargs)

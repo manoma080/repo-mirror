@@ -83,6 +83,11 @@ _AUTO_DISCOVERY_KEYS = frozenset({
 _AUTO_DISCOVERY_OVERRIDE_KEYS = frozenset({'name', 'visibility', 'ignore_releases'})
 
 
+def _origin_key(base_url):
+    parsed = urlsplit(base_url)
+    return (parsed.hostname.lower(), parsed.port or 443)
+
+
 def _parse_owner_url(url, source_type=None):
     if not isinstance(url, str) or not url:
         return None
@@ -210,7 +215,13 @@ def _valid_auto_discoveries(raw_rules):
             ignore_releases = rule['ignore_releases']
         if 'destination_name_prefix' in rule:
             prefix = rule['destination_name_prefix']
-            if not isinstance(prefix, str) or not prefix or not _AUTO_DISCOVERY_NAME.fullmatch(prefix) or prefix in ('.', '..'):
+            if (
+                not isinstance(prefix, str)
+                or not prefix
+                or not _AUTO_DISCOVERY_NAME.fullmatch(prefix)
+                or prefix in ('.', '..')
+                or _AUTO_DISCOVERY_GENERATED.fullmatch(prefix)
+            ):
                 return None
         else:
             prefix = 'mirror-' + owner.replace('/', '-')
@@ -254,7 +265,7 @@ def _valid_auto_discoveries(raw_rules):
                     if not isinstance(ov['ignore_releases'], bool):
                         return None
                 planned = ov['name'] if 'name' in ov else f'{prefix}-{repo_name}'
-                if len(planned) > 100 or not _AUTO_DISCOVERY_NAME.fullmatch(planned) or planned in ('.', '..'):
+                if len(planned) > 100 or not _AUTO_DISCOVERY_NAME.fullmatch(planned) or planned in ('.', '..') or _AUTO_DISCOVERY_GENERATED.fullmatch(planned):
                     return None
                 overrides[repo_name] = dict(ov)
         owner_key = (base.lower(), owner.lower())
@@ -266,7 +277,7 @@ def _valid_auto_discoveries(raw_rules):
             if id_key in seen_ids:
                 return None
             seen_ids.add(id_key)
-        normalized.append({
+        entry = {
             'url': canonical_url,
             'type': kind,
             'base_url': base,
@@ -274,8 +285,12 @@ def _valid_auto_discoveries(raw_rules):
             'visibility': visibility,
             'ignore_releases': ignore_releases,
             'destination_name_prefix': prefix,
+            'has_explicit_prefix': 'destination_name_prefix' in rule,
             'overrides': overrides,
-        })
+        }
+        if 'id' in rule:
+            entry['id'] = rule['id']
+        normalized.append(entry)
     return normalized, {r['url']: r for r in normalized}
 
 
@@ -286,11 +301,14 @@ def valid_manifest(sources):
     rules_by_url = {}
     if named:
         from_groups = 'groups' in sources
+        group_ids = set()
+        group_owners = set()
         if from_groups and set(sources) - {'host_concurrency_limits', 'auto_discoveries'} == {'destinations', 'repositories', 'groups'}:
             groups = sources['groups']
             if not isinstance(groups, list) or not groups:
                 return False
             seen_groups = set()
+            seen_group_owners = set()
             for g in groups:
                 if not isinstance(g, dict) or set(g) != {'type', 'base_url', 'owner', 'id', 'repos'}:
                     return False
@@ -307,10 +325,15 @@ def valid_manifest(sources):
                         return False
                 except ValueError:
                     return False
-                key = (base.lower(), g['id'])
-                if key in seen_groups:
+                okey = _origin_key(base)
+                key = (okey, g['id'])
+                owner_key = (okey, owner.lower())
+                if key in seen_groups or owner_key in seen_group_owners:
                     return False
                 seen_groups.add(key)
+                seen_group_owners.add(owner_key)
+                group_ids.add(key)
+                group_owners.add(owner_key)
             # Reuse the existing strict named-repository checks, permitting a
             # group-only declaration via a harmless validation sentinel.
             sources = dict(sources)
@@ -325,6 +348,11 @@ def valid_manifest(sources):
             if validated_rules is None:
                 return False
             rules, rules_by_url = validated_rules
+            if from_groups:
+                for rule in rules:
+                    r_origin = _origin_key(rule['base_url'])
+                    if ('id' in rule and (r_origin, rule['id']) in group_ids) or (r_origin, rule['owner'].lower()) in group_owners:
+                        return False
         profiles, repos = sources['destinations'], sources['repositories']
         if not isinstance(profiles, dict) or len(profiles) != 1 or not isinstance(repos, list):
             return False
@@ -337,6 +365,7 @@ def valid_manifest(sources):
         elif settings not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
             return False
         converted = []
+        rules_with_generated = set()
         for repo in repos:
             if not isinstance(repo, dict) or not {'source', 'mirrors'} <= set(repo) or set(repo) - {'source', 'mirrors', 'discovered_by'}:
                 return False
@@ -370,7 +399,21 @@ def valid_manifest(sources):
                     if mirror['name'] != planned_name and not (rule['type'] == 'gitlab' and _AUTO_DISCOVERY_GENERATED.fullmatch(mirror['name'])):
                         return False
                 else:
+                    if _AUTO_DISCOVERY_GENERATED.fullmatch(planned_name):
+                        return False
                     dest_name = planned_name
+            if 'name' in mirror and isinstance(mirror['name'], str) and _AUTO_DISCOVERY_GENERATED.fullmatch(mirror['name']):
+                if 'discovered_by' in repo:
+                    rules_with_generated.add(repo['discovered_by'])
+                if kind == 'gitlab':
+                    repo_origin = _origin_key(base)
+                    for rule in rules:
+                        if (
+                            rule['type'] == 'gitlab'
+                            and _origin_key(rule['base_url']) == repo_origin
+                            and rule['owner'].lower() == owner.lower()
+                        ):
+                            rules_with_generated.add(rule['url'])
             item = {
                 'url': source['url'],
                 'destination_name': dest_name,
@@ -432,6 +475,8 @@ def valid_manifest(sources):
             for dest_key in names:
                 seen_identities_by_dest[dest_key] = item_identity
     for rule in rules:
+        if rule.get('has_explicit_prefix') and rule['url'] in rules_with_generated:
+            return False
         for repo_key, ov in rule['overrides'].items():
             ov_identity = (rule['base_url'].lower(), rule['owner'].lower(), repo_key.lower())
             planned = ov['name'] if 'name' in ov else f"{rule['destination_name_prefix']}-{repo_key}"

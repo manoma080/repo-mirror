@@ -133,11 +133,19 @@ def normalize_named(sources):
     from repo_mirror.adhoc import parse_repo_url
     from repo_mirror.config_named import _GENERATED, _normalize_auto_discoveries
     from repo_mirror.constants import NAME
+    from repo_mirror.gitlab_onboarding_forgejo import PREFIX_WITH_GENERATED_MESSAGE, group_origin_key, translate_groups
     from repo_mirror.host_limits import CONFIG_KEY
-    if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories'}:
+    if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY, 'auto_discoveries', 'groups'} != {'destinations', 'repositories'}:
         raise ValueError('invalid named manifest')
     normalized_rules = _normalize_auto_discoveries(sources['auto_discoveries']) if 'auto_discoveries' in sources else []
+    if 'groups' in sources:
+        translate_groups(sources, normalized_auto_discoveries=normalized_rules)
     rules_by_url = {r['url']: r for r in normalized_rules}
+    explicit_prefix_rules = [
+        norm for raw, norm in zip(sources.get('auto_discoveries', []), normalized_rules)
+        if 'destination_name_prefix' in raw
+    ]
+    explicit_prefix_urls = {r['url'] for r in explicit_prefix_rules}
     destinations, repositories = sources['destinations'], sources['repositories']
     if not isinstance(destinations, dict) or len(destinations) != 1 or not isinstance(repositories, list):
         raise ValueError('invalid named manifest')
@@ -200,8 +208,21 @@ def normalize_named(sources):
                 if dest_name != planned_name and not (rule['type'] == 'gitlab' and _GENERATED.fullmatch(dest_name)):
                     raise ValueError('discovered_by destination name mismatch')
             else:
+                if _GENERATED.fullmatch(planned_name):
+                    raise ValueError('invalid destination repository name')
                 item['destination_name'] = planned_name
             item['discovered_by'] = discovered_by
+        if 'name' in mirror and isinstance(mirror['name'], str) and _GENERATED.fullmatch(mirror['name']):
+            if repo.get('discovered_by') in explicit_prefix_urls or (
+                kind == 'gitlab'
+                and any(
+                    r['type'] == 'gitlab'
+                    and group_origin_key(r['base_url']) == group_origin_key(base)
+                    and r['owner'].lower() == owner.lower()
+                    for r in explicit_prefix_rules
+                )
+            ):
+                raise ValueError(PREFIX_WITH_GENERATED_MESSAGE)
         dest_key = item['destination_name'].lower()
         if dest_key in seen_destinations:
             raise ValueError('conflicting destination')

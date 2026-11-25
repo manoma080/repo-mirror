@@ -615,7 +615,14 @@ class ForgejoOnboardingEndToEndTests(unittest.TestCase):
         )
         cas = ForgejoFile(api, 'dest', 'control', 'config.json', expected_id=99)
         src = FakeSourceAPI(
-            routes={'https://api.github.com/users/Alice': {'id': 100, 'login': 'Alice', 'type': 'User'}},
+            routes={
+                'https://api.github.com/users/Alice': {'id': 100, 'login': 'Alice', 'type': 'User'},
+                'https://gitlab.com/api/v4/groups/team%2Fsub': {
+                    'id': 7,
+                    'visibility': 'public',
+                    'full_path': 'team/sub',
+                },
+            },
             pages_routes={
                 'https://api.github.com/users/Alice/repos?type=owner': [
                     {
@@ -625,7 +632,16 @@ class ForgejoOnboardingEndToEndTests(unittest.TestCase):
                         'clone_url': 'https://github.com/Alice/proj.git',
                         'private': False,
                     }
-                ]
+                ],
+                'https://gitlab.com/api/v4/groups/team%2Fsub/projects?include_subgroups=false&with_shared=false': [
+                    {
+                        'id': 701,
+                        'path': 'proj',
+                        'visibility': 'public',
+                        'path_with_namespace': 'team/sub/proj',
+                        'http_url_to_repo': 'https://gitlab.com/team/sub/proj.git',
+                    }
+                ],
             },
         )
         with self.assertRaisesRegex(ValueError, 'duplicate destination repository'):
@@ -824,9 +840,10 @@ class ForgejoScheduleIntegrationTests(unittest.TestCase):
 
             with (
                 patch('repo_mirror.forgejo_control_config.ForgejoControlAPI', return_value=api),
-                patch('repo_mirror.gitlab_onboarding_forgejo.AnonymousGroupAPI', return_value=gitlab_src),
-                patch('repo_mirror.gitlab_source_adapter.GitLabSourceAdapter', return_value=Mock(project=lambda: {})),
-                patch('repo_mirror.forgejo_schedule._build_auto_discovery_source_client', return_value=lambda _: gh_src),
+                patch(
+                    'repo_mirror.forgejo_schedule._build_auto_discovery_source_client',
+                    return_value=lambda rule: gitlab_src if rule['type'] == 'gitlab' else gh_src,
+                ),
                 patch('repo_mirror.forgejo_schedule.subprocess.Popen') as worker,
                 redirect_stdout(io.StringIO()),
             ):

@@ -186,6 +186,8 @@ SAFE_ERROR_MESSAGES = frozenset(
         "overlapping auto-discovery rule and child repository URL",
         "one-time mirroring is not supported for owner URLs; enable add_to_config",
         "duplicate auto-discovery rule",
+        "duplicate group declaration in groups and auto_discoveries",
+        "destination_name_prefix is not allowed on a rule with existing generated gitlab destinations",
         "unknown or unsupported source repository URL",
         # Migration transaction failures: fixed reasons only, never free text.
         "migration configuration invalid",

@@ -23,7 +23,7 @@ Allowed top-level keys in a named configuration are:
 - `repositories` (required array)
 - `host_concurrency_limits` (optional object)
 - `auto_discoveries` (optional array of rule objects)
-- `groups` (deprecated optional array on Forgejo only during the compatibility window; mixing `groups` and `auto_discoveries` is rejected)
+- `groups` (deprecated optional array on Forgejo only during the one-release compatibility window; translated in memory into `auto_discoveries` at load time with one warning line per group; duplicate declarations across `groups` and `auto_discoveries` are rejected)
 
 Duplicate JSON keys remain rejected everywhere (`repo_mirror/config_json.py:4-10`). Unknown keys are rejected at the top level, in each `auto_discoveries[]` object, in each `overrides.<repo>` object, and in each `repositories[]` entry.
 
@@ -187,10 +187,10 @@ Fixed safe error strings (never echoing URLs):
 ]
 ```
 
-**Compatibility window:** Release 1 accepts either `groups` (emitting a deprecation warning) or `auto_discoveries`, rejecting manifests that specify both. Release 2 (after operator manifests migrate) removes `groups` parsing from `repo_mirror/gitlab_onboarding_forgejo.py`, `repo_mirror/forgejo_schedule.py`, `repo_mirror/forgejo_dispatch.py`, and `scheduler/auto_update.py`.
+**Compatibility window:** Release 1 accepts either `groups` (translated in memory to `auto_discoveries` at load time without rewriting the config file, emitting one deprecation warning line per translated group) or `auto_discoveries` (or non-overlapping combinations of both), and rejects manifests that declare the same group `(origin, id)` or `(origin, owner)` in both `groups` and `auto_discoveries`. Release 2 (the follow-up PR after operator manifests migrate) deletes `groups` parsing and compatibility from `repo_mirror/gitlab_onboarding_forgejo.py`, `repo_mirror/forgejo_schedule.py`, `repo_mirror/forgejo_sync.py`, `repo_mirror/forgejo_dispatch.py`, `repo_mirror/auto_discoveries_onboarding.py`, and `scheduler/auto_update.py`.
 
-**Existing `gitlab-<24hex>` entries:** Current `groups` onboarding generates destination names `gitlab-` + 24 hex chars (`repo_mirror/gitlab_onboarding_forgejo.py:109-110`) and skips scheduling them if `groups` is removed (`repo_mirror/forgejo_schedule.py:171-176`). Under `auto_discoveries`, new inductions use `<destination_name_prefix>-<repo>` (default `mirror-team-sub-<repo>`), and `gitlab-<24hex>` remains forbidden for new entries (`repo_mirror/forgejo_dispatch.py:17`). When migrating an existing `groups` manifest, operators have two paths:
-1. **Retain existing `gitlab-<24hex>` destinations:** Add `"discovered_by": "https://gitlab.com/team/sub"` to each existing `gitlab-<24hex>` entry in `repositories[]` so it remains scheduled without renaming the destination; newly added projects in `team/sub` receive `<prefix>-<repo>` names.
+**Existing `gitlab-<24hex>` entries:** Current `groups` onboarding generates destination names `gitlab-` + 24 hex chars (`repo_mirror/gitlab_onboarding_forgejo.py:109-110`) and skips scheduling them if `groups` is removed (`repo_mirror/forgejo_schedule.py:171-176`). Under translation, existing generated entries keep their `mirrors.<profile>.name` (never renaming a live destination), and new inductions under a translated `groups` entry continue using `gitlab-<24hex>` rather than `destination_name_prefix` so mixed manifests cannot collide. On native `auto_discoveries` rules, `destination_name_prefix` is rejected if the rule has any existing `gitlab-<24hex>` child, and any operator-supplied prefix or `overrides.<repo>.name` producing `gitlab-<24hex>` remains refused. Under `auto_discoveries`, new inductions use `<destination_name_prefix>-<repo>` (default `mirror-team-sub-<repo>`). When migrating an existing `groups` manifest, operators have two paths:
+1. **Retain existing `gitlab-<24hex>` destinations:** Add `"discovered_by": "https://gitlab.com/team/sub"` to each existing `gitlab-<24hex>` entry in `repositories[]` (without setting `destination_name_prefix` on the rule) so it remains scheduled without renaming the destination; newly added projects in `team/sub` receive `<prefix>-<repo>` names.
 2. **Retire `gitlab-<24hex>` entries:** Leave old `gitlab-<24hex>` entries without `discovered_by` (retained in config, not scheduled per `repo_mirror/forgejo_schedule.py:171-176`), or perform a reviewed manual destination rename to `<prefix>-<repo>`.
 
 ## Removal of the legacy format

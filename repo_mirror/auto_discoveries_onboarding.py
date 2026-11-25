@@ -16,7 +16,11 @@ from repo_mirror.constants import GITHUB, NAME
 from repo_mirror.forgejo_git import APIError, ForgejoDestination, LocalForgejoAPI, _name, _source_marker
 from repo_mirror.forgejo_sync import parse_manifest, parse_source
 from repo_mirror.github_api import API as GitHubAPI, not_found
-from repo_mirror.gitlab_onboarding_forgejo import validate_groups
+from repo_mirror.gitlab_onboarding_forgejo import (
+    gitlab_generated_name,
+    group_origin_key,
+    translate_groups,
+)
 from repo_mirror.gitlab_onboarding_github import OnboardingPublicationError
 from repo_mirror.host_limits import CONFIG_KEY
 from repo_mirror.logging_utils import error_detail, safe_label
@@ -67,6 +71,9 @@ class RulePlan:
     old_owner: str = ''
     relocated_to: str | None = None
     preserve_prefix: str | None = None
+    raw_index: int | None = None
+    from_groups: bool = False
+    active_bindings: tuple[tuple[str, int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,6 +84,7 @@ class OnboardingResult:
     orphaned_legacy: tuple[tuple[str, str, str], ...]
     inducted_total: int
     relocated_rules: tuple[tuple[str, str], ...] = ()
+    active_group_bindings: frozenset[tuple[str, int, str]] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -137,11 +145,11 @@ def _resolve_forgejo_owner(api_base, owner, api):
     return {'id': owner_id, 'kind': kind, 'canonical_owner': canonical}
 
 
-def _resolve_gitlab_owner(api_base, owner, api):
+def _resolve_gitlab_owner(api_base, owner, api, *, group_only=False):
     try:
         data = api.request('GET', f"{api_base}/groups/{quote(owner, safe='')}")
     except HTTPError as exc:
-        if '/' not in owner and not_found(exc):
+        if not group_only and '/' not in owner and not_found(exc):
             exc.close()
             users = api.request('GET', f"{api_base}/users?username={quote(owner, safe='')}")
             if not isinstance(users, list):
@@ -172,6 +180,7 @@ def resolve_owner(rule, api):
     api_base = source_api_base(rule)
     owner = rule['owner']
     kind = rule['type']
+    from_groups = bool(rule.get('_from_groups'))
     if kind == 'github':
         info = _resolve_github_owner(api_base, owner, api)
     elif kind == 'forgejo':
@@ -179,15 +188,17 @@ def resolve_owner(rule, api):
     elif kind == 'gitlab':
         if 'id' not in rule:
             raise ValueError('GitLab auto_discoveries rule requires id')
-        info = _resolve_gitlab_owner(api_base, owner, api)
+        info = _resolve_gitlab_owner(api_base, owner, api, group_only=from_groups)
     else:
         raise ValueError('invalid auto_discoveries type')
+    if from_groups and info['kind'] != 'group':
+        raise ValueError('source owner identity mismatch')
     if 'id' in rule and info['id'] != rule['id']:
         raise ValueError('source owner identity mismatch')
     canonical = info.pop('canonical_owner')
     changed = canonical.lower() != owner.lower() if kind == 'github' else canonical != owner
     if changed:
-        if 'id' not in rule:
+        if from_groups or 'id' not in rule:
             raise ValueError('source owner identity mismatch')
         try:
             _, _, segments = parse_owner_url(f"{rule['base_url']}/{canonical}", source_type=kind)
@@ -302,14 +313,15 @@ def _configured_child_dest_name(rule, child, profile, *, allow_forgejo_port=Fals
     return f"{rule['destination_name_prefix']}-{child_name}"
 
 
-def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, api, *, runner='github'):
+def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, api, *, runner='github', raw_index=None):
     allow_forgejo_port = runner == 'forgejo'
+    from_groups = bool(rule.get('_from_groups'))
     owner_info = resolve_owner(rule, api)
-    needs_id_pin = 'id' not in rule
+    needs_id_pin = (not from_groups) and ('id' not in rule)
     relocated_to = owner_info.get('relocated_owner')
     old_rule_url = rule['url']
     old_owner = rule['owner']
-    rule_children = [entry for entry in repositories if entry.get('discovered_by') == old_rule_url]
+    rule_children = [] if from_groups else [entry for entry in repositories if entry.get('discovered_by') == old_rule_url]
     preserve_prefix = None
     if relocated_to is not None:
         new_url = f"{rule['base_url']}/{relocated_to}"
@@ -357,6 +369,7 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
     excluded_count = 0
     tracked_count = 0
     planned = []
+    active_bindings = []
 
     for name, source_id, clone_url, full_name, source_is_public in discovered:
         if name.lower() in exclude_lower:
@@ -365,53 +378,62 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
         id_matches = [
             rec for rec in parsed_existing
             if rec.kind == effective_rule['type']
-            and rec.base.lower() == effective_rule['base_url'].lower()
+            and group_origin_key(rec.base) == group_origin_key(effective_rule['base_url'])
             and rec.entry['source'].get('id') == source_id
         ]
         if len(id_matches) > 1:
             raise ValueError('existing source mapping conflicts')
-        url_identity = (effective_rule['base_url'].lower(), effective_rule['owner'].lower(), name.lower())
+        url_identity = (group_origin_key(effective_rule['base_url']), effective_rule['owner'].lower(), name.lower())
         if len(id_matches) == 1:
             matched = id_matches[0]
             other_url_matches = [
                 rec for rec in parsed_existing
                 if rec.index != matched.index
-                and (rec.base.lower(), rec.owner.lower(), rec.name.lower()) == url_identity
+                and (group_origin_key(rec.base), rec.owner.lower(), rec.name.lower()) == url_identity
             ]
             if other_url_matches:
                 raise ValueError('existing source mapping conflicts')
             if 'discovered_by' in matched.entry and matched.entry['discovered_by'] != old_rule_url:
                 raise ValueError('existing source mapping conflicts')
-            if 'discovered_by' in matched.entry:
+            if from_groups or 'discovered_by' in matched.entry:
                 mirror = matched.entry['mirrors'][profile]
                 if type(mirror.get('id')) is not int or mirror['id'] <= 0:
                     raise ValueError('existing source mapping conflicts')
+            if from_groups:
+                mirror = matched.entry['mirrors'][profile]
+                active_bindings.append((matched.entry['source']['url'], source_id, mirror.get('name', '')))
             tracked_count += 1
             continue
 
         url_matches = [
             rec for rec in parsed_existing
-            if (rec.base.lower(), rec.owner.lower(), rec.name.lower()) == url_identity
+            if (group_origin_key(rec.base), rec.owner.lower(), rec.name.lower()) == url_identity
         ]
         if url_matches:
             raise ValueError('source repository id mismatch or missing')
 
-        ov = next((v for k, v in effective_rule['overrides'].items() if k.lower() == name.lower()), None)
-        dest_name = ov['name'] if (ov and 'name' in ov) else f"{effective_rule['destination_name_prefix']}-{name}"
-        if (
-            not isinstance(dest_name, str)
-            or not (1 <= len(dest_name) <= 100)
-            or not NAME.fullmatch(dest_name)
-            or dest_name in ('.', '..')
-            or _GENERATED.fullmatch(dest_name)
-        ):
-            raise ValueError('invalid destination repository name')
-        requested_visibility = ov['visibility'] if (ov and 'visibility' in ov) else effective_rule['visibility']
-        if runner == 'forgejo':
-            visibility = 'public' if (requested_visibility == 'public' and source_is_public) else 'private'
+        if from_groups:
+            dest_name = gitlab_generated_name(effective_rule['base_url'], owner_info['id'], source_id)
+            visibility = 'private'
+            ignore_releases = False
+            active_bindings.append((f"{effective_rule['base_url']}/{effective_rule['owner']}/{name}", source_id, dest_name))
         else:
-            visibility = requested_visibility
-        ignore_releases = ov['ignore_releases'] if (ov and 'ignore_releases' in ov) else effective_rule['ignore_releases']
+            ov = next((v for k, v in effective_rule['overrides'].items() if k.lower() == name.lower()), None)
+            dest_name = ov['name'] if (ov and 'name' in ov) else f"{effective_rule['destination_name_prefix']}-{name}"
+            if (
+                not isinstance(dest_name, str)
+                or not (1 <= len(dest_name) <= 100)
+                or not NAME.fullmatch(dest_name)
+                or dest_name in ('.', '..')
+                or _GENERATED.fullmatch(dest_name)
+            ):
+                raise ValueError('invalid destination repository name')
+            requested_visibility = ov['visibility'] if (ov and 'visibility' in ov) else effective_rule['visibility']
+            if runner == 'forgejo':
+                visibility = 'public' if (requested_visibility == 'public' and source_is_public) else 'private'
+            else:
+                visibility = requested_visibility
+            ignore_releases = ov['ignore_releases'] if (ov and 'ignore_releases' in ov) else effective_rule['ignore_releases']
         planned.append(
             PlannedInduction(
                 name=name,
@@ -459,6 +481,9 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
         old_owner=old_owner,
         relocated_to=relocated_to,
         preserve_prefix=preserve_prefix,
+        raw_index=raw_index,
+        from_groups=from_groups,
+        active_bindings=tuple(active_bindings),
     )
 
 
@@ -659,26 +684,33 @@ def _validate_document(doc, runner):
         raise ValueError('invalid onboarding runner')
     if not isinstance(doc, dict):
         raise ValueError('invalid named manifest')
-    if 'groups' in doc:
-        validate_groups(doc['groups'])
-        if set(doc) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'}:
-            raise ValueError('invalid group manifest')
-        worker_doc = {k: v for k, v in doc.items() if k != 'groups'}
-    else:
-        worker_doc = doc
-    parse_manifest(worker_doc)
-    return worker_doc
+    if 'groups' in doc and set(doc) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'}:
+        raise ValueError('invalid group manifest')
+    parse_manifest(doc)
+    return {k: v for k, v in doc.items() if k != 'groups'} if 'groups' in doc else doc
 
 
-def _extract_rules(raw_config, validated, runner):
+def _extract_rules(raw_config, validated, runner, *, stream=None, emit_group_warnings=True):
     if runner == 'github':
-        return validated.get('auto_discoveries', [])
-    if 'auto_discoveries' in raw_config:
-        return _normalize_auto_discoveries(raw_config['auto_discoveries'])
-    return []
+        return [(idx, rule, raw_config['auto_discoveries'][idx]) for idx, rule in enumerate(validated.get('auto_discoveries', []))]
+    auto_rules = _normalize_auto_discoveries(raw_config['auto_discoveries']) if 'auto_discoveries' in raw_config else []
+    items = [(idx, rule, raw_config['auto_discoveries'][idx]) for idx, rule in enumerate(auto_rules)]
+    if 'groups' in raw_config:
+        group_rules = translate_groups(
+            raw_config,
+            normalized_auto_discoveries=auto_rules,
+            stream=(stream if emit_group_warnings else None),
+        )
+        items.extend((None, rule, None) for rule in group_rules)
+    return items
 
 
-def _build_repository_entry(item, profile, dest_id):
+def _build_repository_entry(item, profile, dest_id, *, from_groups=False):
+    if from_groups:
+        return {
+            'source': {'type': 'gitlab', 'url': f'{item.base_url}/{item.owner}/{item.name}', 'id': item.source_id},
+            'mirrors': {profile: {'name': item.dest_name, 'id': dest_id}},
+        }
     source_obj = {'url': f'{item.base_url}/{item.owner}/{item.name}', 'id': item.source_id}
     if item.source_type == 'gitlab' and item.base_url.lower() != 'https://gitlab.com':
         source_obj['type'] = 'gitlab'
@@ -739,10 +771,12 @@ def _prevalidate_plans(raw_config, profile, plans, destination_adapter, stream, 
     projected = copy.deepcopy(raw_config)
     reloc_by_old_url = {}
     for rule_plan in plans:
+        if rule_plan.from_groups:
+            continue
         if rule_plan.needs_id_pin:
-            projected['auto_discoveries'][rule_plan.index - 1]['id'] = rule_plan.owner_id
+            projected['auto_discoveries'][rule_plan.raw_index]['id'] = rule_plan.owner_id
         if rule_plan.relocated_to is not None:
-            raw_rule = projected['auto_discoveries'][rule_plan.index - 1]
+            raw_rule = projected['auto_discoveries'][rule_plan.raw_index]
             raw_rule['url'] = rule_plan.rule['url']
             if rule_plan.preserve_prefix is not None:
                 raw_rule['destination_name_prefix'] = rule_plan.preserve_prefix
@@ -768,7 +802,7 @@ def _prevalidate_plans(raw_config, profile, plans, destination_adapter, stream, 
                 _log_rule_failure(rule_plan, exc, stream)
                 raise exc
             planned_dests.add(key)
-            projected['repositories'].append(_build_repository_entry(item, profile, 1))
+            projected['repositories'].append(_build_repository_entry(item, profile, 1, from_groups=rule_plan.from_groups))
     try:
         _validate_document(projected, runner)
     except Exception as exc:
@@ -805,26 +839,36 @@ def _publish_rule(store, config_bytes, rule_plan, created_entries, profile, *, r
     if current != config_bytes:
         raise ValueError('authoritative configuration differs from checkout')
     doc = json.loads(config_bytes, object_pairs_hook=unique_pairs)
-    raw_rule = doc['auto_discoveries'][rule_plan.index - 1]
-    if rule_plan.needs_id_pin:
-        if 'id' in raw_rule:
-            raise ValueError('authoritative configuration differs from checkout')
-        raw_rule['id'] = rule_plan.owner_id
-    elif raw_rule.get('id') != rule_plan.owner_id:
-        raise ValueError('source owner identity mismatch')
-    if rule_plan.relocated_to is not None:
-        raw_rule['url'] = rule_plan.rule['url']
-        if rule_plan.preserve_prefix is not None:
-            raw_rule['destination_name_prefix'] = rule_plan.preserve_prefix
-        for entry in doc['repositories']:
-            if entry.get('discovered_by') == rule_plan.old_rule_url:
-                _, _, _, child_name = parse_repo_url(
-                    entry['source']['url'],
-                    source_type=entry['source'].get('type'),
-                    allow_forgejo_port=allow_forgejo_port,
-                )
-                entry['source']['url'] = f"{rule_plan.rule['base_url']}/{rule_plan.relocated_to}/{child_name}"
-                entry['discovered_by'] = rule_plan.rule['url']
+    if rule_plan.from_groups:
+        rule_okey = group_origin_key(rule_plan.rule['base_url'])
+        if not any(
+            isinstance(g, dict)
+            and group_origin_key(g.get('base_url', '')) == rule_okey
+            and g.get('id') == rule_plan.owner_id
+            for g in doc.get('groups', ())
+        ):
+            raise ValueError('source owner identity mismatch')
+    else:
+        raw_rule = doc['auto_discoveries'][rule_plan.raw_index]
+        if rule_plan.needs_id_pin:
+            if 'id' in raw_rule:
+                raise ValueError('authoritative configuration differs from checkout')
+            raw_rule['id'] = rule_plan.owner_id
+        elif raw_rule.get('id') != rule_plan.owner_id:
+            raise ValueError('source owner identity mismatch')
+        if rule_plan.relocated_to is not None:
+            raw_rule['url'] = rule_plan.rule['url']
+            if rule_plan.preserve_prefix is not None:
+                raw_rule['destination_name_prefix'] = rule_plan.preserve_prefix
+            for entry in doc['repositories']:
+                if entry.get('discovered_by') == rule_plan.old_rule_url:
+                    _, _, _, child_name = parse_repo_url(
+                        entry['source']['url'],
+                        source_type=entry['source'].get('type'),
+                        allow_forgejo_port=allow_forgejo_port,
+                    )
+                    entry['source']['url'] = f"{rule_plan.rule['base_url']}/{rule_plan.relocated_to}/{child_name}"
+                    entry['discovered_by'] = rule_plan.rule['url']
     doc['repositories'].extend(created_entries)
     _validate_document(doc, runner)
     after = (json.dumps(doc, indent=2, ensure_ascii=False) + '\n').encode('utf-8')
@@ -835,13 +879,15 @@ def _publish_rule(store, config_bytes, rule_plan, created_entries, profile, *, r
     return after
 
 
-def _find_orphaned_legacy(raw_config, profile, *, allow_forgejo_port=False):
+def _find_orphaned_legacy(raw_config, profile, *, allow_forgejo_port=False, active_group_bindings=frozenset()):
     orphans = []
     for entry in raw_config['repositories']:
         if 'discovered_by' in entry:
             continue
         mirror_name = entry['mirrors'][profile].get('name', '')
         if not isinstance(mirror_name, str) or not _GENERATED.fullmatch(mirror_name):
+            continue
+        if (entry['source']['url'], entry['source'].get('id'), mirror_name) in active_group_bindings:
             continue
         kind, _, owner, name = parse_repo_url(
             entry['source']['url'],
@@ -864,6 +910,7 @@ def onboard_auto_discoveries(
     stream=None,
     destination_adapter=None,
     runner='github',
+    emit_group_warnings=True,
 ):
     """Run fail-closed discovery, destination creation, and per-rule CAS publication."""
     stream = sys.stderr if stream is None else stream
@@ -874,28 +921,28 @@ def onboard_auto_discoveries(
         raise ValueError('authoritative configuration differs from checkout')
     raw_config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
     validated = _validate_document(raw_config, runner)
-    rules = _extract_rules(raw_config, validated, runner)
+    rule_items = _extract_rules(raw_config, validated, runner, stream=stream, emit_group_warnings=emit_group_warnings)
     profile = next(iter(raw_config['destinations']))
 
     plans = []
-    for index, rule in enumerate(rules, 1):
-        raw_rule = raw_config['auto_discoveries'][index - 1]
+    for index, (raw_index, rule, raw_rule) in enumerate(rule_items, 1):
         try:
             plans.append(
                 _plan_rule(
                     index,
-                    len(rules),
+                    len(rule_items),
                     rule,
                     raw_rule,
                     profile,
                     raw_config['repositories'],
                     source_client(rule),
                     runner=runner,
+                    raw_index=raw_index,
                 )
             )
         except Exception as exc:
             print(
-                f"auto_discovery {index}/{len(rules)} ({safe_label(rule['owner'])}): FAILED: {error_detail(exc)}",
+                f"auto_discovery {index}/{len(rule_items)} ({safe_label(rule['owner'])}): FAILED: {error_detail(exc)}",
                 file=stream,
                 flush=True,
             )
@@ -920,7 +967,7 @@ def onboard_auto_discoveries(
                 for item in rule_plan.planned:
                     attempted.append(item.dest_name)
                     dest_id = _create_destination(item, destination_adapter)
-                    created_entries.append(_build_repository_entry(item, profile, dest_id))
+                    created_entries.append(_build_repository_entry(item, profile, dest_id, from_groups=rule_plan.from_groups))
                 config_bytes = _publish_rule(
                     store, config_bytes, rule_plan, created_entries, profile, runner=runner
                 )
@@ -963,8 +1010,12 @@ def onboard_auto_discoveries(
             raise ValueError('authoritative configuration differs from checkout')
 
     final_config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
+    all_active_group_bindings = frozenset(b for p in plans for b in p.active_bindings)
     orphaned_legacy = _find_orphaned_legacy(
-        final_config, profile, allow_forgejo_port=(runner == 'forgejo')
+        final_config,
+        profile,
+        allow_forgejo_port=(runner == 'forgejo'),
+        active_group_bindings=all_active_group_bindings,
     )
     return OnboardingResult(
         config_bytes=config_bytes,
@@ -973,6 +1024,7 @@ def onboard_auto_discoveries(
         orphaned_legacy=orphaned_legacy,
         inducted_total=inducted_total,
         relocated_rules=tuple(relocated_rules),
+        active_group_bindings=all_active_group_bindings,
     )
 
 
@@ -985,6 +1037,7 @@ def onboard_auto_discoveries_forgejo(
     owner,
     organization=False,
     stream=None,
+    emit_group_warnings=True,
 ):
     """Run fail-closed ``auto_discoveries`` onboarding for the Forgejo runner."""
     store = CASConfigStore(cas)
@@ -996,6 +1049,7 @@ def onboard_auto_discoveries_forgejo(
         destination_adapter=adapter,
         runner='forgejo',
         stream=stream,
+        emit_group_warnings=emit_group_warnings,
     )
 
 

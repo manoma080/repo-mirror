@@ -149,8 +149,12 @@ def _build_auto_discovery_source_client(args):
                     raise ValueError('invalid GITHUB_TOKEN')
             client = SourceAPI(token)
             client.restrict_origin('https://api.github.com')
-        elif kind == 'gitlab' and args.gitlab_token_file and origin.lower() == 'https://gitlab.com':
-            gitlab_token = read_owner_secret(args.gitlab_token_file, 'GitLab token')
+        elif kind == 'gitlab':
+            gitlab_token = (
+                read_owner_secret(args.gitlab_token_file, 'GitLab token')
+                if args.gitlab_token_file and origin.lower() == 'https://gitlab.com'
+                else None
+            )
             client = _GitLabDiscoveryClient(origin, token=gitlab_token)
         else:
             client = SourceAPI(None)
@@ -212,12 +216,12 @@ def main(argv=None):
         groups = sources.get('groups') if isinstance(sources, dict) else None
         auto_discoveries = sources.get('auto_discoveries') if isinstance(sources, dict) else None
         if groups is not None:
-            from repo_mirror.gitlab_onboarding_forgejo import validate_groups
+            from repo_mirror.gitlab_onboarding_forgejo import translate_groups, validate_groups
             validate_groups(groups)
             if set(sources) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'} or not has_authority or args.asset_max_bytes is None:
                 raise ValueError('group onboarding requires authoritative config and asset limit')
+            validate_sources(sources)
             worker_manifest = {k: v for k, v in sources.items() if k != 'groups'}
-            validate_sources(worker_manifest)
         else:
             worker_manifest = sources
             validate_sources(sources)
@@ -316,6 +320,8 @@ def main(argv=None):
                 except (OSError, ValueError, TypeError):
                     print('Batch configuration or lock error', file=sys.stderr)
                     return 2
+                if groups:
+                    translate_groups(sources, stream=sys.stdout)
                 selected = None
                 transient = False
                 isolated = set()
@@ -369,42 +375,11 @@ def main(argv=None):
                     except Exception:
                         print('Migration: FAILED: unexpected migration failure', flush=True)
                         return 1
-                active_bindings = set()
-                if groups and selected is None:
-                    if recorded:
-                        print('Group onboarding: FAILED: pending migration requires reconciliation', flush=True)
-                        return 1
-                    try:
-                        from repo_mirror.gitlab_onboarding_forgejo import AnonymousGroupAPI, PartialOnboarding, onboard
-                        from repo_mirror.forgejo_git import LocalForgejoAPI
-                        if transaction is None:
-                            transaction = forgejo_migration.build_migration(args, secret)
-                        destination_api = LocalForgejoAPI(f'http://127.0.0.1:{args.port}', args.token_file)
-                        source_api = AnonymousGroupAPI({g['base_url'] for g in groups})
-                        manifest_bytes = onboard(manifest_bytes, source_api, destination_api, transaction.cas, args.owner,
-                                                 organization=args.organization, active_bindings=active_bindings)
-                        expanded = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
-                        worker_manifest = {k: v for k, v in expanded.items() if k != 'groups'}
-                        profile = next(iter(expanded['destinations']))
-                        def scheduled(repo):
-                            source = repo['source']
-                            name = repo['mirrors'][profile].get('name', '')
-                            if source.get('type') == 'gitlab' and re.fullmatch(r'gitlab-[0-9a-f]{24}', name):
-                                return bool(repo.get('discovered_by')) or (source.get('url'), source.get('id'), name) in active_bindings
-                            return True
-                        worker_manifest['repositories'] = [r for r in worker_manifest['repositories'] if scheduled(r)]
-                        entries = parse_manifest(worker_manifest) if worker_manifest['repositories'] else []
-                        snapshot.write_text(json.dumps(worker_manifest), encoding='utf-8')
-                    except PartialOnboarding as exc:
-                        print('Group onboarding: FAILED: ' + str(exc), flush=True)
-                        return 1
-                    except Exception:
-                        print('Group onboarding: FAILED: discovery or publication refused', flush=True)
-                        return 1
                 onboarding_result = None
-                if auto_discoveries and selected is None:
+                if (groups or auto_discoveries) and selected is None:
                     if recorded:
-                        print('Auto-discovery onboarding: FAILED: pending migration requires reconciliation', flush=True)
+                        label = 'Auto-discovery onboarding' if auto_discoveries else 'Group onboarding'
+                        print(f'{label}: FAILED: pending migration requires reconciliation', flush=True)
                         return 1
                     try:
                         from repo_mirror.auto_discoveries_onboarding import PartialOnboarding, onboard_auto_discoveries_forgejo
@@ -425,11 +400,13 @@ def main(argv=None):
                             owner=args.owner,
                             organization=args.organization,
                             stream=sys.stdout,
+                            emit_group_warnings=False,
                         )
                         manifest_bytes = onboarding_result.config_bytes
                         expanded = json.loads(manifest_bytes.decode('utf-8'), object_pairs_hook=unique_pairs)
                         worker_manifest = {k: v for k, v in expanded.items() if k != 'groups'}
                         profile = next(iter(expanded['destinations']))
+                        active_bindings = onboarding_result.active_group_bindings
                         def scheduled_auto(repo):
                             source = repo['source']
                             name = repo['mirrors'][profile].get('name', '')

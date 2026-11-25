@@ -12,7 +12,90 @@ from urllib.parse import quote, urlsplit
 from repo_mirror.config_json import unique_pairs
 from repo_mirror.forgejo_git import APIError, ForgejoDestination
 from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
+from repo_mirror.logging_utils import safe_label
 from repo_mirror.sources import discover_gitlab_projects
+
+GENERATED_NAME_RE = re.compile(r'gitlab-[0-9a-f]{24}', re.IGNORECASE)
+DUPLICATE_GROUP_MESSAGE = 'duplicate group declaration in groups and auto_discoveries'
+PREFIX_WITH_GENERATED_MESSAGE = 'destination_name_prefix is not allowed on a rule with existing generated gitlab destinations'
+
+
+def group_origin_key(base_url):
+    """Return normalized ``(host, port)`` for comparing group and rule origins."""
+    parsed = urlsplit(base_url)
+    return (parsed.hostname.lower(), parsed.port or 443)
+
+
+def gitlab_generated_name(origin, group_id, source_id):
+    """Compute the legacy ``gitlab-<24hex>`` destination name for a group project."""
+    digest = hashlib.sha256(
+        (origin.rstrip('/').lower() + '\0' + str(group_id) + '\0' + str(source_id)).encode()
+    ).hexdigest()[:24]
+    return 'gitlab-' + digest
+
+
+def group_deprecation_warning(group):
+    """Return one fixed, log-safe deprecation warning line for a ``groups`` entry."""
+    return (
+        f"DEPRECATION: groups entry ({safe_label(group['owner'])}) is deprecated and translated "
+        f"to auto_discoveries in memory; migrate to auto_discoveries before groups is removed "
+        f"in the next release"
+    )
+
+
+def translate_groups(config, *, normalized_auto_discoveries=None, stream=None):
+    """Translate ``groups[]`` into in-memory ``auto_discoveries`` rules without mutating ``config``.
+
+    Rejects duplicate group declarations within ``groups`` or across ``groups`` and
+    ``auto_discoveries``. When ``stream`` is provided, emits one warning line per
+    translated group.
+    """
+    if not isinstance(config, dict) or 'groups' not in config:
+        return []
+    groups = config['groups']
+    validate_groups(groups)
+    seen_group_owners = set()
+    seen_group_ids = set()
+    for group in groups:
+        okey = group_origin_key(group['base_url'])
+        owner_key = (okey, group['owner'].lower())
+        id_key = (okey, group['id'])
+        if owner_key in seen_group_owners or id_key in seen_group_ids:
+            raise ValueError('duplicate group declaration')
+        seen_group_owners.add(owner_key)
+        seen_group_ids.add(id_key)
+    if normalized_auto_discoveries is None:
+        if 'auto_discoveries' in config:
+            from repo_mirror.config_named import _normalize_auto_discoveries
+            auto_rules = _normalize_auto_discoveries(config['auto_discoveries'])
+        else:
+            auto_rules = []
+    else:
+        auto_rules = normalized_auto_discoveries
+    auto_ids = {(group_origin_key(r['base_url']), r['id']) for r in auto_rules if 'id' in r}
+    auto_owners = {(group_origin_key(r['base_url']), r['owner'].lower()) for r in auto_rules}
+    translated = []
+    for group in groups:
+        okey = group_origin_key(group['base_url'])
+        if (okey, group['id']) in auto_ids or (okey, group['owner'].lower()) in auto_owners:
+            raise ValueError(DUPLICATE_GROUP_MESSAGE)
+        translated.append({
+            'url': f"{group['base_url']}/{group['owner']}",
+            'type': 'gitlab',
+            'base_url': group['base_url'],
+            'owner': group['owner'],
+            'id': group['id'],
+            'visibility': 'private',
+            'ignore_releases': False,
+            'destination_name_prefix': 'mirror-' + group['owner'].replace('/', '-'),
+            'exclude': [],
+            'overrides': {},
+            '_from_groups': True,
+        })
+    if stream is not None:
+        for group in groups:
+            print(group_deprecation_warning(group), file=stream, flush=True)
+    return translated
 
 
 class AnonymousGroupAPI:
@@ -89,6 +172,7 @@ def onboard(document, source_api, destination_api, cas, owner, *, organization=F
     if not isinstance(config, dict) or set(config) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'}:
         raise ValueError('invalid group manifest')
     validate_groups(config['groups'])
+    translate_groups(config)
     if not isinstance(config['destinations'], dict) or len(config['destinations']) != 1 or not isinstance(config['repositories'], list):
         raise ValueError('invalid group manifest')
     profile = next(iter(config['destinations']))
