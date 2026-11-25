@@ -43,9 +43,21 @@ def prepare_source_transition(config, index, metadata, port, owner, secret):
     # name derived for the *old* source follows the move; anything else is an
     # explicit custom name and is preserved verbatim. The Forgejo manifest
     # derives a missing destination name from the source basename.
-    new_name = identity.rsplit('/', 1)[-1]
+    new_base, new_owner, new_name = new_url.rsplit('/', 2)
     configured = mirror.get('name')
-    if configured is None or configured.lower() == old_name.lower():
+    if 'discovered_by' in repository:
+        if old_owner.lower() != new_owner.lower():
+            repository.pop('discovered_by', None)
+            if configured is None or configured.lower() == old_name.lower():
+                mirror['name'] = new_name
+        else:
+            from repo_mirror.config_named import _normalize_auto_discoveries
+            rules = _normalize_auto_discoveries(candidate.get('auto_discoveries', []))
+            rule = next((r for r in rules if r['url'] == repository['discovered_by']), None)
+            prefix = rule['destination_name_prefix'] if rule is not None else f'mirror-{old_owner}'
+            if configured is not None and configured.lower() == f'{prefix}-{old_name}'.lower():
+                mirror['name'] = f'{prefix}-{new_name}'
+    elif configured is None or configured.lower() == old_name.lower():
         mirror['name'] = new_name
     mirror['legacy'] = {'url': original_url, 'name': original_name, 'signature': '0' * 64}
     candidate_entry = parse_manifest(candidate)[index]

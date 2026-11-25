@@ -73,12 +73,220 @@ def valid_profile(settings):
         return False
 
 
+_AUTO_DISCOVERY_NAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*')
+_AUTO_DISCOVERY_HOST_LABEL = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?')
+_AUTO_DISCOVERY_GENERATED = re.compile(r'gitlab-[0-9a-f]{24}', re.IGNORECASE)
+_AUTO_DISCOVERY_KEYS = frozenset({
+    'url', 'type', 'id', 'visibility', 'ignore_releases',
+    'destination_name_prefix', 'exclude', 'overrides',
+})
+_AUTO_DISCOVERY_OVERRIDE_KEYS = frozenset({'name', 'visibility', 'ignore_releases'})
+
+
+def _parse_owner_url(url, source_type=None):
+    if not isinstance(url, str) or not url:
+        return None
+    if source_type is not None and (not isinstance(source_type, str) or source_type not in ('github', 'forgejo', 'gitlab')):
+        return None
+    if not all(33 <= ord(c) <= 126 for c in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname
+    if (
+        parsed.scheme != 'https'
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or '@' in parsed.netloc
+        or ':' in parsed.netloc
+        or port is not None
+        or host.startswith('github.com.')
+        or not all(_AUTO_DISCOVERY_HOST_LABEL.fullmatch(label) for label in host.split('.'))
+        or parsed.query
+        or parsed.fragment
+        or '?' in url
+        or '#' in url
+        or not parsed.path.startswith('/')
+        or parsed.path.endswith('/')
+    ):
+        return None
+    segments = tuple(parsed.path.split('/')[1:])
+    if not segments or any(
+        not seg or not _AUTO_DISCOVERY_NAME.fullmatch(seg) or seg in ('.', '..') or seg.lower().endswith('.git')
+        for seg in segments
+    ):
+        return None
+    kind = source_type if source_type is not None else (
+        'github' if host == 'github.com' else 'gitlab' if host == 'gitlab.com' else 'forgejo'
+    )
+    if (
+        (host == 'github.com' and kind != 'github')
+        or (kind == 'github' and host != 'github.com')
+        or (host == 'gitlab.com' and kind != 'gitlab')
+    ):
+        return None
+    if kind != 'gitlab' and len(segments) != 1:
+        return None
+    if host == 'github.com':
+        return 'github', 'https://github.com', segments[0]
+    return kind, 'https://' + host, '/'.join(segments)
+
+
+def _parse_repo_identity(url, source_type=None):
+    if not isinstance(url, str) or not url or any(ord(c) <= 32 or ord(c) == 127 for c in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname
+    parts = parsed.path.split('/')
+    kind = source_type or ('github' if host == 'github.com' else 'gitlab' if host == 'gitlab.com' else 'forgejo')
+    if (
+        parsed.scheme != 'https'
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port is not None and (host == 'github.com' or port <= 0))
+        or parsed.query
+        or parsed.fragment
+        or '?' in url
+        or '#' in url
+        or kind not in ('github', 'forgejo', 'gitlab')
+        or (host == 'github.com' and kind != 'github')
+        or (kind == 'github' and host != 'github.com')
+        or (host == 'gitlab.com' and kind != 'gitlab')
+        or (len(parts) < 3 if kind == 'gitlab' else len(parts) != 3)
+        or parts[0] != ''
+    ):
+        return None
+    if any(not _AUTO_DISCOVERY_NAME.fullmatch(part) or part in ('.', '..') for part in parts[1:]):
+        return None
+    owner, name = '/'.join(parts[1:-1]), parts[-1]
+    if host == 'github.com':
+        return 'github', 'https://github.com', owner, name
+    authority = parsed.netloc if port is not None else host
+    return kind, 'https://' + authority, owner, name
+
+
+def _valid_auto_discoveries(raw_rules):
+    if not isinstance(raw_rules, list):
+        return None
+    normalized = []
+    seen_owners = set()
+    seen_ids = set()
+    for rule in raw_rules:
+        if not isinstance(rule, dict) or 'url' not in rule or set(rule) - _AUTO_DISCOVERY_KEYS:
+            return None
+        source_type = None
+        if 'type' in rule:
+            if not isinstance(rule['type'], str) or rule['type'] not in ('github', 'gitlab', 'forgejo'):
+                return None
+            source_type = rule['type']
+        parsed = _parse_owner_url(rule['url'], source_type=source_type)
+        if parsed is None:
+            return None
+        kind, base, owner = parsed
+        canonical_url = f'{base}/{owner}'
+        if 'id' in rule:
+            if type(rule['id']) is not int or rule['id'] <= 0:
+                return None
+        elif kind == 'gitlab':
+            return None
+        visibility = 'private'
+        if 'visibility' in rule:
+            if not isinstance(rule['visibility'], str) or rule['visibility'] not in ('private', 'public'):
+                return None
+            visibility = rule['visibility']
+        ignore_releases = False
+        if 'ignore_releases' in rule:
+            if not isinstance(rule['ignore_releases'], bool):
+                return None
+            ignore_releases = rule['ignore_releases']
+        if 'destination_name_prefix' in rule:
+            prefix = rule['destination_name_prefix']
+            if not isinstance(prefix, str) or not prefix or not _AUTO_DISCOVERY_NAME.fullmatch(prefix) or prefix in ('.', '..'):
+                return None
+        else:
+            prefix = 'mirror-' + owner.replace('/', '-')
+        exclude_lower = set()
+        if 'exclude' in rule:
+            if not isinstance(rule['exclude'], list):
+                return None
+            for item in rule['exclude']:
+                if not isinstance(item, str) or not _AUTO_DISCOVERY_NAME.fullmatch(item) or item in ('.', '..'):
+                    return None
+                if item.lower() in exclude_lower:
+                    return None
+                exclude_lower.add(item.lower())
+        overrides = {}
+        override_keys_lower = set()
+        if 'overrides' in rule:
+            if not isinstance(rule['overrides'], dict):
+                return None
+            for repo_name, ov in rule['overrides'].items():
+                if not isinstance(repo_name, str) or not _AUTO_DISCOVERY_NAME.fullmatch(repo_name) or repo_name in ('.', '..'):
+                    return None
+                if repo_name.lower() in override_keys_lower or repo_name.lower() in exclude_lower:
+                    return None
+                override_keys_lower.add(repo_name.lower())
+                if not isinstance(ov, dict) or not ov or set(ov) - _AUTO_DISCOVERY_OVERRIDE_KEYS:
+                    return None
+                if 'name' in ov:
+                    ov_name = ov['name']
+                    if (
+                        not isinstance(ov_name, str)
+                        or not (1 <= len(ov_name) <= 100)
+                        or not _AUTO_DISCOVERY_NAME.fullmatch(ov_name)
+                        or ov_name in ('.', '..')
+                        or _AUTO_DISCOVERY_GENERATED.fullmatch(ov_name)
+                    ):
+                        return None
+                if 'visibility' in ov:
+                    if not isinstance(ov['visibility'], str) or ov['visibility'] not in ('private', 'public'):
+                        return None
+                if 'ignore_releases' in ov:
+                    if not isinstance(ov['ignore_releases'], bool):
+                        return None
+                planned = ov['name'] if 'name' in ov else f'{prefix}-{repo_name}'
+                if len(planned) > 100 or not _AUTO_DISCOVERY_NAME.fullmatch(planned) or planned in ('.', '..'):
+                    return None
+                overrides[repo_name] = dict(ov)
+        owner_key = (base.lower(), owner.lower())
+        if owner_key in seen_owners:
+            return None
+        seen_owners.add(owner_key)
+        if 'id' in rule:
+            id_key = (base.lower(), rule['id'])
+            if id_key in seen_ids:
+                return None
+            seen_ids.add(id_key)
+        normalized.append({
+            'url': canonical_url,
+            'type': kind,
+            'base_url': base,
+            'owner': owner,
+            'visibility': visibility,
+            'ignore_releases': ignore_releases,
+            'destination_name_prefix': prefix,
+            'overrides': overrides,
+        })
+    return normalized, {r['url']: r for r in normalized}
+
+
 def valid_manifest(sources):
     """Validate the entire snapshot before running any downloaded scheduler."""
     named = isinstance(sources, dict)
+    rules = []
+    rules_by_url = {}
     if named:
         from_groups = 'groups' in sources
-        if from_groups and set(sources) - {'host_concurrency_limits'} == {'destinations', 'repositories', 'groups'}:
+        if from_groups and set(sources) - {'host_concurrency_limits', 'auto_discoveries'} == {'destinations', 'repositories', 'groups'}:
             groups = sources['groups']
             if not isinstance(groups, list) or not groups:
                 return False
@@ -107,11 +315,16 @@ def valid_manifest(sources):
             # group-only declaration via a harmless validation sentinel.
             sources = dict(sources)
             del sources['groups']
-            if sources['repositories'] == []:
+            if 'auto_discoveries' not in sources and sources['repositories'] == []:
                 profile = next(iter(sources['destinations']), None) if isinstance(sources['destinations'], dict) else None
                 sources['repositories'] = [{'source': {'url': 'https://github.com/check/check'}, 'mirrors': {profile: {}}}]
-        if set(sources) - {'host_concurrency_limits'} != {'destinations', 'repositories'}:
+        if set(sources) - {'host_concurrency_limits', 'auto_discoveries'} != {'destinations', 'repositories'}:
             return False
+        if 'auto_discoveries' in sources:
+            validated_rules = _valid_auto_discoveries(sources['auto_discoveries'])
+            if validated_rules is None:
+                return False
+            rules, rules_by_url = validated_rules
         profiles, repos = sources['destinations'], sources['repositories']
         if not isinstance(profiles, dict) or len(profiles) != 1 or not isinstance(repos, list):
             return False
@@ -125,7 +338,7 @@ def valid_manifest(sources):
             return False
         converted = []
         for repo in repos:
-            if not isinstance(repo, dict) or set(repo) != {'source', 'mirrors'}:
+            if not isinstance(repo, dict) or not {'source', 'mirrors'} <= set(repo) or set(repo) - {'source', 'mirrors', 'discovered_by'}:
                 return False
             source, mirrors = repo['source'], repo['mirrors']
             if not isinstance(source, dict) or 'url' not in source or set(source) - {'url', 'id', 'type'} or not isinstance(mirrors, dict) or set(mirrors) != {profile}:
@@ -137,7 +350,32 @@ def valid_manifest(sources):
                 return False
             if mirror.get('visibility', 'private') not in ('private', 'public') or not isinstance(mirror.get('ignore_releases', False), bool):
                 return False
-            item = {'url': source['url'], 'destination_name': mirror.get('name', source['url'].rsplit('/', 1)[-1])}
+            dest_name = mirror.get('name', source['url'].rsplit('/', 1)[-1])
+            parsed_repo = _parse_repo_identity(source['url'], source.get('type'))
+            if parsed_repo is None:
+                return False
+            kind, base, owner, name = parsed_repo
+            if 'discovered_by' in repo:
+                discovered_by = repo['discovered_by']
+                if not isinstance(discovered_by, str) or discovered_by not in rules_by_url:
+                    return False
+                rule = rules_by_url[discovered_by]
+                if kind != rule['type'] or base.lower() != rule['base_url'].lower() or owner.lower() != rule['owner'].lower():
+                    return False
+                ov = next((v for k, v in rule['overrides'].items() if k.lower() == name.lower()), None)
+                planned_name = ov['name'] if ov and 'name' in ov else f"{rule['destination_name_prefix']}-{name}"
+                if len(planned_name) > 100 or not _AUTO_DISCOVERY_NAME.fullmatch(planned_name) or planned_name in ('.', '..'):
+                    return False
+                if 'name' in mirror:
+                    if mirror['name'] != planned_name and not (rule['type'] == 'gitlab' and _AUTO_DISCOVERY_GENERATED.fullmatch(mirror['name'])):
+                        return False
+                else:
+                    dest_name = planned_name
+            item = {
+                'url': source['url'],
+                'destination_name': dest_name,
+                '_identity': (base.lower(), owner.lower(), name.lower()),
+            }
             if 'type' in source: item['source_type'] = source['type']
             if 'id' in source: item['source_id'] = source['id']
             if 'id' in mirror: item['destination_id'] = mirror['id']
@@ -151,7 +389,9 @@ def valid_manifest(sources):
     if not isinstance(sources, list) or (not named and not sources):
         return False
     identities, destinations = set(), set()
+    seen_identities_by_dest = {}
     for item in sources:
+        item_identity = item.pop('_identity', None) if isinstance(item, dict) else None
         if isinstance(item, str):
             url, old = item, item
             names = {url.rsplit('/', 1)[-1].lower()}
@@ -188,6 +428,18 @@ def valid_manifest(sources):
             return False
         identities.update(source_names)
         destinations.update(names)
+        if item_identity is not None:
+            for dest_key in names:
+                seen_identities_by_dest[dest_key] = item_identity
+    for rule in rules:
+        for repo_key, ov in rule['overrides'].items():
+            ov_identity = (rule['base_url'].lower(), rule['owner'].lower(), repo_key.lower())
+            planned = ov['name'] if 'name' in ov else f"{rule['destination_name_prefix']}-{repo_key}"
+            dest_key = planned.lower()
+            existing_identity = seen_identities_by_dest.get(dest_key)
+            if existing_identity is not None and existing_identity != ov_identity:
+                return False
+            seen_identities_by_dest[dest_key] = ov_identity
     return True
 
 
