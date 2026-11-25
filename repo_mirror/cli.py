@@ -11,7 +11,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote
 
-from repo_mirror.adhoc import add_to_config, add_to_config_pinned, one_time_sources, parse_selected_url, _matches_owner
+from repo_mirror.adhoc import add_to_config, add_to_config_pinned, classify_source_url, one_time_sources, parse_selected_url, _matches_owner
 from repo_mirror.config_named import normalize_config
 from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
 from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
@@ -124,14 +124,16 @@ def main(argv=None):
             origin = source["base_url"].rstrip("/")
             if origin not in gitlab_clients:
                 client = SourceAPI(None)
-                client.restrict_origin(origin)
+                if callable(getattr(client, 'restrict_origin', None)):
+                    client.restrict_origin(origin)
                 gitlab_clients[origin] = client
             return gitlab_clients[origin]
         if type(other_src) is API:
             origin = source["base_url"].rstrip("/")
             if origin not in forgejo_clients:
                 client = SourceAPI(None)
-                client.restrict_origin(origin)
+                if callable(getattr(client, 'restrict_origin', None)):
+                    client.restrict_origin(origin)
                 forgejo_clients[origin] = client
             return forgejo_clients[origin]
         return other_src
@@ -162,20 +164,45 @@ def main(argv=None):
         config_bytes = onboarding_result.config_bytes
         config = normalize_config(json.loads(config_bytes, object_pairs_hook=unique_pairs))
         sources = config.get("sources")
+        if selected_urls and selected_urls.strip() and onboarding_result.relocated_rules:
+            relocated_map = {old.lower(): new for old, new in onboarding_result.relocated_rules}
+            selected_urls = ','.join(
+                relocated_map.get(part.strip().lower(), part.strip())
+                for part in selected_urls.split(',')
+            )
 
     # Only URLs absent from the original configuration are one-time additions.
     # Explicit configured GitLab repositories still require historical pins.
+    gitlab_probe = None
     ephemeral_urls = set()
+    selected_rule_urls = set()
+    selected_repo_identities = set()
     if selected_urls and selected_urls.strip():
-        for part in selected_urls.split(','):
-            kind, base, source_owner, name = parse_selected_url(part.strip(), sources)
-            if kind == 'gitlab' and not any(
-                _matches_owner(s, kind, base, source_owner) and
-                (s.get('repos') == 'all' or name.lower() in {n.lower() for n in s.get('repos', [])})
+        gitlab_probe = source_client({'type': 'gitlab', 'base_url': 'https://gitlab.com'})
+        lookup_cfg = json.loads(config_bytes, object_pairs_hook=unique_pairs) if named_config else config
+        classified_selected = [
+            classify_source_url(part.strip(), lookup_cfg, gitlab_api=gitlab_probe)
+            for part in selected_urls.split(',')
+        ]
+        if custom and any(item.kind == 'rule' for item in classified_selected):
+            raise ValueError('destination name is derived per repository for a discovery rule')
+        repo_tokens = []
+        for item in classified_selected:
+            if item.kind == 'rule':
+                if not item.existing:
+                    raise ValueError('one-time mirroring is not supported for owner URLs; enable add_to_config')
+                selected_rule_urls.add(item.url.lower())
+                continue
+            repo_tokens.append(item.url)
+            selected_repo_identities.add((item.base_url.lower().rstrip('/'), item.owner.lower(), item.name.lower()))
+            if item.source_type == 'gitlab' and not any(
+                _matches_owner(s, item.source_type, item.base_url, item.owner) and
+                (s.get('repos') == 'all' or item.name.lower() in {n.lower() for n in s.get('repos', [])})
                 for s in sources
             ):
-                ephemeral_urls.add((base.lower(), source_owner.lower(), name.lower()))
-        add_to_config(config, selected_urls, custom, None if visibility == "unchanged" else visibility, protect_pins=False)
+                ephemeral_urls.add((item.base_url.lower(), item.owner.lower(), item.name.lower()))
+        if repo_tokens:
+            add_to_config(config, ','.join(repo_tokens), custom, None if visibility == "unchanged" else visibility, protect_pins=False)
     for source in sources:
         validate_source(source)
 
@@ -226,11 +253,16 @@ def main(argv=None):
                 raise ValueError("duplicate destination repository")
             seen.add(target)
             plan.append((index, source, name))
-    selected_urls = os.environ.get("MIRROR_SOURCE_URLS")
     if selected_urls and selected_urls.strip() and discovery_failures:
         raise RuntimeError("filtered run requires successful discovery of every source")
     # URLs not in config.json become one-time sources: mirrored now, never saved.
-    for source in one_time_sources(selected_urls, plan, sources):
+    for source in one_time_sources(
+        selected_urls,
+        plan,
+        sources,
+        auto_discoveries=config.get('auto_discoveries', ()),
+        gitlab_api=gitlab_probe,
+    ):
         sources.append(source)
         name = source["repos"][0]
         target = destination_name(source, name).lower()
@@ -238,18 +270,16 @@ def main(argv=None):
             raise ValueError("duplicate destination repository")
         seen.add(target)
         plan.append((len(sources), source, name))
-    plan = filter_plan(plan, selected_urls, case_insensitive=True)
+    known_rules = {rule['url'] for rule in config.get('auto_discoveries', ())}
+    plan = filter_plan(plan, selected_urls, case_insensitive=True, known_rules=known_rules)
     if ignore_override != "keep":
         # A one-run override covers exactly the sources named in this run and is
         # never written back to the configuration.
         override = ignore_override == "true"
-        selected_identities = set()
-        for part in (selected_urls or "").split(','):
-            _, base, selected_owner, selected_name = parse_selected_url(part.strip(), sources)
-            selected_identities.add((base.lower().rstrip('/'), selected_owner.lower(), selected_name.lower()))
         for _, source, name in plan:
             identity = (source['base_url'].lower().rstrip('/'), source['owner'].lower(), name.lower())
-            if identity in selected_identities:
+            discovered_by = str(source.get('discovered_by', '')).lower()
+            if identity in selected_repo_identities or (discovered_by and discovered_by in selected_rule_urls):
                 source.setdefault('destinations', {}).setdefault(name.lower(), {})['ignore_releases'] = override
     onboarding_store = None
     for source_index, source, name in plan:

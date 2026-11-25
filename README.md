@@ -92,7 +92,15 @@ Legacy `destination_account_type` and `sources` configurations remain supported,
 
 ### Auto-discoveries
 
-Named configurations also accept an optional top-level `auto_discoveries` array of owner/group rules and an optional per-repository `discovered_by` back-pointer matching a declared rule's canonical `url`. Schema validation is active—including requiring explicit `"type": "gitlab"` for self-hosted GitLab rules and positive integer `"id"` for all GitLab rules—while discovery execution is not yet implemented (running `cli.py` with any `auto_discoveries` rule raises `auto_discoveries is not implemented yet; configure explicit repositories`). See [docs/auto-discoveries.md](docs/auto-discoveries.md) for the full design and field reference.
+Named configurations accept an optional top-level `auto_discoveries` array of owner/group rules and an optional per-repository `discovered_by` back-pointer matching a declared rule's canonical `url`. On the GitHub runner, `auto_discoveries` executes an onboarding pass before workers start (requiring the authoritative management configuration store `MIRROR_MANAGEMENT_REPOSITORY` / `MIRROR_MANAGEMENT_TOKEN`): it verifies the upstream owner identity, pins the numeric owner `"id"` and newly discovered `discovered_by` entries in one byte-conditional write per rule with readback, and preserves explicit pinned mirrors on steady-state runs.
+
+Owner and group URLs also work in the manual workflow's `source_urls` input:
+- **Add (`add_to_config=true`):** Appends a rule to `auto_discoveries` using `visibility` and `ignore_releases` as rule defaults without pre-writing `repositories[]` entries (the mirror phase's onboarding pass inducts them). `destination_name` is rejected for discovery rules because destination names are derived per repository.
+- **Filter (`add_to_config=false`):** Selects all repositories belonging to an already-configured rule (after onboarding runs). Unconfigured owner URLs are rejected for one-time mirroring.
+- **Remove (`remove_from_config=true`):** Removing a rule URL deletes the rule and drops `discovered_by` from its children, stopping discovery while keeping the existing pinned entries and remote mirrors untouched. Removing a child repository URL deletes that entry and appends its basename to the owning rule's `exclude` list without deleting the remote mirror.
+- **Rule relocation:** When a pinned owner or GitLab group renames upstream with the same numeric `id`, onboarding updates the rule's `url` and its children's `source.url` and `discovered_by` in place while keeping configured mirror names untouched; an `id` mismatch still fails closed.
+
+Support on the Forgejo runner and `groups` migration follow in a subsequent change. See [docs/auto-discoveries.md](docs/auto-discoveries.md) for the full design and field reference.
 
 ```json
 {
