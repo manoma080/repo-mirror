@@ -56,7 +56,13 @@ def _normalize_auto_discoveries(raw_rules):
             ignore_releases = rule['ignore_releases']
         if 'destination_name_prefix' in rule:
             prefix = rule['destination_name_prefix']
-            if not isinstance(prefix, str) or not prefix or not NAME.fullmatch(prefix) or prefix in ('.', '..'):
+            if (
+                not isinstance(prefix, str)
+                or not prefix
+                or not NAME.fullmatch(prefix)
+                or prefix in ('.', '..')
+                or _GENERATED.fullmatch(prefix)
+            ):
                 raise ValueError('invalid destination_name_prefix')
         else:
             prefix = 'mirror-' + owner.replace('/', '-')
@@ -104,7 +110,7 @@ def _normalize_auto_discoveries(raw_rules):
                     if not isinstance(ov['ignore_releases'], bool):
                         raise ValueError('invalid auto_discoveries override ignore_releases')
                 planned = ov['name'] if 'name' in ov else f'{prefix}-{repo_name}'
-                if len(planned) > 100 or not NAME.fullmatch(planned) or planned in ('.', '..'):
+                if len(planned) > 100 or not NAME.fullmatch(planned) or planned in ('.', '..') or _GENERATED.fullmatch(planned):
                     raise ValueError('invalid destination repository name')
                 overrides[repo_name] = dict(ov)
         owner_key = (base.lower(), owner.lower())
@@ -144,6 +150,11 @@ def normalize_config(config):
         raise ValueError('invalid named config fields')
     normalized_rules = _normalize_auto_discoveries(config['auto_discoveries']) if 'auto_discoveries' in config else []
     rules_by_url = {r['url']: r for r in normalized_rules}
+    explicit_prefix_rules = [
+        norm for raw, norm in zip(config.get('auto_discoveries', []), normalized_rules)
+        if 'destination_name_prefix' in raw
+    ]
+    explicit_prefix_urls = {r['url'] for r in explicit_prefix_rules}
     destinations = config['destinations']
     if not isinstance(destinations, dict) or len(destinations) != 1:
         raise ValueError('exactly one destination profile is supported')
@@ -161,6 +172,7 @@ def normalize_config(config):
         raise ValueError('repositories must be a list')
     from repo_mirror.adhoc import parse_repo_url
     from repo_mirror.constants import NAME
+    from repo_mirror.gitlab_onboarding_forgejo import PREFIX_WITH_GENERATED_MESSAGE, group_origin_key
     from repo_mirror.sources import destination_name, validate_source
     sources, seen, seen_destinations = [], set(), {}
     for entry in repositories:
@@ -210,10 +222,23 @@ def normalize_config(config):
                 if dest_name != planned_name and not (rule['type'] == 'gitlab' and _GENERATED.fullmatch(dest_name)):
                     raise ValueError('discovered_by destination name mismatch')
             else:
+                if _GENERATED.fullmatch(planned_name):
+                    raise ValueError('invalid destination repository name')
                 dest_name = planned_name
             item['discovered_by'] = discovered_by
         else:
             dest_name = destination_name(item, name)
+        if 'name' in mirror and isinstance(mirror['name'], str) and _GENERATED.fullmatch(mirror['name']):
+            if entry.get('discovered_by') in explicit_prefix_urls or (
+                kind == 'gitlab'
+                and any(
+                    r['type'] == 'gitlab'
+                    and group_origin_key(r['base_url']) == group_origin_key(base)
+                    and r['owner'].lower() == owner.lower()
+                    for r in explicit_prefix_rules
+                )
+            ):
+                raise ValueError(PREFIX_WITH_GENERATED_MESSAGE)
         dest_key = dest_name.lower()
         if dest_key in seen_destinations:
             raise ValueError('duplicate destination repository')

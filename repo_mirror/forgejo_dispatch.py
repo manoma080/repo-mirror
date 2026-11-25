@@ -105,7 +105,8 @@ def _validated(document, owner, port):
         validate_runtime(settings, 'forgejo', f'http://127.0.0.1:{port}', owner, 'forgejo-home')
     elif settings not in ({}, {'account_type': 'personal'}, {'account_type': 'organization'}):
         raise DispatchError('invalid destination')
-    return profile, runtime, parse_manifest(runtime) if repos else []
+    parsed = parse_manifest(document)
+    return profile, runtime, parsed if repos else []
 
 
 def _id(value):

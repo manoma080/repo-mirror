@@ -153,3 +153,112 @@ class LocalConfigLauncherTests(unittest.TestCase):
         for bad in bad_manifests:
             with self.subTest(bad=bad):
                 self.assertFalse(updater.valid_manifest(bad))
+
+    def test_valid_manifest_groups_compatibility_and_reserved_names(self):
+        gen_name = 'gitlab-' + ('ab' * 12)
+        group_only = {
+            'destinations': {'forgejo-home': {}},
+            'repositories': [],
+            'groups': [{'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'team/sub', 'id': 7, 'repos': 'all'}],
+        }
+        self.assertTrue(updater.valid_manifest(group_only))
+
+        migrated_without_prefix = {
+            'destinations': {'forgejo-home': {}},
+            'auto_discoveries': [{'url': 'https://gitlab.com/team/sub', 'type': 'gitlab', 'id': 7}],
+            'repositories': [
+                {
+                    'source': {'type': 'gitlab', 'url': 'https://gitlab.com/team/sub/proj', 'id': 42},
+                    'mirrors': {'forgejo-home': {'name': gen_name, 'id': 9}},
+                    'discovered_by': 'https://gitlab.com/team/sub',
+                }
+            ],
+        }
+        self.assertTrue(updater.valid_manifest(migrated_without_prefix))
+
+        bad_variants = [
+            # Duplicate group in groups + auto_discoveries (same id)
+            {
+                'destinations': {'forgejo-home': {}},
+                'repositories': [],
+                'groups': [{'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'team/sub', 'id': 7, 'repos': 'all'}],
+                'auto_discoveries': [{'url': 'https://GitLab.com/other/group', 'type': 'gitlab', 'id': 7}],
+            },
+            # Duplicate group in groups + auto_discoveries (same owner)
+            {
+                'destinations': {'forgejo-home': {}},
+                'repositories': [],
+                'groups': [{'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'team/sub', 'id': 7, 'repos': 'all'}],
+                'auto_discoveries': [{'url': 'https://gitlab.com/Team/Sub', 'type': 'gitlab', 'id': 99}],
+            },
+            # Duplicate owner inside groups itself
+            {
+                'destinations': {'forgejo-home': {}},
+                'repositories': [],
+                'groups': [
+                    {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'team/sub', 'id': 7, 'repos': 'all'},
+                    {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'Team/Sub', 'id': 8, 'repos': 'all'},
+                ],
+            },
+            # destination_name_prefix rejected when existing gitlab-<24hex> child exists (with discovered_by)
+            {
+                'destinations': {'forgejo-home': {}},
+                'auto_discoveries': [
+                    {'url': 'https://gitlab.com/team/sub', 'type': 'gitlab', 'id': 7, 'destination_name_prefix': 'custom'}
+                ],
+                'repositories': [
+                    {
+                        'source': {'type': 'gitlab', 'url': 'https://gitlab.com/team/sub/proj', 'id': 42},
+                        'mirrors': {'forgejo-home': {'name': gen_name, 'id': 9}},
+                        'discovered_by': 'https://gitlab.com/team/sub',
+                    }
+                ],
+            },
+            # destination_name_prefix rejected when existing gitlab-<24hex> child exists (without discovered_by)
+            {
+                'destinations': {'forgejo-home': {}},
+                'auto_discoveries': [
+                    {'url': 'https://gitlab.com/team/sub', 'type': 'gitlab', 'id': 7, 'destination_name_prefix': 'custom'}
+                ],
+                'repositories': [
+                    {
+                        'source': {'type': 'gitlab', 'url': 'https://gitlab.com/team/sub/proj', 'id': 42},
+                        'mirrors': {'forgejo-home': {'name': gen_name, 'id': 9}},
+                    }
+                ],
+            },
+            # Prefix producing reserved gitlab-<24hex>
+            {
+                'destinations': {'forgejo-home': {}},
+                'auto_discoveries': [
+                    {'url': 'https://github.com/Alice', 'destination_name_prefix': gen_name}
+                ],
+                'repositories': [],
+            },
+            # Override default name producing reserved gitlab-<24hex>
+            {
+                'destinations': {'forgejo-home': {}},
+                'auto_discoveries': [
+                    {
+                        'url': 'https://github.com/Alice',
+                        'destination_name_prefix': 'gitlab',
+                        'overrides': {'ab' * 12: {'visibility': 'private'}},
+                    }
+                ],
+                'repositories': [],
+            },
+            # Malformed group variants
+            {
+                'destinations': {'forgejo-home': {}},
+                'repositories': [],
+                'groups': [],
+            },
+            {
+                'destinations': {'forgejo-home': {}},
+                'repositories': [],
+                'groups': [{'type': 'github', 'base_url': 'https://github.com', 'owner': 'Alice', 'id': 7, 'repos': 'all'}],
+            },
+        ]
+        for bad in bad_variants:
+            with self.subTest(bad=bad):
+                self.assertFalse(updater.valid_manifest(bad))
