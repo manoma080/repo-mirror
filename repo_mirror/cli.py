@@ -81,8 +81,6 @@ def main(argv=None):
         config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
     named_config = isinstance(config, dict) and ('destinations' in config or 'repositories' in config)
     config = normalize_config(config)
-    if config.get('auto_discoveries'):
-        raise ValueError('auto_discoveries is not implemented yet; configure explicit repositories')
     if 'destination_profile' in config:
         from repo_mirror.destination_profile import validate_runtime
         validate_runtime(config['destination_profile'], 'github', 'https://github.com', owner, 'mirrorbot')
@@ -101,6 +99,70 @@ def main(argv=None):
         raise ValueError("sources must be a list")
     host_limits = HostLimits.from_config(config.get(CONFIG_KEY), default=max_workers)
     selected_urls = os.environ.get("MIRROR_SOURCE_URLS")
+    custom = os.environ.get("MIRROR_DESTINATION_NAME", "")
+    visibility = os.environ.get("MIRROR_VISIBILITY") or "unchanged"
+    ignore_override = os.environ.get("MIRROR_IGNORE_RELEASES") or "keep"
+    if ignore_override not in ("keep", "true", "false"):
+        raise ValueError("invalid ignore-releases override")
+    if ignore_override != "keep" and not (selected_urls and selected_urls.strip()):
+        raise ValueError("ignore-releases override requires source URLs")
+    if not (selected_urls and selected_urls.strip()) and (custom or visibility not in ("private", "unchanged")):
+        raise ValueError("destination settings require source URLs")
+    github_src, other_src, dst = SourceAPI(token), API(), API(token)
+    if callable(getattr(github_src, 'restrict_origin', None)):
+        github_src.restrict_origin('https://api.github.com')
+    # Public GitLab and Forgejo sources must never inherit destination
+    # credentials. Keep a separate, read-only client per origin so redirects
+    # and metadata reads cannot escape to another configured source host.
+    gitlab_clients = {}
+    forgejo_clients = {}
+
+    def source_client(source):
+        if source["type"] == "github":
+            return github_src
+        if source["type"] == "gitlab":
+            origin = source["base_url"].rstrip("/")
+            if origin not in gitlab_clients:
+                client = SourceAPI(None)
+                client.restrict_origin(origin)
+                gitlab_clients[origin] = client
+            return gitlab_clients[origin]
+        if type(other_src) is API:
+            origin = source["base_url"].rstrip("/")
+            if origin not in forgejo_clients:
+                client = SourceAPI(None)
+                client.restrict_origin(origin)
+                forgejo_clients[origin] = client
+            return forgejo_clients[origin]
+        return other_src
+
+    pre_transaction = None
+    onboarding_result = None
+    if config.get('auto_discoveries'):
+        from repo_mirror.auto_discoveries_onboarding import onboard_auto_discoveries
+        from repo_mirror.github_migration import transaction_from_environment
+        from repo_mirror.gitlab_onboarding_github import store_from_environment
+
+        pre_transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
+        if pre_transaction is not None:
+            resumed = pre_transaction.recover()
+            if resumed or pre_transaction.store.pending():
+                raise ValueError('pending migration requires reconciliation')
+        onboarding_store = store_from_environment(os.environ, args.config)
+        if onboarding_store is None:
+            raise ValueError('auto-discovery onboarding requires authoritative management configuration')
+        onboarding_result = onboard_auto_discoveries(
+            config_bytes,
+            onboarding_store,
+            source_client,
+            dst,
+            owner=owner,
+            account_type=account_type,
+        )
+        config_bytes = onboarding_result.config_bytes
+        config = normalize_config(json.loads(config_bytes, object_pairs_hook=unique_pairs))
+        sources = config.get("sources")
+
     # Only URLs absent from the original configuration are one-time additions.
     # Explicit configured GitLab repositories still require historical pins.
     ephemeral_urls = set()
@@ -113,38 +175,9 @@ def main(argv=None):
                 for s in sources
             ):
                 ephemeral_urls.add((base.lower(), source_owner.lower(), name.lower()))
-    custom = os.environ.get("MIRROR_DESTINATION_NAME", "")
-    visibility = os.environ.get("MIRROR_VISIBILITY") or "unchanged"
-    ignore_override = os.environ.get("MIRROR_IGNORE_RELEASES") or "keep"
-    if ignore_override not in ("keep", "true", "false"):
-        raise ValueError("invalid ignore-releases override")
-    if ignore_override != "keep" and not (selected_urls and selected_urls.strip()):
-        raise ValueError("ignore-releases override requires source URLs")
-    if selected_urls and selected_urls.strip():
         add_to_config(config, selected_urls, custom, None if visibility == "unchanged" else visibility, protect_pins=False)
-    elif custom or visibility not in ("private", "unchanged"):
-        raise ValueError("destination settings require source URLs")
     for source in sources:
         validate_source(source)
-    github_src, other_src, dst = SourceAPI(token), API(), API(token)
-    if callable(getattr(github_src, 'restrict_origin', None)):
-        github_src.restrict_origin('https://api.github.com')
-    # Public GitLab sources must never inherit destination credentials. Keep a
-    # separate, read-only client per origin so redirects and metadata reads
-    # cannot escape to another configured source host.
-    gitlab_clients = {}
-
-    def source_client(source):
-        if source["type"] == "github":
-            return github_src
-        if source["type"] == "gitlab":
-            origin = source["base_url"].rstrip("/")
-            if origin not in gitlab_clients:
-                client = SourceAPI(None)
-                client.restrict_origin(origin)
-                gitlab_clients[origin] = client
-            return gitlab_clients[origin]
-        return other_src
 
     seen = set()
     plan = []
@@ -448,8 +481,11 @@ def main(argv=None):
     transaction = None
     if named_config:
         try:
-            from repo_mirror.github_migration import transaction_from_environment
-            transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
+            if pre_transaction is not None:
+                transaction = pre_transaction
+            else:
+                from repo_mirror.github_migration import transaction_from_environment
+                transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
         except Exception as exc:
             if relocations:
                 migration_failures.append(f"migration store unavailable: {error_detail(exc)}")
@@ -507,6 +543,9 @@ def main(argv=None):
                 file=sys.stderr,
                 flush=True,
             )
+    if onboarding_result is not None:
+        from repo_mirror.auto_discoveries_onboarding import report_orphans
+        report_orphans(onboarding_result)
     if failures or discovery_failures or migration_failures:
         for repo_index, kind in failures:
             source_index, source, name = plan[repo_index - 1]

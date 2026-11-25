@@ -733,7 +733,7 @@ class RoundTripAndRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(parsed3["auto_discoveries"], doc["auto_discoveries"])
         normalize_config(parsed3)
 
-    def test_cli_runtime_guard_fires_for_non_empty_auto_discoveries(self):
+    def test_cli_requires_authoritative_store_for_non_empty_auto_discoveries(self):
         cfg = _base_config(auto_discoveries=[{"url": "https://github.com/BlackBearRevived"}])
         env = {
             "MIRROR_TIMESTAMP_SECRET": "test-secret",
@@ -743,10 +743,14 @@ class RoundTripAndRuntimeGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             path.write_text(json.dumps(cfg), encoding="utf-8")
-            with patch.dict(os.environ, env, clear=True):
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(cli, "SourceAPI", return_value=Mock()),
+                patch.object(cli, "API", return_value=Mock()),
+            ):
                 with self.assertRaises(ValueError) as ctx:
                     cli.main(["--config", str(path)])
-        expected = "auto_discoveries is not implemented yet; configure explicit repositories"
+        expected = "auto-discovery onboarding requires authoritative management configuration"
         self.assertEqual(str(ctx.exception), expected)
         self.assertEqual(error_detail(ctx.exception), expected)
 
