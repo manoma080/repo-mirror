@@ -332,6 +332,72 @@ class MigrationPipelineTests(unittest.TestCase):
         self.assertEqual(self.api.config(), original)
         self.assertEqual(result[0][1]['name'], 'renamed')
 
+    def test_clean_run_with_github_repository_env_does_not_open_migration_store(self):
+        config_path = Path(self.directory) / 'config.json'
+        config_path.write_bytes(self.api.config())
+        environment = {
+            'MIRROR_TIMESTAMP_SECRET': SECRET,
+            'GH_TOKEN': 'placeholder-token',
+            'DESTINATION_OWNER': 'dest',
+            'GITHUB_REPOSITORY': MANAGEMENT,
+        }
+        stderr = io.StringIO()
+        with patch.dict('os.environ', environment, clear=True), \
+                patch.object(cli, 'SourceAPI'), \
+                patch.object(cli, 'API', side_effect=[Mock(), Mock()]), \
+                patch.object(cli, 'get_existing', return_value=None), \
+                patch.object(cli, 'mirror_repository', return_value=None), \
+                patch('repo_mirror.github_migration.API',
+                      side_effect=AssertionError('unexpected migration API call')) as migration_api, \
+                redirect_stderr(stderr):
+            result = cli.main(['--config', str(config_path)])
+        self.assertEqual(result, [])
+        migration_api.assert_not_called()
+        log = stderr.getvalue()
+        self.assertNotIn('migration recovery failed', log)
+        self.assertNotIn('migration failed', log)
+
+    def test_relocation_with_unavailable_or_failing_store_still_fails_run(self):
+        config_path = Path(self.directory) / 'config.json'
+        config_path.write_bytes(self.api.config())
+        environment = {
+            'MIRROR_TIMESTAMP_SECRET': SECRET,
+            'GH_TOKEN': 'placeholder-token',
+            'DESTINATION_OWNER': 'dest',
+            'GITHUB_REPOSITORY': MANAGEMENT,
+        }
+
+        with self.subTest('unavailable store'):
+            stderr = io.StringIO()
+            with patch.dict('os.environ', environment, clear=True), \
+                    patch.object(cli, 'SourceAPI'), \
+                    patch.object(cli, 'API', side_effect=[Mock(), Mock()]), \
+                    patch.object(cli, 'get_existing', return_value=None), \
+                    patch.object(cli, 'mirror_repository', side_effect=only_moved(relocation())), \
+                    patch('repo_mirror.github_migration.API',
+                          side_effect=RuntimeError('store unavailable')), \
+                    redirect_stderr(stderr):
+                with self.assertRaisesRegex(RuntimeError, '1 migrations failed'):
+                    cli.main(['--config', str(config_path)])
+            self.assertIn('migration store unavailable', stderr.getvalue())
+
+        with self.subTest('failing recovery'):
+            stderr = io.StringIO()
+            failing_api = Mock()
+            failing_api.request.side_effect = HTTPError(
+                f'{API}/repos/{MANAGEMENT}/contents/migrations.json',
+                401, 'Unauthorized', None, None)
+            with patch.dict('os.environ', environment, clear=True), \
+                    patch.object(cli, 'SourceAPI'), \
+                    patch.object(cli, 'API', side_effect=[Mock(), Mock()]), \
+                    patch.object(cli, 'get_existing', return_value=None), \
+                    patch.object(cli, 'mirror_repository', side_effect=only_moved(relocation())), \
+                    patch('repo_mirror.github_migration.API', return_value=failing_api), \
+                    redirect_stderr(stderr):
+                with self.assertRaisesRegex(RuntimeError, 'migrations failed'):
+                    cli.main(['--config', str(config_path)])
+            self.assertIn('migration recovery failed', stderr.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

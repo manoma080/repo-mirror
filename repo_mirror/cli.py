@@ -406,7 +406,7 @@ def main(argv=None):
     try:
         if pre_transaction is not None:
             transaction = pre_transaction
-        else:
+        elif relocations:
             from repo_mirror.github_migration import transaction_from_environment
             transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
     except Exception as exc:
