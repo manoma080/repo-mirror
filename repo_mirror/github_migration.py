@@ -138,6 +138,19 @@ class GitHubRepositories:
         return repo
 
 
+def store_from_environment(environ, config_path):
+    """Open the management repository's authoritative config, if configured."""
+    slug = environ.get('MIRROR_MANAGEMENT_REPOSITORY') or environ.get('GITHUB_REPOSITORY')
+    token = (environ.get('MIRROR_MANAGEMENT_TOKEN') or environ.get('MANAGEMENT_TOKEN')
+             or environ.get('GH_TOKEN'))
+    if not slug or not token or os.path.basename(config_path) != 'config.json':
+        return None
+    parts = slug.split('/')
+    if len(parts) != 2:
+        raise ValueError('invalid management repository')
+    return GitHubConfigFile(API(token), *parts, path='config.json')
+
+
 def transaction_from_environment(environ, config_path, destination_owner, api=None,
                                  destination_api=None):
     """Build a GitHub migration transaction, or ``None`` when unavailable.

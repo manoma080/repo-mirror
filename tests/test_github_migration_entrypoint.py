@@ -13,9 +13,9 @@ class GitHubMigrationEntrypointTests(unittest.TestCase):
     def test_batch_reports_relocation_without_publishing_configuration(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config = Path(tmp_dir) / 'config.json'
-            original = {'destination_account_type': 'personal', 'sources': [
-                {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old',
-                 'repos': ['repo'], 'destinations': {'repo': {'name': 'copy', 'source_id': 1, 'destination_id': 2}}}]}
+            original = {'destinations': {'main': {'account_type': 'personal'}}, 'repositories': [
+                {'source': {'url': 'https://github.com/old/repo', 'id': 1},
+                 'mirrors': {'main': {'name': 'copy', 'id': 2}}}]}
             config.write_text(json.dumps(original), encoding='utf-8')
             dst = Mock()
             env = {'MIRROR_TIMESTAMP_SECRET': 's' * 32, 'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}

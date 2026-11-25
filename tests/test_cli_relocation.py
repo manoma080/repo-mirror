@@ -9,18 +9,25 @@ from repo_mirror.sources import source_marker
 
 
 SOURCE = {
-    'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
-    'destinations': {'repo': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
-        'legacy': {'source_owner': 'old', 'source_name': 'old-repo', 'destination_name': 'mirror-old'}}},
+    'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'name': 'repo',
+    'mirror': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
+        'legacy': {'source_owner': 'old', 'source_name': 'old-repo', 'destination_name': 'mirror-old'}},
 }
 from repo_mirror.migration_attestation import github_claim, sign
-SOURCE['destinations']['repo']['legacy']['signature'] = sign(github_claim(SOURCE, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
+SOURCE['mirror']['legacy']['signature'] = sign(github_claim(SOURCE, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
 OLD_MARKER = source_marker({**SOURCE, 'owner': 'old'}, 'old-repo')
+CONFIG = {
+    'destinations': {'main': {'account_type': 'personal'}},
+    'repositories': [{
+        'source': {'url': 'https://github.com/new/repo', 'id': 1},
+        'mirrors': {'main': {'name': 'mirror-new', 'id': 2, 'legacy': SOURCE['mirror']['legacy']}},
+    }],
+}
 
 
 def run_cli(tmp_path, marker):
     config = tmp_path / 'config.json'
-    config.write_text(json.dumps({'destination_account_type': 'personal', 'sources': [SOURCE]}))
+    config.write_text(json.dumps(CONFIG))
     src = Mock()
     src.request.return_value = {'id': 1, 'clone_url': 'https://github.com/new/repo.git'}
     dst = Mock()

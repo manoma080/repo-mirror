@@ -6,14 +6,16 @@ manual reconciliation and are never automatically adopted.
 """
 import hashlib
 import json
+import os
 import re
 from urllib.parse import quote, urlsplit
 
 from repo_mirror.config_json import unique_pairs
+from repo_mirror.constants import NAME
 from repo_mirror.forgejo_git import APIError, ForgejoDestination
 from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
 from repo_mirror.logging_utils import safe_label
-from repo_mirror.sources import discover_gitlab_projects
+from repo_mirror.sources import source_api_base
 
 GENERATED_NAME_RE = re.compile(r'gitlab-[0-9a-f]{24}', re.IGNORECASE)
 DUPLICATE_GROUP_MESSAGE = 'duplicate group declaration in groups and auto_discoveries'
@@ -24,6 +26,33 @@ def group_origin_key(base_url):
     """Return normalized ``(host, port)`` for comparing group and rule origins."""
     parsed = urlsplit(base_url)
     return (parsed.hostname.lower(), parsed.port or 443)
+
+
+def discover_gitlab_projects(source, api):
+    """Capture validated public direct-project IDs from a group listing."""
+    from repo_mirror.repository import validate_source_clone_url
+
+    url = f"{source_api_base(source)}/groups/{quote(source['owner'], safe='')}/projects?include_subgroups=false&with_shared=false"
+    projects = {}
+    listing = api.pages(url)
+    if os.environ.get('MIRROR_GITLAB_TOKEN'):
+        from repo_mirror.gitlab_source_adapter import fetch_group_projects
+        listing = fetch_group_projects(source['base_url'], source['owner'],
+                                       os.environ.get('MIRROR_GITLAB_TOKEN'))
+    for project in listing:
+        if not isinstance(project, dict):
+            raise ValueError('invalid GitLab project discovery')
+        if project.get('visibility') in ('private', 'internal'):
+            continue
+        name, identity = project.get('path'), project.get('id')
+        if (not isinstance(name, str) or not NAME.fullmatch(name) or name in ('.', '..')
+                or type(identity) is not int or identity <= 0 or project.get('visibility') != 'public'
+                or project.get('path_with_namespace') != source['owner'] + '/' + name
+                or name.lower() in {key.lower() for key in projects} or identity in projects.values()):
+            raise ValueError('invalid GitLab direct project identity')
+        validate_source_clone_url(source, name, {'clone_url': project.get('http_url_to_repo')})
+        projects[name] = identity
+    return projects
 
 
 def gitlab_generated_name(origin, group_id, source_id):

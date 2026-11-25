@@ -20,7 +20,10 @@ class ProgressTests(unittest.TestCase):
         self.addCleanup(secret.stop)
 
     def test_main_reports_counts_and_never_logs_destination(self):
-        config = {"destination_account_type": "personal", "sources": [dict(SOURCE, repos=["demo"])]}
+        config = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
+        }
         output = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:
             json.dump(config, f)
@@ -34,11 +37,12 @@ class ProgressTests(unittest.TestCase):
                 mirror.main(["--config", f.name])
         text = output.getvalue()
         for part in (
-            "source 1",
-            "discovered=1",
+            "source 1/1",
             "repository 1/1",
             "completed",
             "summary",
+            "sources=1",
+            "repositories=1",
             "succeeded=1",
             "failed=0",
         ):

@@ -29,5 +29,6 @@ class GithubAccountTypeGuardTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.run_config(config, value)
 
-    def test_legacy_environment_override_remains_supported(self):
-        self.run_config({'destination_account_type': 'personal', 'sources': []}, 'organization')
+    def test_legacy_config_is_rejected_even_with_environment_account_type(self):
+        with self.assertRaisesRegex(ValueError, 'legacy configuration format is no longer supported'):
+            self.run_config({'destination_account_type': 'personal', 'sources': []}, 'organization')

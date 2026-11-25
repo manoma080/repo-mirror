@@ -107,9 +107,11 @@ class TokenRefreshTests(unittest.TestCase):
         import os
         import tempfile
 
-        sources = [{"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}]
         with tempfile.NamedTemporaryFile(mode="w") as f:
-            json.dump({"destination_account_type": "personal", "sources": sources}, f)
+            json.dump({
+                "destinations": {"main": {"account_type": "personal"}},
+                "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
+            }, f)
             f.flush()
             env = {
                 "DESTINATION_OWNER": "dest",
@@ -119,7 +121,6 @@ class TokenRefreshTests(unittest.TestCase):
             }
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch_everywhere("discover", return_value=["demo"]),
                 patch_everywhere("get_existing", return_value=None),
                 patch_everywhere("mirror_repository") as run,
             ):

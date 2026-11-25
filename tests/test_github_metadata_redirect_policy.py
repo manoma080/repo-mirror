@@ -15,14 +15,16 @@ from repo_mirror.github_api import SourceAPI, OriginRedirect
 
 class GitHubMetadataRedirectPolicyTests(unittest.TestCase):
     def test_cli_restricts_metadata_client_before_discovery(self):
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'old', 'repos': ['repo']}
         client = SourceAPI('secret')
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'config.json'
-            config.write_text(json.dumps({'destination_account_type': 'personal', 'sources': [source]}))
+            config.write_text(json.dumps({
+                'destinations': {'main': {'account_type': 'personal'}},
+                'repositories': [{'source': {'url': 'https://github.com/old/repo'}, 'mirrors': {'main': {}}}],
+            }))
             with patch.dict('os.environ', {'GH_TOKEN': 'secret', 'DESTINATION_OWNER': 'dest', 'MIRROR_TIMESTAMP_SECRET': 'fixture-secret'}, clear=True), \
                  patch.object(cli, 'SourceAPI', return_value=client), \
-                 patch.object(cli, 'discover', side_effect=RuntimeError('stop')):
+                 patch.object(cli, 'get_existing', side_effect=RuntimeError('stop')):
                 try:
                     cli.main(['--config', str(config)])
                 except RuntimeError:

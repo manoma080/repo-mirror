@@ -148,14 +148,10 @@ class ReleaseTests(unittest.TestCase):
         from contextlib import redirect_stderr
 
         config = {
-            "destination_account_type": "personal",
-            "sources": [
-                {
-                    "type": "github",
-                    "base_url": "https://github.com",
-                    "owner": "alice",
-                    "repos": ["one", "two"],
-                }
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},
+                {"source": {"url": "https://github.com/alice/two"}, "mirrors": {"main": {}}},
             ],
         }
         called = []

@@ -230,7 +230,7 @@ class GitLabForgejoEntrypointTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertFalse((root / 'lock').exists())
 
-    def test_group_all_is_explicitly_refused_before_lock(self):
+    def test_legacy_sources_format_is_explicitly_refused_before_lock(self):
         import json
         import io
         from contextlib import redirect_stderr
@@ -244,7 +244,7 @@ class GitLabForgejoEntrypointTests(unittest.TestCase):
                            '--timestamp-secret-file', str(root / 'secret'), '--journal-dir', str(root),
                            '--owner', 'local', '--lock', str(root / 'lock'), '--asset-max-bytes', '123'])
         self.assertEqual(result, 2)
-        self.assertIn('GitLab group discovery is not supported', output.getvalue())
+        self.assertIn('legacy configuration format is no longer supported', output.getvalue())
         self.assertFalse((root / 'lock').exists())
 
     def test_scheduler_forwards_asset_policy_to_worker(self):

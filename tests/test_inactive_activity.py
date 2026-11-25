@@ -154,8 +154,8 @@ class CliInactiveWarningTests(unittest.TestCase):
 
     def run_cli(self, threshold):
         config = {
-            "destination_account_type": "personal",
-            "sources": [{"type": "github", "base_url": "https://github.com", "owner": "alice", "repos": ["demo"]}],
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
         }
 
         def fake_mirror(source, name, *args, **kwargs):

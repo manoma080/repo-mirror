@@ -38,14 +38,10 @@ class ConcurrentMirroringTests(unittest.TestCase):
         config.write_text(
             json.dumps(
                 {
-                    "destination_account_type": "organization",
-                    "sources": [
-                        {
-                            "type": "github",
-                            "base_url": "https://github.com",
-                            "owner": "alice",
-                            "repos": ["one", "two"],
-                        }
+                    "destinations": {"main": {"account_type": "organization"}},
+                    "repositories": [
+                        {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},
+                        {"source": {"url": "https://github.com/alice/two"}, "mirrors": {"main": {}}},
                     ],
                 }
             )
@@ -121,14 +117,10 @@ class ConcurrentMirroringTests(unittest.TestCase):
         config.write_text(
             json.dumps(
                 {
-                    "destination_account_type": "organization",
-                    "sources": [
-                        {
-                            "type": "github",
-                            "base_url": "https://github.com",
-                            "owner": "alice",
-                            "repos": [f"repo{i}" for i in range(10)],
-                        }
+                    "destinations": {"main": {"account_type": "organization"}},
+                    "repositories": [
+                        {"source": {"url": f"https://github.com/alice/repo{i}"}, "mirrors": {"main": {}}}
+                        for i in range(10)
                     ],
                 }
             )
@@ -177,10 +169,13 @@ class ConcurrentMirroringTests(unittest.TestCase):
 
     def test_temporary_log_creation_failure_does_not_stop_remaining_repositories(self):
         config = self.tmp_path / "config.json"
-        config.write_text(json.dumps({"destination_account_type": "organization", "sources": [{
-            "type": "github", "base_url": "https://github.com", "owner": "alice",
-            "repos": [f"repo{i}" for i in range(6)],
-        }]}))
+        config.write_text(json.dumps({
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [
+                {"source": {"url": f"https://github.com/alice/repo{i}"}, "mirrors": {"main": {}}}
+                for i in range(6)
+            ],
+        }))
         real_tempfile = cli.tempfile.TemporaryFile
         calls = 0
         lock = threading.Lock()
@@ -209,10 +204,13 @@ class ConcurrentMirroringTests(unittest.TestCase):
 
     def test_log_read_failure_does_not_stop_remaining_repositories(self):
         config = self.tmp_path / "config.json"
-        config.write_text(json.dumps({"destination_account_type": "organization", "sources": [{
-            "type": "github", "base_url": "https://github.com", "owner": "alice",
-            "repos": [f"repo{i}" for i in range(6)],
-        }]}))
+        config.write_text(json.dumps({
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [
+                {"source": {"url": f"https://github.com/alice/repo{i}"}, "mirrors": {"main": {}}}
+                for i in range(6)
+            ],
+        }))
         real_tempfile = cli.tempfile.TemporaryFile
         calls = 0
         lock = threading.Lock()

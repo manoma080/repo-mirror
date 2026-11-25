@@ -6,8 +6,6 @@ from pathlib import Path
 
 from repo_mirror.config_named import normalize_config
 from repo_mirror.forgejo_sync import parse_manifest, parse_asset_max_bytes
-from repo_mirror.gitlab_onboarding_forgejo import validate_groups
-from repo_mirror.sources import validate_source
 from scheduler.auto_update import valid_manifest
 
 
@@ -20,15 +18,17 @@ class GitLabReadmeTests(unittest.TestCase):
         assert len(matches) == len(cls.examples) == 4
 
     def test_github_project(self):
-        source = normalize_config(self.examples['github-project'])['sources'][0]
+        source = normalize_config(self.examples['github-project'])['repositories'][0]
         self.assertEqual(source['type'], 'gitlab')
-        self.assertEqual(source['destinations']['project']['source_id'], 42)
-        self.assertEqual(source['destinations']['project']['destination_id'], 99)
+        self.assertEqual(source['mirror']['source_id'], 42)
+        self.assertEqual(source['mirror']['destination_id'], 99)
 
     def test_github_group(self):
         config = normalize_config(self.examples['github-group'])
-        validate_source(config['sources'][0])
-        self.assertEqual(config['sources'][0]['repos'], 'all')
+        rule = config['auto_discoveries'][0]
+        self.assertEqual(rule['type'], 'gitlab')
+        self.assertEqual(rule['owner'], 'team/sub')
+        self.assertEqual(rule['id'], 7)
 
     def test_forgejo_project(self):
         config = self.examples['forgejo-project']
@@ -39,7 +39,7 @@ class GitLabReadmeTests(unittest.TestCase):
     def test_forgejo_group(self):
         config = self.examples['forgejo-group']
         self.assertTrue(valid_manifest(config))
-        validate_groups(config['groups'])
+        self.assertEqual(config['auto_discoveries'][0]['type'], 'gitlab')
         self.assertEqual(parse_asset_max_bytes('2147483647'), 2147483647)
         with self.assertRaises(ValueError):
             parse_asset_max_bytes('2147483648')

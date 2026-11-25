@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 
 from repo_mirror import cli
 from repo_mirror.auto_discoveries_onboarding import (
+    OnboardingPublicationError,
     PartialOnboarding,
     discover_rule_repositories,
     onboard_auto_discoveries,
@@ -19,7 +20,6 @@ from repo_mirror.auto_discoveries_onboarding import (
     resolve_owner,
 )
 from repo_mirror.config_named import normalize_config
-from repo_mirror.gitlab_onboarding_github import OnboardingPublicationError
 from repo_mirror.sources import source_marker
 
 
@@ -800,7 +800,7 @@ class CliIntegrationTests(unittest.TestCase):
         mirrored = []
 
         def fake_mirror(source, name, owner, *args, **kwargs):
-            mirrored.append((name, source["destinations"][name.lower()]["source_id"], source["destinations"][name.lower()]["destination_id"]))
+            mirrored.append((name, source["mirror"]["source_id"], source["mirror"]["destination_id"]))
             return None
 
         env = {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest", "MIRROR_TIMESTAMP_SECRET": "secret"}
@@ -809,7 +809,7 @@ class CliIntegrationTests(unittest.TestCase):
             path.write_bytes(raw)
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch("repo_mirror.gitlab_onboarding_github.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
                 patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
                 patch.object(cli, "SourceAPI", return_value=src),
                 patch.object(cli, "API", side_effect=[Mock(), dst, Mock(), dst]),

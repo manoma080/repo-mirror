@@ -243,17 +243,17 @@ class FilterPlanOwnerUrlTests(unittest.TestCase):
             "type": "github",
             "base_url": "https://github.com",
             "owner": "Alice",
-            "repos": ["alpha"],
+            "name": "alpha",
             "discovered_by": "https://github.com/Alice",
         }
         alice_src_2 = {
             "type": "github",
             "base_url": "https://github.com",
             "owner": "Alice",
-            "repos": ["beta"],
+            "name": "beta",
             "discovered_by": "https://github.com/Alice",
         }
-        other_src = {"type": "github", "base_url": "https://github.com", "owner": "Bob", "repos": ["gamma"]}
+        other_src = {"type": "github", "base_url": "https://github.com", "owner": "Bob", "name": "gamma"}
 
         self.assertIn("https://github.com/Alice", entry_urls(alice_src, "alpha"))
         plan = [(1, alice_src, "alpha"), (2, other_src, "gamma"), (3, alice_src_2, "beta")]
@@ -539,7 +539,7 @@ class CliOwnerWorkflowTests(unittest.TestCase):
         mirrored = []
 
         def fake_mirror(source, name, owner, *args, **kwargs):
-            mirrored.append((source["owner"], name, source["destinations"][name.lower()].get("ignore_releases")))
+            mirrored.append((source["owner"], name, source.get("mirror", {}).get("ignore_releases")))
             return None
 
         dst = Dst()
@@ -555,7 +555,7 @@ class CliOwnerWorkflowTests(unittest.TestCase):
             path.write_bytes(raw)
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch("repo_mirror.gitlab_onboarding_github.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
                 patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
                 patch.object(cli, "SourceAPI", return_value=Src()),
                 patch.object(cli, "API", side_effect=[Mock(), dst, Mock(), dst]),
@@ -590,7 +590,7 @@ class CliOwnerWorkflowTests(unittest.TestCase):
             }
             with (
                 patch.dict(os.environ, env_one_time, clear=True),
-                patch("repo_mirror.gitlab_onboarding_github.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
                 patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
                 patch.object(cli, "SourceAPI", return_value=Src()),
                 patch.object(cli, "API", side_effect=[Mock(), Mock()]),
@@ -608,7 +608,7 @@ class CliOwnerWorkflowTests(unittest.TestCase):
             }
             with (
                 patch.dict(os.environ, env_dest_name, clear=True),
-                patch("repo_mirror.gitlab_onboarding_github.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
                 patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
                 patch.object(cli, "SourceAPI", return_value=Src()),
                 patch.object(cli, "API", side_effect=[Mock(), Mock()]),
@@ -660,7 +660,7 @@ class CliOwnerWorkflowTests(unittest.TestCase):
             path.write_bytes(raw)
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch("repo_mirror.gitlab_onboarding_github.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
                 patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
                 patch.object(cli, "SourceAPI", return_value=Src()),
                 patch.object(cli, "API", side_effect=[Mock(), Mock(), Mock(), Mock()]),

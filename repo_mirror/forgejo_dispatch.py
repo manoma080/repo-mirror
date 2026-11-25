@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from urllib.parse import urlsplit
 
 from repo_mirror.adhoc import parse_repo_url
+from repo_mirror.config_json import LEGACY_CONFIG_ERROR, is_legacy_config
 from repo_mirror.destination_profile import validate_runtime
 from repo_mirror.forgejo_sync import parse_manifest, parse_source
 from repo_mirror.gitlab_onboarding_forgejo import validate_groups
@@ -88,6 +89,8 @@ def _url_key(route):
 
 
 def _validated(document, owner, port):
+    if is_legacy_config(document):
+        raise DispatchError(LEGACY_CONFIG_ERROR)
     if set(document) - {'groups', CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories'}:
         raise DispatchError('invalid named manifest')
     if 'groups' in document:

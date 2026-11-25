@@ -22,8 +22,8 @@ class LogSecretsTests(unittest.TestCase):
     def test_untrusted_identifiers_are_not_logged(self):
         secret = "ghp_" + "A" * 36
         config = {
-            "destination_account_type": "personal",
-            "sources": [dict(SOURCE, owner=secret, repos=[secret])],
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [{"source": {"url": f"https://github.com/{secret}/{secret}"}, "mirrors": {"main": {}}}],
         }
         output = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:

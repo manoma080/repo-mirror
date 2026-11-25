@@ -140,14 +140,15 @@ def _normalize_auto_discoveries(raw_rules):
 
 
 def normalize_config(config):
+    from repo_mirror.config_json import reject_legacy_config
+    from repo_mirror.host_limits import CONFIG_KEY, HostLimits
+
     if not isinstance(config, dict):
         raise ValueError("config must be an object")
-    if 'destinations' not in config and 'repositories' not in config and 'auto_discoveries' not in config:
-        return config
-    from repo_mirror.host_limits import CONFIG_KEY, HostLimits
-    HostLimits.from_config(config.get(CONFIG_KEY), default=1)
+    reject_legacy_config(config)
     if set(config) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories'}:
         raise ValueError('invalid named config fields')
+    HostLimits.from_config(config.get(CONFIG_KEY), default=1)
     normalized_rules = _normalize_auto_discoveries(config['auto_discoveries']) if 'auto_discoveries' in config else []
     rules_by_url = {r['url']: r for r in normalized_rules}
     explicit_prefix_rules = [
@@ -174,7 +175,7 @@ def normalize_config(config):
     from repo_mirror.constants import NAME
     from repo_mirror.gitlab_onboarding_forgejo import PREFIX_WITH_GENERATED_MESSAGE, group_origin_key
     from repo_mirror.sources import destination_name, validate_source
-    sources, seen, seen_destinations = [], set(), {}
+    entries, seen, seen_destinations = [], set(), {}
     for entry in repositories:
         if (
             not isinstance(entry, dict)
@@ -202,9 +203,9 @@ def normalize_config(config):
             mapping['source_id'] = source['id']
         if 'id' in mirror:
             mapping['destination_id'] = mirror['id']
-        item = {'type': kind, 'base_url': base, 'owner': owner, 'repos': [name]}
+        item = {'type': kind, 'base_url': base, 'owner': owner, 'name': name}
         if mapping:
-            item['destinations'] = {name.lower(): mapping}
+            item['mirror'] = mapping
         validate_source(item)
         if 'discovered_by' in entry:
             discovered_by = entry['discovered_by']
@@ -243,7 +244,7 @@ def normalize_config(config):
         if dest_key in seen_destinations:
             raise ValueError('duplicate destination repository')
         seen_destinations[dest_key] = identity
-        sources.append(item)
+        entries.append(item)
     for rule in normalized_rules:
         for repo_key, ov in rule['overrides'].items():
             ov_identity = (rule['base_url'].lower(), rule['owner'].lower(), repo_key.lower())
@@ -253,7 +254,7 @@ def normalize_config(config):
             if existing_identity is not None and existing_identity != ov_identity:
                 raise ValueError('duplicate destination repository')
             seen_destinations[dest_key] = ov_identity
-    result = {'destination_account_type': 'personal' if explicit else settings['account_type'], 'sources': sources}
+    result = {'account_type': 'personal' if explicit else settings['account_type'], 'repositories': entries}
     if CONFIG_KEY in config:
         result[CONFIG_KEY] = dict(config[CONFIG_KEY])
     if explicit:

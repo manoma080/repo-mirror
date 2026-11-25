@@ -90,37 +90,17 @@ class GitLabOnboardingTests(unittest.TestCase):
         self.assertEqual(dst.repo['id'], 9)
 
 
-    def test_autopin_all_selection_refuses_unpinned_existing_mirror(self):
-        class Source:
-            def pages(self, url):
-                return [{'path': 'project'}]
-            def request(self, method, url, *args):
-                return {'id': 42, 'visibility': 'public', 'path_with_namespace': 'group/sub/project',
-                        'http_url_to_repo': URL + '.git'}
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub', 'repos': 'all'}
-        cfg = {'destination_account_type': 'personal', 'sources': [source]}
-        before = json.dumps(cfg, sort_keys=True)
-        class Destination:
-            writes = []
-            def request(self, method, url, *args):
-                if method != 'GET':
-                    self.writes.append(method)
-                return {'id': 9, 'description': source_marker(source, 'project')}
-        dst = Destination()
-        with self.assertRaisesRegex(ValueError, 'unpinned existing destination'):
-            adhoc.add_to_config_pinned(cfg, URL, Source(), Source(), dst, owner='bot', account_type='personal')
-        self.assertEqual(dst.writes, [])
-        self.assertEqual(json.dumps(cfg, sort_keys=True), before)
-
     def test_explicit_missing_gitlab_pin_fails_without_writes(self):
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub', 'repos': ['project']}
         calls = []
         def missing(client, method, url, *args, **kwargs):
             calls.append(method)
             raise HTTPError(url, 404, 'missing', {}, None)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config.json'
-            path.write_text(json.dumps({'destination_account_type': 'personal', 'sources': [source]}))
+            path.write_text(json.dumps({
+                'destinations': {'d': {'account_type': 'personal'}},
+                'repositories': [{'source': {'type': 'gitlab', 'url': URL}, 'mirrors': {'d': {}}}],
+            }))
             with patch.dict('os.environ', {'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'bot',
                                           'MIRROR_TIMESTAMP_SECRET': 'secret'}, clear=True), \
                  patch('repo_mirror.github_api.API.request', missing), \
@@ -130,31 +110,6 @@ class GitLabOnboardingTests(unittest.TestCase):
             git.assert_not_called()
         self.assertTrue(calls)
         self.assertTrue(all(method == 'GET' for method in calls))
-
-    def test_autopin_all_selection_persists_ids(self):
-        class Source:
-            def pages(self, url):
-                return [{'path': 'project'}]
-            def request(self, method, url, *args):
-                return {'id': 42, 'visibility': 'public', 'path_with_namespace': 'group/sub/project',
-                        'http_url_to_repo': URL + '.git'}
-        class Destination:
-            repo = None
-            def request(self, method, url, payload=None):
-                if url.endswith('/actions/permissions'):
-                    return {'enabled': False} if method == 'GET' else None
-                if url.endswith('/user'):
-                    return {'login': 'bot'}
-                if method == 'GET':
-                    if self.repo is None:
-                        raise HTTPError(url, 404, 'missing', {}, None)
-                    return self.repo.copy()
-                self.repo = {'id': 9, 'full_name': 'bot/' + payload['name'], 'description': payload['description']}
-                return self.repo.copy()
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub', 'repos': 'all'}
-        cfg = {'destination_account_type': 'personal', 'sources': [source]}
-        self.assertTrue(adhoc.add_to_config_pinned(cfg, URL, Source(), Source(), Destination(), owner='bot', account_type='personal'))
-        self.assertEqual(cfg['sources'][0]['destinations']['project'], {'source_id': 42, 'destination_id': 9})
 
     def test_autopin_rejects_private_and_changed_historical_id_before_writes(self):
         class Source:
@@ -181,8 +136,8 @@ class GitLabOnboardingTests(unittest.TestCase):
 
 class GitLabDiscoveryIdentityTests(unittest.TestCase):
     def test_discovery_excludes_private_without_exposing_name(self):
-        from repo_mirror.sources import discover_gitlab_projects
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub', 'repos': 'all'}
+        from repo_mirror.gitlab_onboarding_forgejo import discover_gitlab_projects
+        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub'}
         class Source:
             def pages(self, url):
                 return [{'visibility': 'private', 'path': 'secret'},
@@ -191,8 +146,8 @@ class GitLabDiscoveryIdentityTests(unittest.TestCase):
         self.assertEqual(discover_gitlab_projects(source, Source()), {'project': 42})
 
     def test_discovery_retains_validated_direct_project_identity(self):
-        from repo_mirror.sources import discover_gitlab_projects
-        source = {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "group/sub", "repos": "all"}
+        from repo_mirror.gitlab_onboarding_forgejo import discover_gitlab_projects
+        source = {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "group/sub"}
         class Source:
             def pages(self, url):
                 self.url = url
@@ -203,46 +158,29 @@ class GitLabDiscoveryIdentityTests(unittest.TestCase):
         self.assertIn("include_subgroups=false", api.url)
         self.assertIn("with_shared=false", api.url)
 
-    def test_entrypoint_group_and_one_time_pass_pins_to_repository(self):
-        for group in (True, False):
-            with self.subTest(group=group), tempfile.TemporaryDirectory() as directory:
-                source = {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "group/sub", "repos": "all"}
-                project = {"id": 42, "path": "project", "visibility": "public",
-                           "path_with_namespace": "group/sub/project", "http_url_to_repo": URL + ".git"}
-                class Source:
-                    def restrict_origin(self, origin): pass
-                    def pages(self, url): return [project.copy()]
-                    def request(self, method, url, *args): return project.copy()
-                class Destination:
-                    repo = None
-                    def request(self, method, url, payload=None):
-                        if url.endswith('/actions/permissions'):
-                            return {"enabled": False} if method == 'GET' else None
-                        if url.endswith('/user'): return {"login": "bot"}
-                        if method == 'GET':
-                            if self.repo is None: raise HTTPError(url, 404, 'missing', {}, None)
-                            return self.repo.copy()
-                        assert method == 'POST'
-                        self.repo = {"id": 9, "full_name": "bot/" + payload['name'], "description": payload['description']}
-                        return self.repo.copy()
-                src, dst = Source(), Destination()
-                path = Path(directory) / 'config.json'
-                original = {"destination_account_type": "personal", "sources": [source] if group else []}
-                path.write_text(json.dumps(original))
-                env = {"GH_TOKEN": "token", "DESTINATION_OWNER": "bot", "MIRROR_TIMESTAMP_SECRET": "secret"}
-                if not group: env['MIRROR_SOURCE_URLS'] = URL
-                with patch.dict('os.environ', env, clear=True), patch('repo_mirror.cli.SourceAPI', return_value=src), \
-                     patch('repo_mirror.cli.API', side_effect=[src, dst]), \
-                     patch('repo_mirror.cli.mirror_repository') as mirror:
-                    with self.assertRaisesRegex(ValueError, 'durable GitLab onboarding'):
-                        cli.main(['--config', str(path)])
-                mirror.assert_not_called()
-                self.assertIsNone(dst.repo)
-                self.assertEqual(json.loads(path.read_text()), original)
+    def test_entrypoint_one_time_gitlab_refuses_without_durable_onboarding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class Destination:
+                repo = None
+                def request(self, method, url, payload=None):
+                    raise AssertionError('destination should not be queried')
+            dst = Destination()
+            path = Path(directory) / 'config.json'
+            original = {"destinations": {"d": {"account_type": "personal"}}, "repositories": []}
+            path.write_text(json.dumps(original))
+            env = {"GH_TOKEN": "token", "DESTINATION_OWNER": "bot", "MIRROR_TIMESTAMP_SECRET": "secret",
+                   "MIRROR_SOURCE_URLS": URL}
+            with patch.dict('os.environ', env, clear=True), \
+                 patch('repo_mirror.cli.mirror_repository') as mirror:
+                with self.assertRaisesRegex(ValueError, 'durable GitLab onboarding'):
+                    cli.main(['--config', str(path)])
+            mirror.assert_not_called()
+            self.assertIsNone(dst.repo)
+            self.assertEqual(json.loads(path.read_text()), original)
 
     def test_discovery_rejects_non_direct_or_private_projects(self):
-        from repo_mirror.sources import discover_gitlab_projects
-        source = {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "group/sub", "repos": "all"}
+        from repo_mirror.gitlab_onboarding_forgejo import discover_gitlab_projects
+        source = {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "group/sub"}
         valid = {"id": 42, "path": "project", "visibility": "public",
                  "path_with_namespace": "group/sub/project", "http_url_to_repo": URL + ".git"}
         for override in ({"path_with_namespace": "group/sub/child/project"}, {"id": True}):
@@ -250,31 +188,3 @@ class GitLabDiscoveryIdentityTests(unittest.TestCase):
                 class Source:
                     def pages(self, url): return [{**valid, **override}]
                 with self.assertRaises(ValueError): discover_gitlab_projects(source, Source())
-
-    def test_entrypoint_rejects_unpinned_existing_and_discovery_id_drift(self):
-        for existing in (True, False):
-            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
-                source = {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "group/sub", "repos": "all"}
-                project = {"id": 42, "path": "project", "visibility": "public",
-                           "path_with_namespace": "group/sub/project", "http_url_to_repo": URL + ".git"}
-                class Source:
-                    def restrict_origin(self, origin): pass
-                    def pages(self, url): return [project.copy()]
-                    def request(self, method, url, *args): return {**project, "id": 43}
-                class Destination:
-                    writes = []
-                    def request(self, method, url, payload=None):
-                        if method != 'GET': self.writes.append(method); raise AssertionError('unexpected write')
-                        if existing: return {"id": 9, "description": source_marker(source, 'project')}
-                        raise HTTPError(url, 404, 'missing', {}, None)
-                src, dst = Source(), Destination()
-                path = Path(directory) / 'config.json'
-                path.write_text(json.dumps({"destination_account_type": "personal", "sources": [source]}))
-                with patch.dict('os.environ', {"GH_TOKEN": "token", "DESTINATION_OWNER": "bot",
-                                               "MIRROR_TIMESTAMP_SECRET": "secret"}, clear=True), \
-                     patch('repo_mirror.cli.SourceAPI', return_value=src), \
-                     patch('repo_mirror.cli.API', side_effect=[src, dst]), \
-                     patch('repo_mirror.cli.mirror_repository') as mirror:
-                    with self.assertRaisesRegex(ValueError, 'durable GitLab onboarding'): cli.main(['--config', str(path)])
-                self.assertEqual(dst.writes, [])
-                mirror.assert_not_called()

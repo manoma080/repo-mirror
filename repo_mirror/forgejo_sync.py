@@ -24,7 +24,7 @@ from repo_mirror.repository import (ReleaseAggregateError, mirror_releases, vali
                                     fetch_source_latest, validate_source_latest)
 from repo_mirror.sources import source_marker, source_api_base
 from repo_mirror.staleness import DEFAULT_INACTIVE_DAYS, begin, end, parse_inactive_days, stale, stamp_date
-from repo_mirror.config_json import unique_pairs
+from repo_mirror.config_json import LEGACY_CONFIG_ERROR, reject_legacy_config, unique_pairs
 from repo_mirror.forgejo_local import forgejo_source_identity
 from repo_mirror.forgejo_source_adapter import PublicForgejoSourceAdapter
 from repo_mirror.github_api import AppTokenProvider
@@ -56,6 +56,7 @@ GIT_REASONS = frozenset({
     'Forgejo repository identity or initialization state changed',
 })
 CONFIG_REASONS = frozenset({
+    LEGACY_CONFIG_ERROR,
     'invalid source URL', 'config must be a JSON array of source URLs',
     'duplicate configured source', 'duplicate requested source', 'conflicting destination',
     'requested source not exactly configured',
@@ -135,6 +136,7 @@ def normalize_named(sources):
     from repo_mirror.constants import NAME
     from repo_mirror.gitlab_onboarding_forgejo import PREFIX_WITH_GENERATED_MESSAGE, group_origin_key, translate_groups
     from repo_mirror.host_limits import CONFIG_KEY
+    reject_legacy_config(sources)
     if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY, 'auto_discoveries', 'groups'} != {'destinations', 'repositories'}:
         raise ValueError('invalid named manifest')
     normalized_rules = _normalize_auto_discoveries(sources['auto_discoveries']) if 'auto_discoveries' in sources else []
@@ -600,7 +602,7 @@ def source_pipeline(url, token, *, source_type=None, source_id=None, gitlab_toke
         if type(source_id) is not int or source_id <= 0:
             raise ValueError('source repository ID mismatch')
         from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
-        source = {'type': 'gitlab', 'base_url': base, 'owner': owner, 'repos': [name]}
+        source = {'type': 'gitlab', 'base_url': base, 'owner': owner, 'name': name}
         extra = {'token': gitlab_token} if gitlab_token else {}
         return source, None, GitLabSourceAdapter(base, owner + '/' + name, source_id, **extra), name
     base, owner, name = url.rsplit('/', 2)
@@ -609,7 +611,7 @@ def source_pipeline(url, token, *, source_type=None, source_id=None, gitlab_toke
         source_api = SourceAPI(token)
         source_api.restrict_origin('https://api.github.com')
         return source, token, ForgejoSourceAdapter(f'{owner}/{name}', token, api=source_api), name
-    source = {'type': 'forgejo', 'base_url': base, 'owner': owner, 'repos': [name]}
+    source = {'type': 'forgejo', 'base_url': base, 'owner': owner, 'name': name}
     return source, None, PublicForgejoSourceAdapter(url, api=SourceAPI(None)), name
 
 

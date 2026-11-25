@@ -17,8 +17,8 @@ class NamedGitHubConfigTest(unittest.TestCase):
 
     def test_normalizes_named_repository_and_preserves_pins(self):
         config = normalize_config(self.config)
-        self.assertEqual(config["destination_account_type"], "personal")
-        self.assertEqual(config["sources"], [{"type": "github", "base_url": "https://github.com", "owner": "Owner", "repos": ["Repo"], "destinations": {"repo": {"name": "copy", "source_id": 12, "destination_id": 34, "visibility": "public"}}}])
+        self.assertEqual(config["account_type"], "personal")
+        self.assertEqual(config["repositories"], [{"type": "github", "base_url": "https://github.com", "owner": "Owner", "name": "Repo", "mirror": {"name": "copy", "source_id": 12, "destination_id": 34, "visibility": "public"}}])
 
     def test_rejects_non_string_source_url(self):
         self.config['repositories'][0]['source']['url'] = None
@@ -69,7 +69,7 @@ class NamedGitHubConfigTest(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             source, name = run.call_args.args[:2]
             self.assertEqual(name, 'Repo')
-            self.assertEqual(source['destinations']['repo'], {
+            self.assertEqual(source['mirror'], {
                 'name': 'new-target', 'source_id': 12, 'destination_id': 34, 'visibility': 'private'})
             f.seek(0)
             self.assertEqual(json.load(f), self.config)
@@ -113,35 +113,13 @@ class NamedGitHubConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config.json'
             path.write_text(json.dumps(self.config))
-            from unittest.mock import patch
             original = path.read_bytes()
-            with patch('repo_mirror.sources.discover') as discover:
-                with self.assertRaisesRegex(ValueError, 'pinned destination'):
-                    adhoc.main(['--config', str(path), '--urls', 'https://github.com/owner/repo',
-                                '--destination', 'new-target', '--visibility', 'private'])
-                discover.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'pinned destination'):
+                adhoc.main(['--config', str(path), '--urls', 'https://github.com/owner/repo',
+                            '--destination', 'new-target', '--visibility', 'private'])
             self.assertEqual(path.read_bytes(), original)
             adhoc.main(['--config', str(path), '--urls', 'https://github.com/owner/repo', '--remove'])
             self.assertEqual(json.loads(path.read_text())['repositories'], [first])
-
-    def test_legacy_writer_rejects_pinned_rename_before_write(self):
-        import json
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import patch
-        from repo_mirror import adhoc
-
-        config = normalize_config(self.config)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'config.json'
-            path.write_text(json.dumps(config))
-            original = path.read_bytes()
-            with patch('repo_mirror.sources.discover') as discover:
-                with self.assertRaisesRegex(ValueError, 'pinned destination'):
-                    adhoc.main(['--config', str(path), '--urls', 'https://github.com/owner/repo',
-                                '--destination', 'new-target', '--visibility', 'private'])
-                discover.assert_not_called()
-            self.assertEqual(path.read_bytes(), original)
 
     def test_writer_same_name_and_unpinned_rename_preserve_visibility(self):
         import json
@@ -149,29 +127,26 @@ class NamedGitHubConfigTest(unittest.TestCase):
         from pathlib import Path
         from repo_mirror import adhoc
 
-        for named in (True, False):
-            for pinned in (True, False):
-                with self.subTest(named=named, pinned=pinned), tempfile.TemporaryDirectory() as directory:
-                    config = copy.deepcopy(self.config)
-                    if not pinned:
-                        del config['repositories'][0]['mirrors']['main']['id']
-                    if not named:
-                        config = normalize_config(config)
-                    path = Path(directory) / 'config.json'
-                    path.write_text(json.dumps(config))
-                    target = 'copy' if pinned else 'new-target'
-                    adhoc.main(['--config', str(path), '--urls', 'https://github.com/owner/repo',
-                                '--destination', target])
-                    saved = normalize_config(json.loads(path.read_text()))
-                    settings = saved['sources'][0]['destinations']['repo']
-                    self.assertEqual(settings['name'], target)
-                    self.assertEqual(settings['visibility'], 'public')
-                    if pinned:
-                        self.assertEqual(settings['destination_id'], 34)
+        for pinned in (True, False):
+            with self.subTest(pinned=pinned), tempfile.TemporaryDirectory() as directory:
+                config = copy.deepcopy(self.config)
+                if not pinned:
+                    del config['repositories'][0]['mirrors']['main']['id']
+                path = Path(directory) / 'config.json'
+                path.write_text(json.dumps(config))
+                target = 'copy' if pinned else 'new-target'
+                adhoc.main(['--config', str(path), '--urls', 'https://github.com/owner/repo',
+                            '--destination', target])
+                saved = normalize_config(json.loads(path.read_text()))
+                settings = saved['repositories'][0]['mirror']
+                self.assertEqual(settings['name'], target)
+                self.assertEqual(settings['visibility'], 'public')
+                if pinned:
+                    self.assertEqual(settings['destination_id'], 34)
 
     def test_manual_add_and_remove_keep_named_format(self):
         self.assertTrue(add_to_config(self.config, 'https://github.com/Other/New', 'custom', 'private'))
         self.assertEqual(self.config['repositories'][-1]['mirrors']['main'], {'name': 'custom', 'visibility': 'private'})
         self.assertTrue(remove_from_config(self.config, 'https://github.com/Other/New'))
         self.assertEqual(len(self.config['repositories']), 1)
-        self.assertEqual(normalize_config(self.config)['sources'][0]['destinations']['repo']['destination_id'], 34)
+        self.assertEqual(normalize_config(self.config)['repositories'][0]['mirror']['destination_id'], 34)

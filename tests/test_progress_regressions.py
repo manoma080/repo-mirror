@@ -31,7 +31,10 @@ class ProgressRegressionTests(unittest.TestCase):
         self.assertNotIn("secret", mirror.error_detail(err))
 
     def test_source_and_repo_ordinals_appear_in_progress(self):
-        config = {"destination_account_type": "personal", "sources": [dict(SOURCE, repos=["demo"])]}
+        config = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
+        }
         out = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:
             json.dump(config, f)
@@ -109,7 +112,10 @@ class ProgressRegressionTests(unittest.TestCase):
         self.assertFalse(journal.failures)
 
     def test_preflight_failure_identifies_repository_ordinal(self):
-        config = {"destination_account_type": "personal", "sources": [dict(SOURCE, repos=["demo"])]}
+        config = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
+        }
         out = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:
             json.dump(config, f)
@@ -128,33 +134,3 @@ class ProgressRegressionTests(unittest.TestCase):
                 mirror.main(["--config", f.name])
         self.assertIn("repository 1", out.getvalue())
         self.assertIn("destination collision: repository has no matching source marker", out.getvalue())
-
-    def test_discovery_failure_is_flushed(self):
-        class Output(io.StringIO):
-            def __init__(self):
-                super().__init__()
-                self.flush_values = []
-
-            def flush(self):
-                self.flush_values.append(self.getvalue())
-                super().flush()
-
-        config = {"destination_account_type": "personal", "sources": [dict(SOURCE, repos="all")]}
-        out = Output()
-        with tempfile.NamedTemporaryFile(mode="w") as f:
-            json.dump(config, f)
-            f.flush()
-            with (
-                patch.dict(os.environ, {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest"}),
-                patch_everywhere("discover", side_effect=RuntimeError("secret")),
-                redirect_stderr(out),
-                self.assertRaises(RuntimeError),
-            ):
-                mirror.main(["--config", f.name])
-        self.assertTrue(
-            any(
-                value.endswith("source discovery failed for source 1: RuntimeError\n")
-                for value in out.flush_values
-            )
-        )
-        self.assertNotIn("secret", out.getvalue())

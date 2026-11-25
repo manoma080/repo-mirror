@@ -50,7 +50,7 @@ class AutoPinForgejoRedirectTests(unittest.TestCase):
                 servers[1].redirect = None
                 servers[1].clone = base + '/alice/project.git'
                 servers[0].clone = servers[1].clone
-                cfg = {'destination_account_type': 'personal', 'sources': []}
+                cfg = {'destinations': {'main': {'account_type': 'personal'}}, 'repositories': []}
                 original = copy.deepcopy(cfg)
                 class Destination:
                     def request(self, *args):
@@ -59,10 +59,10 @@ class AutoPinForgejoRedirectTests(unittest.TestCase):
                 # local fixture URL so the production redirect transport is exercised.
                 url = base + '/alice/project'
                 original_parse = adhoc.parse_repo_url
-                def parse(value):
+                def parse(value, **kwargs):
                     if value == url:
                         return ('forgejo', base, 'alice', 'project')
-                    return original_parse(value)
+                    return original_parse(value, **kwargs)
                 trust = ssl.create_default_context(cafile=str(cert))
                 with patch.object(adhoc, 'parse_repo_url', side_effect=parse), patch('ssl._create_default_https_context', return_value=trust):
                     with self.assertRaisesRegex(ValueError, 'redirect outside configured origin'):
@@ -88,7 +88,7 @@ class AutoPinForgejoRedirectTests(unittest.TestCase):
                 Handler.hits.clear()
                 with patch.object(adhoc, 'parse_repo_url', side_effect=parse), patch('ssl._create_default_https_context', return_value=trust), patch('repo_mirror.repository.validate_source_clone_url'):
                     self.assertTrue(adhoc.add_to_config_pinned(cfg, url, API(), API(), WorkingDestination(), owner='bot', account_type='personal'))
-                self.assertEqual(cfg['sources'][0]['destinations']['project']['source_id'], 999)
+                self.assertEqual(cfg['repositories'][0]['source']['id'], 999)
                 self.assertTrue(any(path == '/ok' for _, path, _ in Handler.hits))
                 self.assertTrue(all(port == servers[0].server_port and auth is None for port, _, auth in Handler.hits))
             finally:

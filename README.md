@@ -62,7 +62,7 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 - **destination_name** optionally replaces `mirror-<owner>-<repo>` for exactly one URL. Names must be valid GitHub repository names and must not collide with another destination. A pre-existing repository is used only if its source marker matches; visibility is never changed implicitly. Manual config updates reject changing a pinned destination name; use the explicit reconciliation procedure instead.
 - **visibility** defaults to unchanged, preserving saved settings; new destinations default to private. Select private or public to explicitly override a saved setting; public exposes mirrored contents. It applies only on creation, not to existing destinations. With add selected, settings are persisted per source repository for scheduled runs; otherwise they apply only to this run.
 - **ignore_releases** skips release synchronization for the named URLs: branches and tags are still mirrored, and any releases already in the destination are left untouched, as are pending recovery markers and journal entries, so turning it back off resumes them. `keep` (the default) leaves each repository's saved setting in charge; `true` and `false` either persist that value per repository with add selected, or apply to this run only without add. Releases are not deleted by this option. Release activity is no longer observed, so a repository whose only recent activity is upstream releases can be reported as inactive by the GitHub runner, which marks that repository's warning line with `releases ignored`; the Forgejo runner's inactive record has fixed fields and gives no such hint.
-- **remove_from_config** requires one or more URLs, commits only the config removal and skips the entire mirror job, including journal writes. It does not delete repositories. It cannot be combined with add, custom name or public visibility. Individual URLs covered by a `repos: "all"` source cannot be removed this way; edit the configuration explicitly instead.
+- **remove_from_config** requires one or more URLs, commits only the config removal and skips the entire mirror job, including journal writes. It does not delete repositories. It cannot be combined with add, custom name or public visibility. Removing an owner/group URL removes its `auto_discoveries` rule while keeping existing `repositories[]` entries untouched; removing a discovered child repository deletes its entry and appends its name to the owning rule's `exclude` list.
 
 ## Configure sources
 
@@ -86,13 +86,13 @@ A top-level `host_concurrency_limits` map caps how many repositories are mirrore
 
 Hosts are lower-case names, optionally with a non-default port; limits count repositories in flight per source host, not per provider, and never exceed the runner's worker pool. Capping a host trades throughput there for predictable request rates — a host that answers HTTP 429 when several repositories are fetched at once mirrors its repositories in several waves instead of failing.
 
-Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to Mirrorbot. The workflow uses those app secrets, while the Forgejo scheduler's separate Manobot helper authenticates GitHub source access. Legacy named profiles with `account_type` (`personal` or `organization`) remain supported with their previous behavior. Source URLs may point to GitHub, a public Forgejo instance or a public GitLab instance. GitLab repositories specifically require both source and destination ID pins before syncing; see [GitLab sources](#gitlab-sources). Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. A mirror entry may also set `"ignore_releases": true` to skip release synchronization for that repository only; the key is optional and defaults to `false`, and anything other than a JSON boolean is rejected. For other sources, IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
+Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to Mirrorbot. The workflow uses those app secrets, while the Forgejo scheduler's separate Manobot helper authenticates GitHub source access. Named profiles with `account_type` (`personal` or `organization`) are also supported. Source URLs may point to GitHub, a public Forgejo instance or a public GitLab instance. GitLab repositories specifically require both source and destination ID pins before syncing; see [GitLab sources](#gitlab-sources). Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. A mirror entry may also set `"ignore_releases": true` to skip release synchronization for that repository only; the key is optional and defaults to `false`, and anything other than a JSON boolean is rejected. For other sources, IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
 
-Legacy `destination_account_type` and `sources` configurations remain supported, including `repos: "all"` (owned public repositories, not stars), custom `prefix`, and per-repository `destinations` mappings using `source_id` and `destination_id`. Do not mix the formats.
+This named shape (`destinations`, `repositories`, optional `host_concurrency_limits`, and optional `auto_discoveries`) is the only supported configuration format; legacy `sources` and `destination_account_type` configurations are no longer supported. The deployed GitHub (`config.json`) and Forgejo (`config-forgejo.json`) manifests are already in the named format. See [docs/auto-discoveries.md](docs/auto-discoveries.md) as the reference for discovery rules (and the deprecated Forgejo-only `groups` compatibility window).
 
 ### Auto-discoveries
 
-Named configurations accept an optional top-level `auto_discoveries` array of owner/group rules and an optional per-repository `discovered_by` back-pointer matching a declared rule's canonical `url`. On the GitHub runner, `auto_discoveries` executes an onboarding pass before workers start (requiring the authoritative management configuration store `MIRROR_MANAGEMENT_REPOSITORY` / `MIRROR_MANAGEMENT_TOKEN`): it verifies the upstream owner identity, pins the numeric owner `"id"` and newly discovered `discovered_by` entries in one byte-conditional write per rule with readback, and preserves explicit pinned mirrors on steady-state runs.
+Named configurations accept an optional top-level `auto_discoveries` array of owner/group rules and an optional per-repository `discovered_by` back-pointer matching a declared rule's canonical `url`. On both the GitHub runner and the Forgejo scheduler, `auto_discoveries` executes an onboarding pass before workers start (requiring an authoritative configuration store: `MIRROR_MANAGEMENT_REPOSITORY` / `MIRROR_MANAGEMENT_TOKEN` on GitHub, or `--config-repo` / `--forgejo-config-repo` on Forgejo): it verifies the upstream owner identity, pins the numeric owner `"id"` and newly discovered `discovered_by` entries in one byte-conditional write per rule with readback, and preserves explicit pinned mirrors on steady-state runs.
 
 Owner and group URLs also work in the manual workflow's `source_urls` input:
 - **Add (`add_to_config=true`):** Appends a rule to `auto_discoveries` using `visibility` and `ignore_releases` as rule defaults without pre-writing `repositories[]` entries (the mirror phase's onboarding pass inducts them). `destination_name` is rejected for discovery rules because destination names are derived per repository.
@@ -100,7 +100,7 @@ Owner and group URLs also work in the manual workflow's `source_urls` input:
 - **Remove (`remove_from_config=true`):** Removing a rule URL deletes the rule and drops `discovered_by` from its children, stopping discovery while keeping the existing pinned entries and remote mirrors untouched. Removing a child repository URL deletes that entry and appends its basename to the owning rule's `exclude` list without deleting the remote mirror.
 - **Rule relocation:** When a pinned owner or GitLab group renames upstream with the same numeric `id`, onboarding updates the rule's `url` and its children's `source.url` and `discovered_by` in place while keeping configured mirror names untouched; an `id` mismatch still fails closed.
 
-Support on the Forgejo runner and `groups` migration follow in a subsequent change. See [docs/auto-discoveries.md](docs/auto-discoveries.md) for the full design and field reference.
+See [docs/auto-discoveries.md](docs/auto-discoveries.md) for the full discovery design, schema, and field reference.
 
 ```json
 {
@@ -133,21 +133,22 @@ Replace all example names and IDs with independently verified real values. This 
 
 ### Direct group: GitHub runner
 
-Use the legacy `sources` format, not a named `repositories` configuration; do not mix formats. This discovers public projects owned directly by `team/sub`, excluding shared projects and subgroups. It is not a recursive group mirror. Newly discovered projects require the durable management configuration store (`MIRROR_MANAGEMENT_REPOSITORY` and `MIRROR_MANAGEMENT_TOKEN`; the workflow sets these), complete discovery and an authoritative checkout matching that store. The runner creates a destination, then conditionally publishes source/destination ID bindings and reads them back before mirroring. It refuses to adopt an existing unpinned destination. A group source is a continuing discovery rule, not an immutable pin of the group itself on this runner.
+Use an `auto_discoveries` rule in the named configuration (see [docs/auto-discoveries.md](docs/auto-discoveries.md)). This discovers public projects owned directly by `team/sub`, excluding shared projects and subgroups. It is not a recursive group mirror. Newly discovered projects require the durable management configuration store (`MIRROR_MANAGEMENT_REPOSITORY` and `MIRROR_MANAGEMENT_TOKEN`; the workflow sets these) and an authoritative checkout matching that store. The runner creates each destination, disables Actions, publishes pinned `repositories[]` entries with `discovered_by` in one conditional write, and reads the configuration back before mirroring. It refuses to adopt an existing unpinned destination.
 
 <!-- gitlab-example: github-group -->
 ```json
 {
-  "destination_account_type": "personal",
-  "sources": [
-    {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "team/sub", "repos": "all"}
+  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "mirror-owner", "auth": "mirrorbot"}},
+  "repositories": [],
+  "auto_discoveries": [
+    {"type": "gitlab", "url": "https://gitlab.com/team/sub", "id": 7}
   ]
 }
 ```
 
 ### Explicit project and direct group: Forgejo scheduler
 
-These are alternative `config-forgejo.json` manifests. The first pins an existing destination; the second starts with no projects and pins the positive GitLab group ID. Set `--asset-max-bytes` to a positive decimal number no greater than 2,147,483,647 on the scheduler/worker for GitLab, even when no release links are expected. Group onboarding additionally needs the authoritative management `--config-repo` and the normal scheduler credentials, journal and secret; see [scheduler setup](scheduler/README.md). The scheduler publishes concrete source and destination pins before starting workers. Its legacy `sources`/`repos: "all"` form is not supported for GitLab groups. The generated `gitlab-` plus 24 hexadecimal characters namespace is reserved for group bindings; removing a group does not authorize continued syncing of its generated entries.
+These are alternative `config-forgejo.json` manifests. The first pins an existing destination; the second starts with no projects and pins the positive GitLab group ID in `auto_discoveries` (the deprecated `groups` compatibility field is also documented in [docs/auto-discoveries.md](docs/auto-discoveries.md)). Set `--asset-max-bytes` to a positive decimal number no greater than 2,147,483,647 on the scheduler/worker for GitLab, even when no release links are expected. Group onboarding additionally needs an authoritative management repository (`--config-repo` or `--forgejo-config-repo`/`--forgejo-config-id`) and the normal scheduler credentials, journal and secret; see [scheduler setup](scheduler/README.md). The scheduler publishes concrete source and destination pins before starting workers.
 
 <!-- gitlab-example: forgejo-project -->
 ```json
@@ -165,8 +166,8 @@ These are alternative `config-forgejo.json` manifests. The first pins an existin
 {
   "destinations": {"local": {}},
   "repositories": [],
-  "groups": [
-    {"type": "gitlab", "base_url": "https://gitlab.com", "owner": "team/sub", "id": 7, "repos": "all"}
+  "auto_discoveries": [
+    {"type": "gitlab", "url": "https://gitlab.com/team/sub", "id": 7}
   ]
 }
 ```
@@ -228,7 +229,7 @@ Run `python -m repo_mirror.migration_attestation --claim claim.json --i-verified
 
 GitHub and Forgejo use their respective existing recovery signing secrets; do not assume their secrets or signatures are interchangeable. Each attestation secret must be at least 32 UTF-8 bytes and generated with a cryptographically secure random generator (for example, `python -c 'import secrets; print(secrets.token_hex(32))'`). Length alone does not guarantee entropy. If an existing secret is weak, rotate it with appropriate recovery-state planning; previous attestations must be re-signed. Keep both secrets stable and protected, and do not put secret values in claims, manifests, commands or logs. The signer does not inspect providers or verify evidence: the flag records an operator decision, not proof of history. For manual claims, any change to a claim field or signing secret requires a new reviewed signature; protect the claim file. The Forgejo worker may also sign an in-memory candidate automatically under the prior-pinned trust policy below; it does not publish that candidate. Signature verification does not replace live ID checks or protect against a compromised signing key. On the Forgejo path, any invalid or missing structured-entry signature fails the **entire manifest** before any workers start, including ordinary URL entries; correct and review the manifest before retrying.
 
-The old and current source must be on the same forge origin. The approved automatic trust policy treats the previously configured source and destination ID pins and their original binding as trusted; consistent metadata from the configured forge may identify a new source name, and an existing signed legacy binding must verify. Forgejo can construct and sign an in-memory candidate using the runner's recovery secret, preserving the original recovery identity; signing authorizes that binding under this policy and is not independent proof of history. Unpinned sources, changed IDs, inaccessible URLs, inconsistent metadata, or invalid signatures fail closed. Legacy mappings with `repos: "all"` are rejected: configure that repository explicitly.
+The old and current source must be on the same forge origin. The approved automatic trust policy treats the previously configured source and destination ID pins and their original binding as trusted; consistent metadata from the configured forge may identify a new source name, and an existing signed legacy binding must verify. Forgejo can construct and sign an in-memory candidate using the runner's recovery secret, preserving the original recovery identity; signing authorizes that binding under this policy and is not independent proof of history. Unpinned sources, changed IDs, inaccessible URLs, inconsistent metadata, or invalid signatures fail closed.
 
 A detected move alone is **not** a completed migration. The worker first syncs Git refs, releases and settings into the existing pinned destination, then reports the relocation; the rename and configuration publication happen afterwards as a separate transaction (see below). Without a durable management store the batch reports the relocation and renames nothing. Either way a failure can leave a partial sync: inspect and reconcile before retrying. Rename and config publication are not atomic with anything else, so drain cooperating writers, preserve signing keys and journals, and read back every step. Forgejo's installed launcher must support the structured manifest before it is used. Real provider migration and recovery must be validated separately from unit tests.
 
@@ -364,7 +365,7 @@ Missing or bad digests are never treated as proof of a match. Equal sizes alone 
 | Situation | What happens |
 | --- | --- |
 | One repository fails | The other repositories still run. The workflow then reports failure. A failed release does not stop the next release in the same repository. |
-| Source lookup fails | Known repositories with names that could clash with the failed source are skipped. Other names are tried. The run then fails. An empty prefix blocks all names. Fix the lookup or use different prefixes. |
+| Auto-discovery fails | Onboarding fails closed before workers start and leaves existing pins and destinations untouched. Inspect the rule configuration and upstream availability before retrying. |
 | Bad config or duplicate mirror names | The run stops before copying anything. |
 | Empty source repository | Nothing is pushed or deleted. |
 | Branch protection blocks changes | The mirror may be partly updated. Check the failed run. |
@@ -442,7 +443,7 @@ An **empty destination** whose fetched pack exceeds 1.5 GiB is instead populated
 | `repo_mirror/cli.py` | Command-line options and the main flow. |
 | `repo_mirror/repository.py` | Copies one repository: branches, tags, releases and files. |
 | `repo_mirror/github_api.py` | HTTP calls, app login and token renewal. |
-| `repo_mirror/sources.py` | Source discovery and mirror naming. |
+| `repo_mirror/sources.py` | Source validation, identity verification, and mirror naming. |
 | `repo_mirror/git_sync.py` | Git fetch and push. |
 | `repo_mirror/journal.py` | The failure file (`failures.json`, stored in `repo-mirror-config`). |
 | `repo_mirror/logging_utils.py` | Log lines, timers and redaction. |

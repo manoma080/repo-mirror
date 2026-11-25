@@ -23,7 +23,10 @@ class ObservabilityTests(unittest.TestCase):
         output = io.StringIO()
         dst = Destination()
         dst.fail = False
-        config = {"destination_account_type": "organization", "sources": [{**SOURCE, "repos": ["demo"]}]}
+        config = {
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
+        }
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as f:
             json.dump(config, f)
             f.flush()
@@ -40,13 +43,12 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(
             headings,
             [
-                "===== Source discovery 1/1: alice =====",
                 "===== Repository 1/1: alice/demo =====",
                 "===== Release 1/1: v1 =====",
                 "===== Summary =====",
             ],
         )
-        self.assertRegex(text, r"[^\n]\n\n\n===== Repository 1/1: alice/demo =====")
+        self.assertRegex(text, r"===== Repository 1/1: alice/demo =====")
         self.assertRegex(text, r"[^\n]\n\n\n===== Release 1/1: v1 =====")
         self.assertIn("elapsed=", text)
         self.assertNotIn("secret-token", text)

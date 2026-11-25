@@ -8,9 +8,9 @@ from repo_mirror.sources import source_marker
 
 class MigrationEvidenceRequiredTests(unittest.TestCase):
     def test_matching_current_ids_do_not_authenticate_legacy_alias(self):
-        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'repos': ['repo'],
-                  'destinations': {'repo': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
-                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}}
+        source = {'type': 'github', 'base_url': 'https://github.com', 'owner': 'new', 'name': 'repo',
+                  'mirror': {'name': 'mirror-new', 'source_id': 1, 'destination_id': 2,
+                      'legacy': {'source_owner': 'old', 'source_name': 'repo', 'destination_name': 'mirror-old'}}}
         src, dst = Mock(), Mock()
         src.request.return_value = {'id': 1, 'clone_url': 'https://github.com/new/repo.git'}
         dst.request.return_value = {'id': 2, 'description': source_marker({**source, 'owner': 'old'}, 'repo')}

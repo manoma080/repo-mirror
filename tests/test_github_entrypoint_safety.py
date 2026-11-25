@@ -272,87 +272,14 @@ class EntrypointSafetyTests(unittest.TestCase):
             self.assertNotEqual(prepare().returncode, 0)
             self.assertFalse((root / 'failure-journal-recovery').exists())
 
-    def test_group_cli_real_preparation_and_contents_api_cas(self):
-        import base64
-        from urllib.error import HTTPError
-        from repo_mirror.github_migration import GitHubConfigFile
-        from repo_mirror.migrations import blob_sha
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group', 'repos': 'all'}
-        initial = json.dumps({'destination_account_type': 'personal', 'sources': [source]}).encode()
-        class Contents:
-            data = initial
-            puts = 0
-            def request(self, method, url, payload=None):
-                if method == 'PUT':
-                    assert payload['sha'] == blob_sha(self.data)
-                    self.data = base64.b64decode(payload['content'])
-                    self.puts += 1
-                    return {}
-                return {'type': 'file', 'encoding': 'base64', 'sha': blob_sha(self.data),
-                        'content': base64.b64encode(self.data).decode()}
-        class Source:
-            def restrict_origin(self, origin): pass
-            def request(self, method, url, *args):
-                return {'id': 42, 'visibility': 'public', 'path_with_namespace': 'group/project',
-                        'http_url_to_repo': 'https://gitlab.com/group/project.git'}
-        class Destination:
-            repo = None
-            def request(self, method, url, payload=None, **kwargs):
-                if url.endswith('/actions/permissions'):
-                    return {'enabled': False} if method == 'GET' else None
-                if url.endswith('/user'): return {'login': 'dest'}
-                if method == 'GET':
-                    if self.repo is None: raise HTTPError(url, 404, 'missing', {}, None)
-                    return self.repo.copy()
-                assert method == 'POST'
-                self.repo = {'id': 9, 'full_name': 'dest/' + payload['name'], 'description': payload['description']}
-                return self.repo.copy()
-        management, dst = Contents(), Destination()
-        store = GitHubConfigFile(management, 'owner', 'management')
-        mirrored = []
-        def mirror(source, name, *args):
-            binding = json.loads(management.data)['sources'][0]['destinations']['project']
-            mirrored.append(binding.copy())
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'config.json'
-            path.write_bytes(initial)
-            with patch.dict('os.environ', {'GH_TOKEN': 'x', 'DESTINATION_OWNER': 'dest',
-                    'MIRROR_TIMESTAMP_SECRET': 'secret'}, clear=True), \
-                 patch('repo_mirror.gitlab_onboarding_github.store_from_environment', return_value=store), \
-                 patch('repo_mirror.sources.discover_gitlab_projects', return_value={'project': 42}), \
-                 patch('repo_mirror.cli.SourceAPI', side_effect=lambda token: Source()), \
-                 patch('repo_mirror.cli.API', side_effect=lambda token=None: dst), \
-                 patch('repo_mirror.cli.mirror_repository', side_effect=mirror):
-                cli.main(['--config', str(path)])
-        self.assertEqual(management.puts, 1)
-        self.assertEqual(mirrored, [{'source_id': 42, 'destination_id': 9}])
-
-    def test_group_runtime_custom_settings_rejected_before_destination_calls(self):
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group', 'repos': 'all'}
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'config.json'
-            initial = json.dumps({'destination_account_type': 'personal', 'sources': [source]}).encode()
-            path.write_bytes(initial)
-            from test_gitlab_group_github import Store
-            store = Store(initial)
-            with patch.dict('os.environ', {'GH_TOKEN': 'x', 'DESTINATION_OWNER': 'dest',
-                    'MIRROR_TIMESTAMP_SECRET': 'secret', 'MIRROR_SOURCE_URLS': 'https://gitlab.com/group/project',
-                    'MIRROR_DESTINATION_NAME': 'custom', 'MIRROR_VISIBILITY': 'public'}, clear=True), \
-                 patch('repo_mirror.gitlab_onboarding_github.store_from_environment', return_value=store), \
-                 patch('repo_mirror.sources.discover_gitlab_projects', return_value={'project': 42}), \
-                 patch('repo_mirror.cli.get_existing') as existing, \
-                 patch('repo_mirror.cli.mirror_repository') as mirror:
-                with self.assertRaises(ValueError):
-                    cli.main(['--config', str(path)])
-                existing.assert_not_called()
-                mirror.assert_not_called()
-
     def test_explicit_source_only_pin_never_reaches_mirror(self):
-        source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group',
-                  'repos': ['project'], 'destinations': {'project': {'source_id': 42}}}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config.json'
-            path.write_text(json.dumps({'destination_account_type': 'personal', 'sources': [source]}))
+            path.write_text(json.dumps({
+                'destinations': {'main': {'account_type': 'personal'}},
+                'repositories': [{'source': {'type': 'gitlab', 'url': 'https://gitlab.com/group/project', 'id': 42},
+                                  'mirrors': {'main': {}}}],
+            }))
             with patch.dict('os.environ', {'GH_TOKEN': 'x', 'DESTINATION_OWNER': 'dest',
                                            'MIRROR_TIMESTAMP_SECRET': 'secret'}, clear=True), \
                  patch('repo_mirror.cli.get_existing', return_value=None), \

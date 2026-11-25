@@ -11,7 +11,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote
 
-from repo_mirror.adhoc import add_to_config, add_to_config_pinned, classify_source_url, one_time_sources, parse_selected_url, _matches_owner
+from repo_mirror.adhoc import classify_source_url, one_time_sources, _matches_owner
 from repo_mirror.config_named import normalize_config
 from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
 from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
@@ -23,7 +23,6 @@ from repo_mirror.source_filter import filter_plan
 from repo_mirror.sources import (
     check_existing,
     destination_name,
-    discover,
     get_existing,
     source_marker,
     validate_source,
@@ -79,7 +78,6 @@ def main(argv=None):
         from repo_mirror.config_json import unique_pairs
         config_bytes = f.read()
         config = json.loads(config_bytes, object_pairs_hook=unique_pairs)
-    named_config = isinstance(config, dict) and ('destinations' in config or 'repositories' in config)
     config = normalize_config(config)
     if 'destination_profile' in config:
         from repo_mirror.destination_profile import validate_runtime
@@ -87,16 +85,14 @@ def main(argv=None):
         if not app_id or not private_key:
             raise ValueError('mirrorbot app credentials required')
     environment_type = os.environ.get("DESTINATION_ACCOUNT_TYPE") or None
-    if named_config and environment_type is not None and environment_type != config['destination_account_type']:
+    if environment_type is not None and environment_type != config['account_type']:
         raise ValueError("destination account type mismatch")
-    account_type = environment_type or config.get("destination_account_type")
+    account_type = environment_type or config['account_type']
     if account_type not in ("personal", "organization"):
-        raise ValueError("destination_account_type must be personal or organization")
+        raise ValueError("account_type must be personal or organization")
     if app_id or private_key:
         token = AppTokenProvider(app_id or "", private_key, owner, account_type)
-    sources = config.get("sources")
-    if not isinstance(sources, list):
-        raise ValueError("sources must be a list")
+    entries = config["repositories"]
     host_limits = HostLimits.from_config(config.get(CONFIG_KEY), default=max_workers)
     selected_urls = os.environ.get("MIRROR_SOURCE_URLS")
     custom = os.environ.get("MIRROR_DESTINATION_NAME", "")
@@ -142,8 +138,7 @@ def main(argv=None):
     onboarding_result = None
     if config.get('auto_discoveries'):
         from repo_mirror.auto_discoveries_onboarding import onboard_auto_discoveries
-        from repo_mirror.github_migration import transaction_from_environment
-        from repo_mirror.gitlab_onboarding_github import store_from_environment
+        from repo_mirror.github_migration import store_from_environment, transaction_from_environment
 
         pre_transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
         if pre_transaction is not None:
@@ -163,7 +158,7 @@ def main(argv=None):
         )
         config_bytes = onboarding_result.config_bytes
         config = normalize_config(json.loads(config_bytes, object_pairs_hook=unique_pairs))
-        sources = config.get("sources")
+        entries = config["repositories"]
         if selected_urls and selected_urls.strip() and onboarding_result.relocated_rules:
             relocated_map = {old.lower(): new for old, new in onboarding_result.relocated_rules}
             selected_urls = ','.join(
@@ -171,105 +166,82 @@ def main(argv=None):
                 for part in selected_urls.split(',')
             )
 
+    if visibility not in ("unchanged", "private", "public"):
+        raise ValueError("invalid visibility")
+
     # Only URLs absent from the original configuration are one-time additions.
     # Explicit configured GitLab repositories still require historical pins.
     gitlab_probe = None
-    ephemeral_urls = set()
     selected_rule_urls = set()
     selected_repo_identities = set()
     if selected_urls and selected_urls.strip():
         gitlab_probe = source_client({'type': 'gitlab', 'base_url': 'https://gitlab.com'})
-        lookup_cfg = json.loads(config_bytes, object_pairs_hook=unique_pairs) if named_config else config
+        lookup_cfg = json.loads(config_bytes, object_pairs_hook=unique_pairs)
         classified_selected = [
             classify_source_url(part.strip(), lookup_cfg, gitlab_api=gitlab_probe)
             for part in selected_urls.split(',')
         ]
         if custom and any(item.kind == 'rule' for item in classified_selected):
             raise ValueError('destination name is derived per repository for a discovery rule')
-        repo_tokens = []
+        repo_items = [item for item in classified_selected if item.kind == 'repository']
+        if custom and (len(repo_items) != 1 or len(custom) > 100 or not NAME.fullmatch(custom) or custom in ('.', '..')):
+            raise ValueError('custom destination requires one URL and a valid repository name')
+        repo_identities = [(item.source_type, item.base_url.lower(), item.owner.lower(), item.name.lower()) for item in repo_items]
+        if len(set(repo_identities)) != len(repo_identities):
+            raise ValueError('duplicate source repository')
         for item in classified_selected:
             if item.kind == 'rule':
                 if not item.existing:
                     raise ValueError('one-time mirroring is not supported for owner URLs; enable add_to_config')
                 selected_rule_urls.add(item.url.lower())
                 continue
-            repo_tokens.append(item.url)
             selected_repo_identities.add((item.base_url.lower().rstrip('/'), item.owner.lower(), item.name.lower()))
-            if item.source_type == 'gitlab' and not any(
-                _matches_owner(s, item.source_type, item.base_url, item.owner) and
-                (s.get('repos') == 'all' or item.name.lower() in {n.lower() for n in s.get('repos', [])})
-                for s in sources
-            ):
-                ephemeral_urls.add((item.base_url.lower(), item.owner.lower(), item.name.lower()))
-        if repo_tokens:
-            add_to_config(config, ','.join(repo_tokens), custom, None if visibility == "unchanged" else visibility, protect_pins=False)
-    for source in sources:
-        validate_source(source)
+            matched_entry = next(
+                (e for e in entries if _matches_owner(e, item.source_type, item.base_url, item.owner) and e['name'].lower() == item.name.lower()),
+                None,
+            )
+            if matched_entry is not None:
+                if custom or visibility != "unchanged":
+                    mirror = matched_entry.setdefault('mirror', {})
+                    if custom:
+                        mirror['name'] = custom
+                    if visibility != "unchanged":
+                        mirror['visibility'] = visibility
+            elif item.source_type == 'gitlab':
+                raise ValueError('durable GitLab onboarding unavailable for one-time sources')
 
     seen = set()
     plan = []
-    discovery_failures = 0
-    uncertain_prefixes = []
-    uncertain_names = set()
-    discovered_gitlab_ids = {}
-    for index, source in enumerate(sources, 1):
-        src = source_client(source)
-        print(
-            f"\n===== Source discovery {index}/{len(sources)}: {safe_label(source.get('owner'))} =====",
-            file=sys.stderr,
-            flush=True,
-        )
-        print(f"source {index}/{len(sources)} discovery started", file=sys.stderr, flush=True)
-        try:
-            with timed(f"step source-discovery source={index}"):
-                if source['type'] == 'gitlab' and source['repos'] == 'all':
-                    from repo_mirror.sources import discover_gitlab_projects
-                    projects = discover_gitlab_projects(source, src)
-                    names = list(projects)
-                    discovered_gitlab_ids[index] = projects
-                else:
-                    names = discover(source, src)
-        except Exception as exc:
-            discovery_failures += 1
-            if source["repos"] == "all":
-                uncertain_prefixes.append(source.get("prefix", "mirror-" + source["owner"] + "-").lower())
-                uncertain_names.update(destination_name(source, name).lower() for name in source.get("destinations", {}))
-            else:
-                uncertain_names.update(destination_name(source, name).lower() for name in source["repos"])
-            print(
-                f"source discovery failed for source {index}: {error_detail(exc)}",
-                file=sys.stderr,
-                flush=True,
-            )
-            continue
-        print(
-            f"source {index}/{len(sources)} discovery completed discovered={len(names)}",
-            file=sys.stderr,
-            flush=True,
-        )
-        for name in names:
-            target = destination_name(source, name).lower()
-            if target in seen:
-                raise ValueError("duplicate destination repository")
-            seen.add(target)
-            plan.append((index, source, name))
-    if selected_urls and selected_urls.strip() and discovery_failures:
-        raise RuntimeError("filtered run requires successful discovery of every source")
-    # URLs not in config.json become one-time sources: mirrored now, never saved.
-    for source in one_time_sources(
-        selected_urls,
-        plan,
-        sources,
-        auto_discoveries=config.get('auto_discoveries', ()),
-        gitlab_api=gitlab_probe,
-    ):
-        sources.append(source)
-        name = source["repos"][0]
-        target = destination_name(source, name).lower()
+    for index, entry in enumerate(entries, 1):
+        validate_source(entry)
+        name = entry['name']
+        target = destination_name(entry, name).lower()
         if target in seen:
             raise ValueError("duplicate destination repository")
         seen.add(target)
-        plan.append((len(sources), source, name))
+        plan.append((index, entry, name))
+    # URLs not in config.json become one-time sources: mirrored now, never saved.
+    for entry in one_time_sources(
+        selected_urls,
+        plan,
+        entries,
+        auto_discoveries=config.get('auto_discoveries', ()),
+        gitlab_api=gitlab_probe,
+    ):
+        if custom or visibility != "unchanged":
+            mirror = entry.setdefault('mirror', {})
+            if custom:
+                mirror['name'] = custom
+            if visibility != "unchanged":
+                mirror['visibility'] = visibility
+        validate_source(entry)
+        entries.append(entry)
+        name = entry["name"]
+        target = destination_name(entry, name).lower()
+        if target in seen:
+            raise ValueError("duplicate destination repository")
+        seen.add(target)
+        plan.append((len(entries), entry, name))
     known_rules = {rule['url'] for rule in config.get('auto_discoveries', ())}
     plan = filter_plan(plan, selected_urls, case_insensitive=True, known_rules=known_rules)
     if ignore_override != "keep":
@@ -280,27 +252,7 @@ def main(argv=None):
             identity = (source['base_url'].lower().rstrip('/'), source['owner'].lower(), name.lower())
             discovered_by = str(source.get('discovered_by', '')).lower()
             if identity in selected_repo_identities or (discovered_by and discovered_by in selected_rule_urls):
-                source.setdefault('destinations', {}).setdefault(name.lower(), {})['ignore_releases'] = override
-    onboarding_store = None
-    for source_index, source, name in plan:
-        settings = source.get('destinations', {}).get(name.lower(), {})
-        identity = (source['base_url'].lower().rstrip('/'), source['owner'].lower(), name.lower())
-        if source['type'] == 'gitlab' and identity in ephemeral_urls and not {'source_id', 'destination_id'} <= settings.keys():
-            raise ValueError('durable GitLab onboarding unavailable for one-time sources')
-        if source['type'] == 'gitlab' and source['repos'] == 'all' and not {'source_id', 'destination_id'} <= settings.keys():
-            if named_config or discovery_failures or ('source_id' in settings or 'destination_id' in settings):
-                raise ValueError('GitLab group onboarding requires complete discovery and unbound configuration')
-            from repo_mirror.config_json import unique_pairs
-            authoritative_source = json.loads(config_bytes, object_pairs_hook=unique_pairs)['sources'][source_index - 1]
-            if source != authoritative_source:
-                raise ValueError('runtime source differs from authoritative configuration')
-            if onboarding_store is None:
-                from repo_mirror.gitlab_onboarding_github import store_from_environment
-                onboarding_store = store_from_environment(os.environ, args.config)
-                if onboarding_store is None:
-                    raise ValueError('durable GitLab onboarding unavailable: management configuration required')
-                if onboarding_store.read()[0] != config_bytes:
-                    raise ValueError('authoritative configuration differs from checkout')
+                source.setdefault('mirror', {})['ignore_releases'] = override
     # Include one-time sources before workers start; no concurrent cache writes.
     for _, source, _ in plan:
         source_client(source)
@@ -309,22 +261,12 @@ def main(argv=None):
     ready = []
     for repo_index, (source_index, source, name) in enumerate(plan, 1):
         dest = destination_name(source, name)
-        if dest.lower() in uncertain_names or any(
-            dest.lower().startswith(prefix) for prefix in uncertain_prefixes
-        ):
-            failures.append(
-                (
-                    repo_index,
-                    "possible collision with undiscovered source; retry discovery or use distinct prefixes",
-                )
-            )
-            continue
         target = f"{GITHUB}/repos/{quote(owner, safe='')}/{quote(dest, safe='')}"
         try:
             with timed(
                 f"step destination-preflight source_repo={safe_label(source.get('owner'))}/{safe_label(name)} target=destination"
             ):
-                settings = source.get("destinations", {}).get(name.lower(), {})
+                settings = source.get("mirror", {})
                 legacy = settings.get("legacy")
                 if legacy is not None:
                     from repo_mirror.migration_attestation import github_claim, verify
@@ -333,58 +275,10 @@ def main(argv=None):
                           if legacy is not None else source_marker(source, name))
                 existing = get_existing(dst, target)
                 check_existing(existing, marker)
-                if source['type'] == 'gitlab' and source['repos'] != 'all' and not {'source_id', 'destination_id'} <= settings.keys():
+                if source['type'] == 'gitlab' and not {'source_id', 'destination_id'} <= settings.keys():
                     raise ValueError('explicit GitLab source requires both durable identity pins')
                 if source['type'] == 'gitlab' and existing is not None and 'destination_id' not in settings:
                     raise ValueError('unpinned existing destination requires manual reconciliation')
-                identity = (source['base_url'].lower().rstrip('/'), source['owner'].lower(), name.lower())
-                onboard = source['type'] == 'gitlab' and (
-                    source['repos'] == 'all' or identity in ephemeral_urls
-                ) and not {'source_id', 'destination_id'} <= settings.keys()
-                if onboard:
-                    import copy
-                    from repo_mirror.repository import validate_source_clone_url
-                    from repo_mirror.sources import source_api_base
-                    ephemeral = copy.deepcopy(source)
-                    ephemeral['repos'] = [name]
-                    entry = ephemeral.setdefault('destinations', {}).setdefault(name.lower(), {})
-                    if source['repos'] == 'all':
-                        sid = discovered_gitlab_ids[source_index][name]
-                    else:
-                        upstream = source_api_base(source) + '/projects/' + quote(source['owner'] + '/' + name, safe='')
-                        project = source_client(source).request('GET', upstream)
-                        if (not isinstance(project, dict) or project.get('visibility') != 'public'
-                                or project.get('path_with_namespace') != source['owner'] + '/' + name
-                                or type(project.get('id')) is not int or project['id'] <= 0):
-                            raise ValueError('invalid GitLab project identity')
-                        validate_source_clone_url(source, name, {'clone_url': project.get('http_url_to_repo')})
-                        sid = project['id']
-                    if 'source_id' in entry and entry['source_id'] != sid:
-                        raise ValueError('source repository id mismatch')
-                    entry['source_id'] = sid
-                    scratch = {'destination_account_type': account_type, 'sources': [ephemeral]}
-                    url = source['base_url'].rstrip('/') + '/' + source['owner'] + '/' + name
-                    try:
-                        if onboarding_store is None:
-                            raise ValueError('authoritative configuration unavailable')
-                        if onboarding_store.read()[0] != config_bytes:
-                            raise ValueError('authoritative configuration changed before preparation')
-                        from repo_mirror.config_json import unique_pairs
-                        authoritative_source = json.loads(config_bytes, object_pairs_hook=unique_pairs)['sources'][source_index - 1]
-                        if source != authoritative_source:
-                            raise ValueError('runtime source differs from authoritative configuration')
-                        add_to_config_pinned(scratch, url, github_src, source_client(source), dst,
-                                             owner=owner, account_type=account_type)
-                        prepared = scratch['sources'][0]['destinations'][name.lower()]
-                        from repo_mirror.gitlab_onboarding_github import publish_binding
-                        config_bytes = publish_binding(onboarding_store, config_bytes, source_index - 1,
-                                                       name, sid, prepared['destination_id'])
-                    except Exception as exc:
-                        print('GitLab onboarding failed; any created destination requires manual reconciliation',
-                              file=sys.stderr, flush=True)
-                        raise RuntimeError('GitLab onboarding failed; any created destination requires manual reconciliation') from exc
-                    source.setdefault('destinations', {}).setdefault(name.lower(), {}).update(
-                        source_id=sid, destination_id=prepared['destination_id'])
             ready.append((repo_index, source_index, source, name))
         except Exception as exc:
             failures.append((repo_index, error_detail(exc)))
@@ -407,7 +301,7 @@ def main(argv=None):
                 flush=True,
             )
             print(
-                f"repository {repo_index}/{len(plan)} started (source {source_index}/{len(sources)})",
+                f"repository {repo_index}/{len(plan)} started (source {source_index}/{len(entries)})",
                 file=sys.stderr,
                 flush=True,
             )
@@ -509,18 +403,15 @@ def main(argv=None):
     migration_failures = []
     deferral = 'management migration store unavailable'
     transaction = None
-    if named_config:
-        try:
-            if pre_transaction is not None:
-                transaction = pre_transaction
-            else:
-                from repo_mirror.github_migration import transaction_from_environment
-                transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
-        except Exception as exc:
-            if relocations:
-                migration_failures.append(f"migration store unavailable: {error_detail(exc)}")
-    else:
-        deferral = 'configuration format does not support automatic migration'
+    try:
+        if pre_transaction is not None:
+            transaction = pre_transaction
+        elif relocations:
+            from repo_mirror.github_migration import transaction_from_environment
+            transaction = transaction_from_environment(os.environ, args.config, owner, destination_api=dst)
+    except Exception as exc:
+        if relocations:
+            migration_failures.append(f"migration store unavailable: {error_detail(exc)}")
     if transaction is None:
         for repo_index, _ in relocations:
             print(
@@ -551,7 +442,7 @@ def main(argv=None):
                 print(f"repository {repo_index} migration failed: {detail}", file=sys.stderr, flush=True)
     print("\n===== Summary =====", file=sys.stderr, flush=True)
     print(
-        f"summary sources={len(sources)} discovery_failed={discovery_failures} repositories={len(plan)} succeeded={succeeded} failed={len(failures)}",
+        f"summary sources={len(entries)} discovery_failed=0 repositories={len(plan)} succeeded={succeeded} failed={len(failures)}",
         file=sys.stderr,
         flush=True,
     )
@@ -564,9 +455,9 @@ def main(argv=None):
             flush=True,
         )
         for repo_index, source_index, source, name, days, stamp in inactive:
-            ignored = source.get('destinations', {}).get(name.lower(), {}).get('ignore_releases') is True
+            ignored = source.get('mirror', {}).get('ignore_releases') is True
             print(
-                f"inactive repository {repo_index} (source {source_index}/{len(sources)}, "
+                f"inactive repository {repo_index} (source {source_index}/{len(entries)}, "
                 f"{safe_label(source.get('owner'))}/{safe_label(name)}): "
                 f"last activity {stamp_date(stamp)} ({days} days)"
                 + (" (releases ignored; commit activity only)" if ignored else ""),
@@ -576,18 +467,18 @@ def main(argv=None):
     if onboarding_result is not None:
         from repo_mirror.auto_discoveries_onboarding import report_orphans
         report_orphans(onboarding_result)
-    if failures or discovery_failures or migration_failures:
+    if failures or migration_failures:
         for repo_index, kind in failures:
             source_index, source, name = plan[repo_index - 1]
             print(
-                f"mirror failed for repository {repo_index} (source {source_index}/{len(sources)}, {safe_label(source.get('owner'))}/{safe_label(name)}): {kind}",
+                f"mirror failed for repository {repo_index} (source {source_index}/{len(entries)}, {safe_label(source.get('owner'))}/{safe_label(name)}): {kind}",
                 file=sys.stderr,
                 flush=True,
             )
         for detail in migration_failures:
             print(f"migration failed: {detail}", file=sys.stderr, flush=True)
         raise RuntimeError(
-            f"{discovery_failures} sources and {len(failures)} repositories failed"
+            f"0 sources and {len(failures)} repositories failed"
             + (f" and {len(migration_failures)} migrations failed" if migration_failures else "")
         )
     return sorted(relocations, key=lambda item: item[0])
