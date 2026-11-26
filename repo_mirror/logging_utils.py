@@ -176,6 +176,8 @@ SAFE_ERROR_MESSAGES = frozenset(
         "GitHub App installation owner does not match configured destination",
         "source GitHub App owner is required",
         "GitHub App installation id is required",
+        "GitHub App helper path is required",
+        "GITHUB_TOKEN required; run under the GitHub App helper",
         "destination creation may be partial; reconcile manually",
         "auto-discovery onboarding publication failed; reconcile manually",
         "auto-discovery onboarding requires authoritative management configuration",

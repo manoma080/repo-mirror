@@ -26,7 +26,7 @@ class DispatchWiringTests(unittest.TestCase):
             token.touch(mode=0o600)
             args = ['run', '--manifest', str(manifest), '--journal-dir', directory, '--lock', str(p / 'lock'),
                     '--timestamp-secret-file', str(secret), '--token-file', str(token), '--owner', 'user',
-                    '--installation', '123456', '--config-repo', 'acme/private-config']
+                    '--installation', '123456', '--helper', str(p / 'helper.py'), '--config-repo', 'acme/private-config']
             data = json.dumps(dict(source_urls='https://github.com/acme/demo', remove_from_config=True))
             with (patch.dict(os.environ, {'FORGEJO_MANUAL_INPUTS': data}),
                   patch('repo_mirror.forgejo_schedule.prepare_manual', return_value=(None, None, [])) as manual,

@@ -1,4 +1,4 @@
-"""Run a Forgejo mirror batch under one lock, refreshing Manobot per source."""
+"""Run a Forgejo mirror batch under one lock, refreshing GitHub App tokens per source."""
 import argparse
 import fcntl
 import json
@@ -21,15 +21,14 @@ sys.path.insert(0, str(ROOT))
 from repo_mirror import forgejo_migration
 from repo_mirror.config_json import LEGACY_CONFIG_ERROR, is_legacy_config, unique_pairs
 from repo_mirror.forgejo_progress import ProgressReader
-from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, INSTALLATION_ID_REQUIRED,
-                                      RELOCATION_FIELDS, RELOCATION_PREFIX, SAFE_REASONS,
-                                      SOURCE_APP_OWNER_REQUIRED, parse_asset_max_bytes, parse_manifest,
-                                      resolve_source_app_owner)
+from repo_mirror.forgejo_sync import (HELPER_PATH_REQUIRED, INACTIVE_FIELDS, INACTIVE_PREFIX,
+                                      INSTALLATION_ID_REQUIRED, RELOCATION_FIELDS, RELOCATION_PREFIX,
+                                      SAFE_REASONS, SOURCE_APP_OWNER_REQUIRED, parse_asset_max_bytes,
+                                      parse_manifest, resolve_source_app_owner)
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
 from repo_mirror.logging_utils import safe_label
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
-DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
 SOURCE = re.compile(r'https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}')
 MIGRATION_REASONS = frozenset({
     'invalid relocation report',
@@ -188,14 +187,14 @@ def main(argv=None):
     parser.add_argument('--journal-dir', required=True)
     parser.add_argument('--owner', required=True)
     parser.add_argument('--organization', action='store_true')
-    parser.add_argument('--port', type=int, default=3300)
+    parser.add_argument('--port', type=int, default=3000)
     parser.add_argument('--asset-max-bytes', help='operator-selected per-asset byte limit for this Forgejo destination')
     parser.add_argument('--gitlab-token-file', help='optional owner-only gitlab.com read token file')
     parser.add_argument('--jobs', type=int, default=4, help='maximum concurrent syncs (default: 4)')
     parser.add_argument('--repository-timeout', type=float, default=3600, metavar='SECONDS',
                         help='maximum runtime per repository in seconds (default: 3600)')
     parser.add_argument('--lock', required=True)
-    parser.add_argument('--helper', default=str(DEFAULT_HELPER))
+    parser.add_argument('--helper', help='path to the GitHub App helper script')
     parser.add_argument('--helper-python', default=sys.executable)
     parser.add_argument('--sync-python', default=sys.executable)
     parser.add_argument('--installation')
@@ -281,6 +280,8 @@ def main(argv=None):
         installation = None
         if args.installation is not None or needs_github_helper:
             installation = resolve_installation_id(args.installation)
+        if needs_github_helper and not args.helper:
+            raise ValueError(HELPER_PATH_REQUIRED)
         if args.config_repo and not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.config_repo):
             raise ValueError('invalid configuration repository')
         secret_fd = os.open(args.timestamp_secret_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
@@ -525,6 +526,8 @@ def main(argv=None):
                                 else:
                                     if installation is None:
                                         installation = resolve_installation_id(args.installation)
+                                    if not args.helper:
+                                        raise ValueError(HELPER_PATH_REQUIRED)
                                     command += ['--use-github-token']
                                     command = [args.helper_python, args.helper, '--installation', installation, 'run', '--'] + command
                             if args.organization:
@@ -687,7 +690,7 @@ def main(argv=None):
         print('Batch interrupted; active processes stopped', file=sys.stderr)
         return 130
     except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError) as exc:
-        if type(exc) is ValueError and str(exc) in (SOURCE_APP_OWNER_REQUIRED, INSTALLATION_ID_REQUIRED):
+        if type(exc) is ValueError and str(exc) in (SOURCE_APP_OWNER_REQUIRED, INSTALLATION_ID_REQUIRED, HELPER_PATH_REQUIRED):
             print(str(exc), file=sys.stderr)
         else:
             print('Batch configuration or lock error', file=sys.stderr)

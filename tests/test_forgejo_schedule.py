@@ -403,7 +403,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             args = ['run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice',
-                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(tmp / 'helper.py'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen') as run:
                 self.assertEqual(forgejo_schedule.main(args), 2)
                 run.assert_not_called()
@@ -421,7 +421,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             args = ['run', '--manifest', str(manifest), '--token-file', 'x', '--owner', 'alice',
-                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(tmp / 'helper.py'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=lambda *a, **kw: __import__('unittest.mock', fromlist=['Mock']).Mock(poll=lambda: 0, pid=999999999)) as run:
                 self.assertEqual(forgejo_schedule.main(args), 0)
                 self.assertEqual(forgejo_schedule.main(args), 0)
@@ -449,7 +449,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             hardlink = tmp / 'hardlink'
             os.link(secret, hardlink)
             args = ['run', '--manifest', str(manifest), '--token-file', str(hardlink), '--owner', 'alice',
-                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(tmp / 'helper.py'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen') as run:
                 self.assertEqual(forgejo_schedule.main(args), 2)  # hardlink to credential
                 args[args.index('--token-file') + 1] = 'unused'
@@ -534,7 +534,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             lock.touch(mode=0o600)
             with lock.open('r+') as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
-                result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--installation', '123456'], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--installation', '123456', '--helper', str(tmp / 'helper.py')], capture_output=True, text=True)
             self.assertEqual(result.returncode, 75)
 
     def test_failure_does_not_stop_later_repositories(self):

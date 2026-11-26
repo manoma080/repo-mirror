@@ -6,11 +6,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-def local_api(path, token_file):
+def local_api(path, token_file, port=3000):
     if not re.fullmatch(r'api/v1/[A-Za-z0-9_/-]+', path) or '..' in path.split('/'):
         raise ValueError('invalid API path')
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError('invalid local port')
     token = Path(token_file).read_text().strip()
-    connection = http.client.HTTPConnection('127.0.0.1', 3300, timeout=30)
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
     try:
         connection.request('GET', '/' + path, headers={'Authorization': 'token ' + token})
         response = connection.getresponse()

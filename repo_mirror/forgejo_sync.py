@@ -58,14 +58,16 @@ GIT_REASONS = frozenset({
 })
 SOURCE_APP_OWNER_REQUIRED = 'source GitHub App owner is required'
 INSTALLATION_ID_REQUIRED = 'GitHub App installation id is required'
+HELPER_PATH_REQUIRED = 'GitHub App helper path is required'
 
 CONFIG_REASONS = frozenset({
     LEGACY_CONFIG_ERROR,
     SOURCE_APP_OWNER_REQUIRED,
+    HELPER_PATH_REQUIRED,
     'invalid source URL', 'config must be a JSON array of source URLs',
     'duplicate configured source', 'duplicate requested source', 'conflicting destination',
     'requested source not exactly configured',
-    'GITHUB_TOKEN required; run under the Manobot app helper', 'invalid port',
+    'GITHUB_TOKEN required; run under the GitHub App helper', 'invalid port',
     'Forgejo token file must be owner-only and owned by current user',
     'invalid Forgejo token', 'invalid repository identity',
 })
@@ -457,7 +459,7 @@ def main(argv=None):
     parser.add_argument('--journal-dir', required=True, help='persistent owner-only journal directory')
     parser.add_argument('--owner', required=True, help='local Forgejo account')
     parser.add_argument('--organization', action='store_true')
-    parser.add_argument('--port', type=int, default=3300)
+    parser.add_argument('--port', type=int, default=3000)
     parser.add_argument('--asset-max-bytes', help='operator-selected per-asset byte limit for this Forgejo destination')
     parser.add_argument('--gitlab-token-file', help='optional owner-only gitlab.com read token file')
     parser.add_argument('--inactive-after-days', default=str(DEFAULT_INACTIVE_DAYS),
@@ -529,7 +531,7 @@ def main(argv=None):
         elif args.use_github_token and not args.app_id and not args.private_key_file:
             token = os.environ.get('GITHUB_TOKEN')
             if not token or '\n' in token or '\r' in token:
-                raise ValueError('GITHUB_TOKEN required; run under the Manobot app helper')
+                raise ValueError('GITHUB_TOKEN required; run under the GitHub App helper')
         else:
             raise ValueError('invalid source authentication configuration')
         if not 1 <= args.port <= 65535:
