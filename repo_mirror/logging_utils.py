@@ -205,6 +205,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "adoption publication failed; archived destinations left in place; reconcile manually",
         "invalid archive identity",
         # Migration transaction failures: fixed reasons only, never free text.
+        "invalid migration attestation",
         "migration configuration invalid",
         "migration configuration changed by another writer",
         "migration configuration publication failed",

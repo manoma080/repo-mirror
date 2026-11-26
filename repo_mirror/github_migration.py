@@ -137,6 +137,35 @@ class GitHubRepositories:
             raise ValueError('migration destination identity mismatch')
         return repo
 
+    def name_by_id(self, repository_id):
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ValueError('migration destination identity mismatch')
+        try:
+            repo = self.api.request('GET', f'{GITHUB}/repositories/{repository_id}')
+        except HTTPError as exc:
+            if exc.code == 404:
+                exc.close()
+                raise ValueError('migration destination missing') from None
+            raise
+        if repo is None:
+            raise ValueError('migration destination missing')
+        if isinstance(repo, list):
+            if not repo:
+                raise ValueError('migration destination missing')
+            if len(repo) > 1:
+                raise ValueError('migration destination pin is ambiguous')
+            raise ValueError('migration destination identity mismatch')
+        if (not isinstance(repo, dict) or type(repo.get('id')) is not int
+                or repo['id'] != repository_id):
+            raise ValueError('migration destination identity mismatch')
+        name = repo.get('name')
+        full_name = repo.get('full_name')
+        if (not isinstance(name, str) or not NAME.fullmatch(name) or name in ('.', '..')
+                or not isinstance(full_name, str)
+                or full_name.lower() != (self.owner + '/' + name).lower()):
+            raise ValueError('migration destination identity mismatch')
+        return name
+
 
 def store_from_environment(environ, config_path):
     """Open the management repository's authoritative config, if configured."""

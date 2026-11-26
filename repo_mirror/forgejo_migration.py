@@ -57,6 +57,36 @@ class ForgejoRenameAPI:
     def rename(self, old, new):
         self.api.request('PATCH', f'/api/v1/repos/{self.owner}/{old}', {'name': new})
 
+    def name_by_id(self, repository_id):
+        from repo_mirror.constants import NAME
+        from repo_mirror.forgejo_git import APIError
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ValueError('migration destination identity mismatch')
+        try:
+            repo = self.api.request('GET', f'/api/v1/repositories/{repository_id}')
+        except APIError as exc:
+            if exc.status == 404:
+                raise ValueError('migration destination missing') from None
+            raise
+        if repo is None:
+            raise ValueError('migration destination missing')
+        if isinstance(repo, list):
+            if not repo:
+                raise ValueError('migration destination missing')
+            if len(repo) > 1:
+                raise ValueError('migration destination pin is ambiguous')
+            raise ValueError('migration destination identity mismatch')
+        if (not isinstance(repo, dict) or type(repo.get('id')) is not int
+                or repo['id'] != repository_id):
+            raise ValueError('migration destination identity mismatch')
+        name = repo.get('name')
+        full_name = repo.get('full_name')
+        if (not isinstance(name, str) or not NAME.fullmatch(name) or name in ('.', '..')
+                or not isinstance(full_name, str)
+                or full_name.lower() != (self.owner + '/' + name).lower()):
+            raise ValueError('migration destination identity mismatch')
+        return name
+
 
 class MigrationRefused(Exception):
     """A migration step refused to proceed; the journal keeps the last phase."""

@@ -136,3 +136,9 @@ class MigrationAttestationTests(unittest.TestCase):
             self.assertEqual(approved.returncode, 0)
             self.assertEqual(approved.stdout.strip(), sign(claim, 'fixture-signing-secret-0123456789abcdef'))
             self.assertEqual(approved.stderr, '')
+
+    def test_invalid_migration_attestation_is_preserved_by_error_detail(self):
+        from repo_mirror.logging_utils import SAFE_ERROR_MESSAGES, error_detail
+        message = 'invalid migration attestation'
+        self.assertIn(message, SAFE_ERROR_MESSAGES)
+        self.assertEqual(error_detail(ValueError(message)), message)
