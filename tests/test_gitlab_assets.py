@@ -483,6 +483,107 @@ class GitLabAssetTokenTests(unittest.TestCase):
         self.assertEqual(calls[0][1].get("PRIVATE-TOKEN"), "glpat-x")
         self.assertNotIn("PRIVATE-TOKEN", calls[1][1])
 
+    def test_gitlab_link_headers_restricted_to_exact_gitlab_com_origin(self):
+        import os
+        from unittest.mock import patch
+        from repo_mirror.repository import gitlab_link_headers
+
+        gitlab_com = {"type": "gitlab", "base_url": "https://gitlab.com"}
+        self_hosted = {"type": "gitlab", "base_url": "https://gitlab.example"}
+        with patch.dict(os.environ, {"MIRROR_GITLAB_TOKEN": "glpat-secret"}, clear=False):
+            self.assertEqual(
+                gitlab_link_headers(gitlab_com, "https://gitlab.com/g/p/uploads/file.tar.gz"),
+                {"PRIVATE-TOKEN": "glpat-secret"},
+            )
+            self.assertEqual(
+                gitlab_link_headers(gitlab_com, "https://GITLAB.COM/g/p/uploads/file.tar.gz"),
+                {"PRIVATE-TOKEN": "glpat-secret"},
+            )
+            self.assertEqual(
+                gitlab_link_headers(gitlab_com, "https://gitlab.com:443/g/p/uploads/file.tar.gz"),
+                {"PRIVATE-TOKEN": "glpat-secret"},
+            )
+            for rejected_url in (
+                "http://gitlab.com/g/p/uploads/file.tar.gz",
+                "https://gitlab.com:0/g/p/uploads/file.tar.gz",
+                "https://gitlab.com:8443/g/p/uploads/file.tar.gz",
+                "https://gitlab.com:notaport/g/p/uploads/file.tar.gz",
+                "https://gitlab.com:99999/g/p/uploads/file.tar.gz",
+                "https://user:pass@gitlab.com/g/p/uploads/file.tar.gz",
+                "https://@gitlab.com/g/p/uploads/file.tar.gz",
+                "https://cdn.gitlab.com/g/p/uploads/file.tar.gz",
+                "https://gitlab.example/g/p/uploads/file.tar.gz",
+                None,
+                123,
+            ):
+                with self.subTest(url=rejected_url):
+                    self.assertIsNone(gitlab_link_headers(gitlab_com, rejected_url))
+            for rejected_base_url in (
+                "https://gitlab.com:0",
+                "https://gitlab.com:notaport",
+                "https://gitlab.com:99999",
+                "https://user:pass@gitlab.com",
+                "https://@gitlab.com",
+                None,
+                123,
+            ):
+                with self.subTest(base_url=rejected_base_url):
+                    self.assertIsNone(
+                        gitlab_link_headers(
+                            {"type": "gitlab", "base_url": rejected_base_url},
+                            "https://gitlab.com/g/p/uploads/file.tar.gz",
+                        )
+                    )
+            for non_dict_source in (None, "https://gitlab.com", ["gitlab"]):
+                with self.subTest(source=non_dict_source):
+                    self.assertIsNone(
+                        gitlab_link_headers(non_dict_source, "https://gitlab.com/g/p/uploads/file.tar.gz")
+                    )
+            self.assertIsNone(
+                gitlab_link_headers(self_hosted, "https://gitlab.example/g/p/uploads/file.tar.gz")
+            )
+            self.assertIsNone(
+                gitlab_link_headers(self_hosted, "https://gitlab.com/g/p/uploads/file.tar.gz")
+            )
+
+    def test_download_asset_token_scope_for_gitlab_com_and_self_hosted(self):
+        import os
+        from unittest.mock import patch
+        from repo_mirror.repository import gitlab_link_headers
+
+        gitlab_com = {"type": "gitlab", "base_url": "https://gitlab.com"}
+        self_hosted = {"type": "gitlab", "base_url": "https://gitlab.example"}
+        calls = []
+
+        def opening(url, timeout, headers=None):
+            calls.append((url, dict(headers or {})))
+            if url == "https://gitlab.com/uploads/file":
+                return Response(status=302, headers={"Location": "https://cdn.gitlab.com/file"}), lambda: None
+            return Response(b"data"), lambda: None
+
+        original = self.module._open
+        self.module._open = opening
+        try:
+            with patch.dict(os.environ, {"MIRROR_GITLAB_TOKEN": "glpat-secret"}, clear=False):
+                com_headers = gitlab_link_headers(gitlab_com, "https://gitlab.com/uploads/file")
+                with self.module.download_asset(
+                    "https://gitlab.com/uploads/file", 10, headers=com_headers
+                ) as result:
+                    self.assertEqual(result.file.read(), b"data")
+
+                sh_headers = gitlab_link_headers(self_hosted, "https://gitlab.example/uploads/file")
+                with self.module.download_asset(
+                    "https://gitlab.example/uploads/file", 10, headers=sh_headers
+                ) as result:
+                    self.assertEqual(result.file.read(), b"data")
+        finally:
+            self.module._open = original
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0], ("https://gitlab.com/uploads/file", {"PRIVATE-TOKEN": "glpat-secret"}))
+        self.assertEqual(calls[1], ("https://cdn.gitlab.com/file", {}))
+        self.assertEqual(calls[2], ("https://gitlab.example/uploads/file", {}))
+
 
 class GitLabDownloadThrottleTests(unittest.TestCase):
     def test_short_rate_limit_is_retried(self):

@@ -298,7 +298,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         if "source_id" not in settings:
             raise ValueError("GitLab source repository id pin required")
         src = GitLabSourceAdapter(source["base_url"], source["owner"] + "/" + source_name, settings["source_id"],
-                                  token=os.environ.get("MIRROR_GITLAB_TOKEN"))
+                                  token=os.environ.get("MIRROR_GITLAB_TOKEN") or None)
         upstream = src.base
         project = src.project()
         metadata = {**project, "clone_url": project.get("http_url_to_repo")}
@@ -490,13 +490,23 @@ def validate_unique_source_tags(releases):
 
 
 def gitlab_link_headers(source, url):
-    """Attach the gitlab.com token only to same-origin asset reads."""
+    """Attach the gitlab.com token only to https://gitlab.com asset reads."""
     token = os.environ.get("MIRROR_GITLAB_TOKEN")
     if not token or not isinstance(source, dict) or source.get("type") != "gitlab":
         return None
-    asset, origin = urlparse(url), urlparse(source["base_url"])
-    if (asset.scheme, asset.hostname, asset.port or 443) == (
-            origin.scheme, origin.hostname, origin.port or 443):
+    base_url = source.get("base_url")
+    if not isinstance(base_url, str) or not isinstance(url, str):
+        return None
+    try:
+        asset, origin = urlparse(url), urlparse(base_url)
+        asset_origin = (asset.scheme.lower(), asset.hostname, 443 if asset.port is None else asset.port)
+        source_origin = (origin.scheme.lower(), origin.hostname, 443 if origin.port is None else origin.port)
+    except ValueError:
+        return None
+    if (asset.username is not None or asset.password is not None or
+            origin.username is not None or origin.password is not None):
+        return None
+    if source_origin == asset_origin == ("https", "gitlab.com", 443):
         return {"PRIVATE-TOKEN": token}
     return None
 
