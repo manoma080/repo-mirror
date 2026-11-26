@@ -383,3 +383,128 @@ sys.exit(0 if status == 143 else 1)
                 child.stdout.close()
             if child.stderr is not None:
                 child.stderr.close()
+
+    def test_helper_defaults_to_sibling_github_app(self):
+        tmp = self.tmp_path
+        repo, helper = fixture(tmp)
+        installed = tmp / 'installed'
+        installed.mkdir(mode=0o700)
+        launcher = installed / 'auto_update.py'
+        launcher.write_text(LAUNCHER.read_text())
+        sibling = installed / 'github_app.py'
+        sibling.write_text(
+            'import json, os, pathlib, sys\n'
+            'idx = sys.argv.index("--")\n'
+            'pathlib.Path(os.environ["HELPER_CALL"]).write_text(json.dumps({"script": str(pathlib.Path(__file__).resolve()), "args": sys.argv[1:idx]}))\n'
+            'a = sys.argv[idx + 1:]\n'
+            'os.execvp(a[0], a)\n'
+        )
+        env = dict(os.environ, RESULT=str(tmp / 'result'), HELPER_CALL=str(tmp / 'helper_call'))
+        result = subprocess.run(
+            [sys.executable, str(launcher), '--remote', str(repo), '--state-dir', str(tmp / 'state'),
+             '--job-lock', str(tmp / 'job.lock'), '--installation', '123456', '--',
+             '--lock', str(tmp / 'scheduler.lock')],
+            env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = json.loads((tmp / 'helper_call').read_text())
+        self.assertEqual(call['script'], str(sibling.resolve()))
+        self.assertEqual(call['args'], ['--installation', '123456', 'run'])
+        self.assertTrue((tmp / 'result').exists())
+
+    def test_explicit_helper_overrides_sibling_default(self):
+        tmp = self.tmp_path
+        repo, helper = fixture(tmp)
+        installed = tmp / 'installed'
+        installed.mkdir(mode=0o700)
+        launcher = installed / 'auto_update.py'
+        launcher.write_text(LAUNCHER.read_text())
+        sibling = installed / 'github_app.py'
+        sibling.write_text('raise SystemExit(99)\n')
+        helper.write_text(
+            'import json, os, pathlib, sys\n'
+            'idx = sys.argv.index("--")\n'
+            'pathlib.Path(os.environ["HELPER_CALL"]).write_text(json.dumps({"script": str(pathlib.Path(__file__).resolve())}))\n'
+            'a = sys.argv[idx + 1:]\n'
+            'os.execvp(a[0], a)\n'
+        )
+        for label, helper_arg in (('absolute', str(helper)), ('relative', 'helper.py')):
+            with self.subTest(mode=label):
+                (tmp / 'result').unlink(missing_ok=True)
+                (tmp / 'helper_call').unlink(missing_ok=True)
+                env = dict(os.environ, RESULT=str(tmp / 'result'), HELPER_CALL=str(tmp / 'helper_call'))
+                result = subprocess.run(
+                    [sys.executable, str(launcher), '--remote', str(repo), '--state-dir', str(tmp / 'state'),
+                     '--job-lock', str(tmp / 'job.lock'), '--helper', helper_arg, '--installation', '123456', '--',
+                     '--lock', str(tmp / 'scheduler.lock')],
+                    cwd=tmp, env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads((tmp / 'helper_call').read_text())['script'], str(helper.resolve()))
+                self.assertTrue((tmp / 'result').exists())
+
+    def test_missing_default_helper_fails_closed_without_fetch(self):
+        tmp = self.tmp_path
+        repo, _helper = fixture(tmp)
+        installed = tmp / 'installed'
+        installed.mkdir(mode=0o700)
+        launcher = installed / 'auto_update.py'
+        launcher.write_text(LAUNCHER.read_text())
+        env = dict(os.environ, RESULT=str(tmp / 'result'))
+        result = subprocess.run(
+            [sys.executable, str(launcher), '--remote', str(repo), '--state-dir', str(tmp / 'state'),
+             '--job-lock', str(tmp / 'job.lock'), '--installation', '123456', '--',
+             '--lock', str(tmp / 'scheduler.lock')],
+            env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('GitHub App helper path is required', result.stderr)
+        self.assertFalse((tmp / 'state').exists())
+        self.assertFalse((tmp / 'job.lock').exists())
+        self.assertFalse((tmp / 'result').exists())
+
+    def test_helper_path_rejects_leading_dash_non_regular_and_wrong_owner(self):
+        import importlib.util
+        import io
+        from contextlib import redirect_stderr
+        tmp = self.tmp_path
+        repo, helper = fixture(tmp)
+        dash_helper = tmp / '-helper.py'
+        dash_helper.write_text(helper.read_text())
+        symlink_helper = tmp / 'link_helper.py'
+        symlink_helper.symlink_to(helper)
+        dir_helper = tmp / 'dir_helper'
+        dir_helper.mkdir()
+        cases = (
+            ('leading-dash', '-helper.py'),
+            ('symlink', str(symlink_helper)),
+            ('directory', str(dir_helper)),
+            ('missing', str(tmp / 'missing.py')),
+        )
+        for label, helper_arg in cases:
+            with self.subTest(case=label):
+                result = subprocess.run(
+                    [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp / 'state'),
+                     '--job-lock', str(tmp / 'job.lock'), '--helper', helper_arg, '--installation', '123456', '--',
+                     '--lock', str(tmp / 'scheduler.lock')],
+                    cwd=tmp, env=dict(os.environ, RESULT=str(tmp / 'result')), capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse((tmp / 'state').exists())
+                self.assertFalse((tmp / 'result').exists())
+
+        spec = importlib.util.spec_from_file_location('auto_update_owner_check', LAUNCHER)
+        updater = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(updater)
+        other_uid = os.getuid() + 1
+        stderr = io.StringIO()
+        with patch.object(updater.os, 'getuid', return_value=other_uid), redirect_stderr(stderr):
+            rc = updater.main([
+                '--remote', str(repo), '--state-dir', str(tmp / 'state'),
+                '--job-lock', str(tmp / 'job.lock'), '--helper', str(helper),
+                '--installation', '123456', '--', '--lock', str(tmp / 'scheduler.lock'),
+            ])
+        self.assertEqual(rc, 2)
+        self.assertIn('Updater failed: configuration', stderr.getvalue())
+        self.assertFalse((tmp / 'state').exists())
+        self.assertFalse((tmp / 'result').exists())
