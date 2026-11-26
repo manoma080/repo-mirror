@@ -72,7 +72,7 @@ class EmptyBodyDiagnosticTests(unittest.TestCase):
             env = dict(os.environ, PYTHONPATH=str(ROOT))
             result = subprocess.run([sys.executable, str(ROOT / 'repo_mirror/forgejo_schedule.py'), 'run',
                 '--manifest', str(tmp / 'manifest'), '--token-file', 'unused', '--timestamp-secret-file', str(tmp / 'secret'),
-                '--journal-dir', str(tmp / 'journals'), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)],
+                '--journal-dir', str(tmp / 'journals'), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper)],
                 capture_output=True, text=True, env=env, cwd=ROOT)
             output = result.stdout + result.stderr
             self.assertEqual(result.returncode, 1)

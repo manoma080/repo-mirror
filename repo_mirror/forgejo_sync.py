@@ -25,6 +25,7 @@ from repo_mirror.repository import (ReleaseAggregateError, mirror_releases, vali
 from repo_mirror.sources import source_marker, source_api_base
 from repo_mirror.staleness import DEFAULT_INACTIVE_DAYS, begin, end, parse_inactive_days, stale, stamp_date
 from repo_mirror.config_json import LEGACY_CONFIG_ERROR, reject_legacy_config, unique_pairs
+from repo_mirror.constants import NAME
 from repo_mirror.forgejo_local import forgejo_source_identity
 from repo_mirror.forgejo_source_adapter import PublicForgejoSourceAdapter
 from repo_mirror.github_api import AppTokenProvider
@@ -55,8 +56,12 @@ GIT_REASONS = frozenset({
     'Forgejo default branch readback did not match',
     'Forgejo repository identity or initialization state changed',
 })
+SOURCE_APP_OWNER_REQUIRED = 'source GitHub App owner is required'
+INSTALLATION_ID_REQUIRED = 'GitHub App installation id is required'
+
 CONFIG_REASONS = frozenset({
     LEGACY_CONFIG_ERROR,
+    SOURCE_APP_OWNER_REQUIRED,
     'invalid source URL', 'config must be a JSON array of source URLs',
     'duplicate configured source', 'duplicate requested source', 'conflicting destination',
     'requested source not exactly configured',
@@ -358,6 +363,16 @@ def read_owner_secret(path, label):
     return value
 
 
+def resolve_source_app_owner(explicit=None):
+    """Resolve and validate the GitHub App installation owner for source access."""
+    owner = explicit if explicit is not None else os.environ.get('MIRROR_APP_OWNER')
+    if owner is None or owner == '':
+        raise ValueError(SOURCE_APP_OWNER_REQUIRED)
+    if not isinstance(owner, str) or not NAME.fullmatch(owner) or owner in ('.', '..'):
+        raise ValueError('invalid GitHub App configuration')
+    return owner
+
+
 @contextmanager
 def journal_lock(path, *, shared=False):
     # Lock the directory inode itself: no replaceable lock file, symlink or
@@ -449,6 +464,7 @@ def main(argv=None):
                         help='report sources with no commit or release activity for this many days; 0 disables')
     parser.add_argument('--app-id')
     parser.add_argument('--private-key-file')
+    parser.add_argument('--source-app-owner', help='GitHub App installation owner for source access (or MIRROR_APP_OWNER)')
     parser.add_argument('--use-github-token', action='store_true', help='explicitly use GITHUB_TOKEN (not refreshable)')
     parser.add_argument('--ignore-releases', action='store_true',
                         help='skip release synchronization for the requested --source URLs on this run only')
@@ -500,13 +516,16 @@ def main(argv=None):
             raise ValueError('recovery secret must be separate')
         if not local_token or '\n' in local_token or '\r' in local_token:
             raise ValueError('invalid Forgejo token')
+        if args.source_app_owner is not None:
+            resolve_source_app_owner(args.source_app_owner)
         if not any(not x.startswith('https://') for x in requested) and not (args.app_id or args.private_key_file or args.use_github_token):
             token = None
         elif args.app_id and args.private_key_file and not args.use_github_token:
             key, key_id = read_secure_file(args.private_key_file)
             if key_id == secret_id:
                 raise ValueError('recovery secret must be separate')
-            token = AppTokenProvider(args.app_id, key, 'manoma080')
+            app_owner = resolve_source_app_owner(args.source_app_owner)
+            token = AppTokenProvider(args.app_id, key, app_owner)
         elif args.use_github_token and not args.app_id and not args.private_key_file:
             token = os.environ.get('GITHUB_TOKEN')
             if not token or '\n' in token or '\r' in token:

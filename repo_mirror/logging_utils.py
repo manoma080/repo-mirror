@@ -174,6 +174,8 @@ SAFE_ERROR_MESSAGES = frozenset(
         "invalid created destination repository id",
         "authenticated GitHub user does not match configured destination",
         "GitHub App installation owner does not match configured destination",
+        "source GitHub App owner is required",
+        "GitHub App installation id is required",
         "destination creation may be partial; reconcile manually",
         "auto-discovery onboarding publication failed; reconcile manually",
         "auto-discovery onboarding requires authoritative management configuration",

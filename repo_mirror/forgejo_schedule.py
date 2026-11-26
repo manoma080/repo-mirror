@@ -21,8 +21,10 @@ sys.path.insert(0, str(ROOT))
 from repo_mirror import forgejo_migration
 from repo_mirror.config_json import LEGACY_CONFIG_ERROR, is_legacy_config, unique_pairs
 from repo_mirror.forgejo_progress import ProgressReader
-from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, RELOCATION_FIELDS, RELOCATION_PREFIX,
-                                      SAFE_REASONS, parse_asset_max_bytes, parse_manifest)
+from repo_mirror.forgejo_sync import (INACTIVE_FIELDS, INACTIVE_PREFIX, INSTALLATION_ID_REQUIRED,
+                                      RELOCATION_FIELDS, RELOCATION_PREFIX, SAFE_REASONS,
+                                      SOURCE_APP_OWNER_REQUIRED, parse_asset_max_bytes, parse_manifest,
+                                      resolve_source_app_owner)
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
 from repo_mirror.logging_utils import safe_label
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
@@ -127,6 +129,16 @@ class _GitLabDiscoveryClient:
         raise ValueError('pagination exceeded safety limit')
 
 
+def resolve_installation_id(explicit=None):
+    """Resolve and validate the GitHub App installation id for helper runs."""
+    installation = explicit if explicit is not None else os.environ.get('MIRROR_APP_INSTALLATION')
+    if installation is None or installation == '':
+        raise ValueError(INSTALLATION_ID_REQUIRED)
+    if not isinstance(installation, str) or not re.fullmatch(r'[0-9]+', installation):
+        raise ValueError('invalid installation or port')
+    return installation
+
+
 def _build_auto_discovery_source_client(args):
     from repo_mirror.forgejo_sync import read_owner_secret, read_secure_file
     from repo_mirror.github_api import AppTokenProvider, SourceAPI
@@ -142,7 +154,8 @@ def _build_auto_discovery_source_client(args):
         if kind == 'github':
             if args.app_id and args.private_key_file:
                 private_key = read_secure_file(args.private_key_file)[0]
-                token = AppTokenProvider(args.app_id, private_key, 'manoma080')
+                app_owner = resolve_source_app_owner(getattr(args, 'source_app_owner', None))
+                token = AppTokenProvider(args.app_id, private_key, app_owner)
             else:
                 token = os.environ.get('GITHUB_TOKEN') or None
                 if token and ('\n' in token or '\r' in token):
@@ -185,9 +198,10 @@ def main(argv=None):
     parser.add_argument('--helper', default=str(DEFAULT_HELPER))
     parser.add_argument('--helper-python', default=sys.executable)
     parser.add_argument('--sync-python', default=sys.executable)
-    parser.add_argument('--installation', default='178997310')
+    parser.add_argument('--installation')
     parser.add_argument('--app-id')
     parser.add_argument('--private-key-file')
+    parser.add_argument('--source-app-owner')
     parser.add_argument('--config-repo', metavar='OWNER/NAME',
                         help='GitHub repository holding the authoritative config-forgejo.json')
     parser.add_argument('--config-account-type', default='personal', choices=['personal', 'organization'])
@@ -223,12 +237,14 @@ def main(argv=None):
         else:
             worker_manifest = sources
             validate_sources(sources)
+        normalized_auto = []
         if auto_discoveries:
             if not has_authority:
                 raise ValueError('auto-discovery onboarding requires authoritative management configuration')
             from repo_mirror.config_named import _normalize_auto_discoveries
+            normalized_auto = _normalize_auto_discoveries(auto_discoveries)
             if args.asset_max_bytes is None and any(
-                    rule['type'] == 'gitlab' for rule in _normalize_auto_discoveries(auto_discoveries)):
+                    rule['type'] == 'gitlab' for rule in normalized_auto):
                 raise ValueError('Forgejo asset byte limit must be configured')
         if isinstance(sources, dict):
             settings = next(iter(sources['destinations'].values()))
@@ -250,12 +266,21 @@ def main(argv=None):
         if args.asset_max_bytes is None and any(
                 e.get('source_type') == 'gitlab' or e['url'].startswith('https://gitlab.com/') for e in entries):
             raise ValueError('Forgejo asset byte limit must be configured')
-        if not re.fullmatch(r'[0-9]+', args.installation) or not 1 <= args.port <= 65535 or not 1 <= args.jobs <= 64:
+        if not 1 <= args.port <= 65535 or not 1 <= args.jobs <= 64:
             raise ValueError('invalid installation or port')
         if not math.isfinite(args.repository_timeout) or args.repository_timeout <= 0:
             raise ValueError('invalid repository timeout')
         if bool(args.app_id) != bool(args.private_key_file):
             raise ValueError('incomplete app credentials')
+        if args.source_app_owner is not None or args.app_id:
+            resolve_source_app_owner(args.source_app_owner)
+        needs_github_helper = not args.app_id and (
+            any(SOURCE.fullmatch(e['url']) for e in entries)
+            or any(rule['type'] == 'github' for rule in normalized_auto)
+        )
+        installation = None
+        if args.installation is not None or needs_github_helper:
+            installation = resolve_installation_id(args.installation)
         if args.config_repo and not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.config_repo):
             raise ValueError('invalid configuration repository')
         secret_fd = os.open(args.timestamp_secret_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
@@ -495,9 +520,13 @@ def main(argv=None):
                             if SOURCE.fullmatch(source):
                                 if args.app_id:
                                     command += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
+                                    if args.source_app_owner is not None:
+                                        command += ['--source-app-owner', args.source_app_owner]
                                 else:
+                                    if installation is None:
+                                        installation = resolve_installation_id(args.installation)
                                     command += ['--use-github-token']
-                                    command = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--'] + command
+                                    command = [args.helper_python, args.helper, '--installation', installation, 'run', '--'] + command
                             if args.organization:
                                 command.append('--organization')
                             if transient:
@@ -657,8 +686,11 @@ def main(argv=None):
     except KeyboardInterrupt:
         print('Batch interrupted; active processes stopped', file=sys.stderr)
         return 130
-    except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
-        print('Batch configuration or lock error', file=sys.stderr)
+    except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError) as exc:
+        if type(exc) is ValueError and str(exc) in (SOURCE_APP_OWNER_REQUIRED, INSTALLATION_ID_REQUIRED):
+            print(str(exc), file=sys.stderr)
+        else:
+            print('Batch configuration or lock error', file=sys.stderr)
         return 2
 
 

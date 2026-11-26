@@ -149,7 +149,7 @@ class GroupOnboardingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             result = main(['--remote','https://github.com/owner/one.git','--state-dir',str(root/'state'),
-                           '--job-lock',str(root/'job'), '--', '--lock',str(root/'lock'), '--config-repo','owner/'])
+                           '--job-lock',str(root/'job'), '--installation', '123456', '--', '--lock',str(root/'lock'), '--config-repo','owner/'])
             self.assertEqual(result, 2)
             self.assertFalse((root/'state').exists())
 
@@ -184,7 +184,7 @@ class GroupOnboardingTests(unittest.TestCase):
                  patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=spawn):
                 status = main(['run','--manifest',str(root/'manifest'),'--token-file','unused','--timestamp-secret-file',str(root/'secret'),
                                '--journal-dir',str(root/'journal'),'--owner','local','--lock',str(root/'lock'),
-                               '--config-repo','a/b','--asset-max-bytes','100'])
+                               '--installation','123456','--config-repo','a/b','--asset-max-bytes','100'])
             self.assertEqual(status, 0)
             self.assertEqual(launched, [('https://github.com/owner/keep', [explicit])])
             self.assertEqual((root/'manifest').read_bytes(), doc)
@@ -225,7 +225,7 @@ class GroupOnboardingTests(unittest.TestCase):
                 return real_checked(command, **kwargs)
             with patch.object(auto_update, 'checked_process', side_effect=checked):
                 status = auto_update.main(['--remote','https://github.com/a/b.git','--state-dir',str(root/'state'),
-                    '--job-lock',str(root/'job'),'--helper',str(helper),'--', '--lock',str(root/'lock'),
+                    '--job-lock',str(root/'job'),'--helper',str(helper),'--installation','123456','--', '--lock',str(root/'lock'),
                     '--token-file','unused','--timestamp-secret-file',str(root/'secret'),'--journal-dir',str(root/'journal'),
                     '--owner','local','--config-repo','a/b','--asset-max-bytes','100'])
             self.assertEqual(status, 0)

@@ -35,7 +35,8 @@ def check_alias(tmp_path, credential, alias):
     key = credential_path if credential == 'app_key' else other
     args = ['--config', str(config), '--source', URL, '--token-file', str(token),
             '--timestamp-secret-file', str(secret), '--journal-dir', str(tmp_path),
-            '--owner', 'local', '--app-id', '123', '--private-key-file', str(key)]
+            '--owner', 'local', '--app-id', '123', '--private-key-file', str(key),
+            '--source-app-owner', 'mirror-owner']
     stdout, stderr = io.StringIO(), io.StringIO()
     with patch.object(forgejo_sync, 'AppTokenProvider'), \
          patch.object(forgejo_sync, 'LocalForgejoAPI') as api, \

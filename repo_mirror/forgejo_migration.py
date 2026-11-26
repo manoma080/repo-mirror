@@ -448,7 +448,7 @@ def build_migration(args, secret):
     from repo_mirror.forgejo_authoritative_config import GitHubConfigCAS
     from repo_mirror.forgejo_control_config import ForgejoControlAPI, ForgejoFile, ForgejoMigrations
     from repo_mirror.forgejo_git import LocalForgejoAPI
-    from repo_mirror.forgejo_sync import read_secure_file
+    from repo_mirror.forgejo_sync import read_secure_file, resolve_source_app_owner
     from repo_mirror.github_api import (
         API, AppTokenProvider, OriginRedirect, SourceAPI, UploadErrorProcessor, https_origin,
     )
@@ -462,7 +462,11 @@ def build_migration(args, secret):
         raise ValueError('invalid Forgejo control repository ID')
     if getattr(args, 'app_id', None) and getattr(args, 'private_key_file', None):
         key = read_secure_file(args.private_key_file)[0]
-        app_owner = (getattr(args, 'source_app_owner', None) or 'manoma080') if forgejo_repo else owner
+        app_owner = (
+            resolve_source_app_owner(getattr(args, 'source_app_owner', None))
+            if forgejo_repo
+            else owner
+        )
         token = AppTokenProvider(args.app_id, key, app_owner, getattr(args, 'config_account_type', 'personal'))
     else:
         token = os.environ.get('GITHUB_TOKEN')
