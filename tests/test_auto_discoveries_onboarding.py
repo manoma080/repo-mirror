@@ -428,7 +428,7 @@ class OnboardingBehaviorTests(unittest.TestCase):
         self.assertEqual(post_payloads[1]["private"], False)
 
         log = stream.getvalue()
-        self.assertIn("auto_discovery 1/1 (Alice): OK discovered=3 inducted=2 excluded=1 tracked=0", log)
+        self.assertIn("auto_discovery 1/1 (Alice): OK discovered=3 inducted=2 excluded=1 tracked=0 conflicts=0", log)
         self.assertNotIn("https://", log)
 
         # Steady-state re-run: zero destination writes, zero publish calls, byte recheck still happens.
@@ -443,7 +443,7 @@ class OnboardingBehaviorTests(unittest.TestCase):
         self.assertGreater(store.read_calls, reads_before)
         self.assertEqual(dst.calls, [])
         self.assertIn(
-            "auto_discovery 1/1 (Alice): OK discovered=3 inducted=0 excluded=1 tracked=2",
+            "auto_discovery 1/1 (Alice): OK discovered=3 inducted=0 excluded=1 tracked=2 conflicts=0",
             steady_stream.getvalue(),
         )
 
@@ -523,34 +523,58 @@ class OnboardingBehaviorTests(unittest.TestCase):
         self.assertEqual(dst.calls, [])
         self.assertIn("tracked=1", res.rule_reports[0])
 
-        # URL match with missing or different source.id fails closed before any writes.
-        for bad_source in (
-            {"url": "https://github.com/Alice/alpha"},
-            {"url": "https://github.com/Alice/alpha", "id": 999},
-        ):
-            with self.subTest(bad_source=bad_source):
-                conflict_doc = _base_doc(
-                    [{"url": "https://github.com/Alice", "id": 100}],
-                    [{"source": bad_source, "mirrors": {"main": {"name": "custom-alpha", "id": 5001}}}],
-                )
-                conflict_raw = _encode(conflict_doc)
-                conflict_src = FakeSourceAPI(
-                    routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
-                    pages_routes={
-                        "https://api.github.com/users/Alice/repos?type=owner": [
-                            {"id": 11, "name": "alpha", "full_name": "Alice/alpha", "clone_url": "https://github.com/Alice/alpha.git"}
-                        ]
-                    },
-                )
-                with self.assertRaisesRegex(ValueError, "source repository id mismatch or missing"):
-                    onboard_auto_discoveries(
-                        conflict_raw,
-                        FakeStore(conflict_raw),
-                        lambda _: conflict_src,
-                        dst,
-                        owner="dest",
-                        account_type="personal",
-                    )
+        # URL match with missing source.id still fails closed; mismatched pinned source.id becomes a per-repository conflict.
+        missing_doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [{"source": {"url": "https://github.com/Alice/alpha"}, "mirrors": {"main": {"name": "custom-alpha", "id": 5001}}}],
+        )
+        missing_raw = _encode(missing_doc)
+        conflict_src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {"id": 11, "name": "alpha", "full_name": "Alice/alpha", "clone_url": "https://github.com/Alice/alpha.git"}
+                ]
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "source repository id mismatch or missing"):
+            onboard_auto_discoveries(
+                missing_raw,
+                FakeStore(missing_raw),
+                lambda _: conflict_src,
+                dst,
+                owner="dest",
+                account_type="personal",
+            )
+
+        mismatch_doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [{"source": {"url": "https://github.com/Alice/alpha", "id": 999}, "mirrors": {"main": {"name": "custom-alpha", "id": 5001}}}],
+        )
+        mismatch_raw = _encode(mismatch_doc)
+        mismatch_store = FakeStore(mismatch_raw)
+        mismatch_stream = io.StringIO()
+        mismatch_res = onboard_auto_discoveries(
+            mismatch_raw,
+            mismatch_store,
+            lambda _: conflict_src,
+            dst,
+            owner="dest",
+            account_type="personal",
+            stream=mismatch_stream,
+        )
+        self.assertEqual(mismatch_store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+        self.assertEqual(len(mismatch_res.conflicts), 1)
+        self.assertIn(
+            "auto_discovery 1/1 (Alice): repository alpha: upstream identity changed (pinned id 999, now 11); "
+            "entry kept, not mirrored; remove the entry and re-add it to adopt",
+            mismatch_stream.getvalue(),
+        )
+        self.assertIn(
+            "auto_discovery 1/1 (Alice): OK discovered=1 inducted=0 excluded=0 tracked=0 conflicts=1",
+            mismatch_stream.getvalue(),
+        )
 
     def test_destination_collision_and_live_existing_refusal(self):
         # Cross-rule planned collision fails before any destination creation.
@@ -772,7 +796,7 @@ class OnboardingBehaviorTests(unittest.TestCase):
         self.assertEqual(new_entry["source"]["type"], "gitlab")
         self.assertEqual(new_entry["mirrors"]["main"]["name"], "pref-kept")
         self.assertIn(
-            "auto_discovery 1/1 (team/sub): OK discovered=1 inducted=1 excluded=0 tracked=0 missing_upstream=1",
+            "auto_discovery 1/1 (team/sub): OK discovered=1 inducted=1 excluded=0 tracked=0 missing_upstream=1 conflicts=0",
             stream.getvalue(),
         )
         orphan_stream = io.StringIO()
@@ -781,6 +805,186 @@ class OnboardingBehaviorTests(unittest.TestCase):
         self.assertIn("orphaned child repository team/sub/gone: destination pref-gone untouched", orphan_out)
         self.assertIn("orphaned legacy repository old/group/legacy: destination", orphan_out)
         self.assertNotIn("https://", stream.getvalue() + orphan_out)
+
+    def test_deleted_and_recreated_upstream_reports_conflict_and_continues_rule(self):
+        existing_conflict = {
+            "source": {"url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate", "id": 1470348900},
+            "mirrors": {"main": {"name": "mirror-BlackBearRevived-ps5-native-app-boilerplate", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/BlackBearRevived",
+        }
+        existing_tracked = {
+            "source": {"url": "https://github.com/BlackBearRevived/tracked-repo", "id": 1001},
+            "mirrors": {"main": {"name": "mirror-BlackBearRevived-tracked-repo", "id": 5002, "visibility": "private"}},
+            "discovered_by": "https://github.com/BlackBearRevived",
+        }
+        doc = _base_doc(
+            [{"url": "https://github.com/BlackBearRevived", "id": 42}],
+            [existing_conflict, existing_tracked],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI()
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
+                    {
+                        "id": 1472677129,
+                        "name": "ps5-native-app-boilerplate",
+                        "full_name": "BlackBearRevived/ps5-native-app-boilerplate",
+                        "clone_url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git",
+                    },
+                    {
+                        "id": 1001,
+                        "name": "tracked-repo",
+                        "full_name": "BlackBearRevived/tracked-repo",
+                        "clone_url": "https://github.com/BlackBearRevived/tracked-repo.git",
+                    },
+                    {
+                        "id": 1002,
+                        "name": "new-repo",
+                        "full_name": "BlackBearRevived/new-repo",
+                        "clone_url": "https://github.com/BlackBearRevived/new-repo.git",
+                    },
+                ]
+            },
+        )
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            raw, store, lambda _: src, dst, owner="dest", account_type="personal", stream=stream
+        )
+        self.assertEqual(store.publish_calls, 1)
+        self.assertEqual(res.inducted_total, 1)
+        self.assertEqual(res.orphaned_children, ())
+        self.assertEqual(len(res.conflicts), 1)
+        published = json.loads(res.config_bytes)
+        self.assertEqual(len(published["repositories"]), 3)
+        by_url = {r["source"]["url"]: r for r in published["repositories"]}
+        self.assertEqual(
+            by_url["https://github.com/BlackBearRevived/ps5-native-app-boilerplate"]["source"]["id"],
+            1470348900,
+        )
+        self.assertIn("https://github.com/BlackBearRevived/new-repo", by_url)
+        expected_conflict_line = (
+            "auto_discovery 1/1 (BlackBearRevived): repository ps5-native-app-boilerplate: "
+            "upstream identity changed (pinned id 1470348900, now 1472677129); "
+            "entry kept, not mirrored; remove the entry and re-add it to adopt"
+        )
+        log = stream.getvalue()
+        self.assertEqual(log.count(expected_conflict_line), 1)
+        self.assertIn(
+            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=1 excluded=0 tracked=1 conflicts=1",
+            log,
+        )
+        self.assertNotIn("https://", log)
+
+        # Second run reports the same conflict and stays no-op otherwise.
+        dst.calls.clear()
+        stream2 = io.StringIO()
+        res2 = onboard_auto_discoveries(
+            res.config_bytes, store, lambda _: src, dst, owner="dest", account_type="personal", stream=stream2
+        )
+        self.assertEqual(res2.config_bytes, res.config_bytes)
+        self.assertEqual(store.publish_calls, 1)
+        self.assertEqual(dst.calls, [])
+        self.assertEqual(res2.orphaned_children, ())
+        self.assertEqual(len(res2.conflicts), 1)
+        log2 = stream2.getvalue()
+        self.assertEqual(log2.count(expected_conflict_line), 1)
+        self.assertIn(
+            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=0 excluded=0 tracked=2 conflicts=1",
+            log2,
+        )
+
+    def test_duplicate_id_and_ambiguous_url_still_fail_closed(self):
+        # Two existing entries sharing the discovered source.id still raise.
+        dup_id_doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [
+                {
+                    "source": {"url": "https://github.com/Alice/old-a", "id": 11},
+                    "mirrors": {"main": {"name": "mirror-Alice-old-a", "id": 5001}},
+                    "discovered_by": "https://github.com/Alice",
+                },
+                {
+                    "source": {"url": "https://github.com/Other/alpha", "id": 11},
+                    "mirrors": {"main": {"name": "custom-b", "id": 5002}},
+                },
+            ],
+        )
+        dup_id_raw = _encode(dup_id_doc)
+        dup_id_store = FakeStore(dup_id_raw)
+        dst = FakeDestinationAPI()
+        alice_src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {"id": 11, "name": "alpha", "full_name": "Alice/alpha", "clone_url": "https://github.com/Alice/alpha.git"}
+                ]
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "existing source mapping conflicts"):
+            onboard_auto_discoveries(
+                dup_id_raw, dup_id_store, lambda _: alice_src, dst, owner="dest", account_type="personal"
+            )
+        self.assertEqual(dup_id_store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+
+        # Ambiguous URL match (relocated child + standalone entry matching the discovered URL) still raises.
+        ambig_url_doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [
+                {
+                    "source": {"url": "https://github.com/Alice/alpha", "id": 999},
+                    "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001}},
+                    "discovered_by": "https://github.com/Alice",
+                },
+                {
+                    "source": {"url": "https://github.com/AliceNew/alpha", "id": 888},
+                    "mirrors": {"main": {"name": "custom-new-alpha", "id": 5002}},
+                },
+            ],
+        )
+        ambig_url_raw = _encode(ambig_url_doc)
+        ambig_url_store = FakeStore(ambig_url_raw)
+        reloc_src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "AliceNew", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/AliceNew/repos?type=owner": [
+                    {"id": 11, "name": "alpha", "full_name": "AliceNew/alpha", "clone_url": "https://github.com/AliceNew/alpha.git"}
+                ]
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "existing source mapping conflicts"):
+            onboard_auto_discoveries(
+                ambig_url_raw, ambig_url_store, lambda _: reloc_src, dst, owner="dest", account_type="personal"
+            )
+        self.assertEqual(ambig_url_store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+
+        # One entry matching discovered source.id and another matching discovered URL still raises.
+        split_doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [
+                {
+                    "source": {"url": "https://github.com/Alice/old-alpha", "id": 11},
+                    "mirrors": {"main": {"name": "mirror-Alice-old-alpha", "id": 5001}},
+                    "discovered_by": "https://github.com/Alice",
+                },
+                {
+                    "source": {"url": "https://github.com/Alice/alpha", "id": 999},
+                    "mirrors": {"main": {"name": "custom-alpha", "id": 5002}},
+                },
+            ],
+        )
+        split_raw = _encode(split_doc)
+        split_store = FakeStore(split_raw)
+        with self.assertRaisesRegex(ValueError, "existing source mapping conflicts"):
+            onboard_auto_discoveries(
+                split_raw, split_store, lambda _: alice_src, dst, owner="dest", account_type="personal"
+            )
+        self.assertEqual(split_store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
 
 
 class CliIntegrationTests(unittest.TestCase):
@@ -848,6 +1052,162 @@ class CliIntegrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "pending migration requires reconciliation"):
                     cli.main(["--config", str(path)])
 
+    def test_cli_skips_conflicted_repository_and_mirrors_other_repositories(self):
+        from contextlib import redirect_stderr
+
+        doc = _base_doc(
+            [{"url": "https://github.com/BlackBearRevived", "id": 42}],
+            [
+                {
+                    "source": {"url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate", "id": 1470348900},
+                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-ps5-native-app-boilerplate", "id": 5001}},
+                    "discovered_by": "https://github.com/BlackBearRevived",
+                },
+                {
+                    "source": {"url": "https://github.com/BlackBearRevived/good-repo", "id": 2001},
+                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-good-repo", "id": 5002}},
+                    "discovered_by": "https://github.com/BlackBearRevived",
+                },
+                {
+                    "source": {"url": "https://github.com/Other/manual-repo", "id": 3001},
+                    "mirrors": {"main": {"name": "mirror-Other-manual-repo", "id": 5003}},
+                },
+            ],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI()
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
+                    {
+                        "id": 1472677129,
+                        "name": "ps5-native-app-boilerplate",
+                        "full_name": "BlackBearRevived/ps5-native-app-boilerplate",
+                        "clone_url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git",
+                    },
+                    {
+                        "id": 2001,
+                        "name": "good-repo",
+                        "full_name": "BlackBearRevived/good-repo",
+                        "clone_url": "https://github.com/BlackBearRevived/good-repo.git",
+                    },
+                ]
+            },
+        )
+        mirrored = []
+
+        def fake_mirror(source, name, owner, *args, **kwargs):
+            mirrored.append((source["owner"], name, source["mirror"]["source_id"]))
+            return None
+
+        env = {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest", "MIRROR_TIMESTAMP_SECRET": "secret"}
+        stderr_buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_bytes(raw)
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
+                patch.object(cli, "SourceAPI", return_value=src),
+                patch.object(cli, "API", side_effect=[Mock(), dst]),
+                patch.object(cli, "mirror_repository", side_effect=fake_mirror),
+                redirect_stderr(stderr_buf),
+            ):
+                cli.main(["--config", str(path)])
+
+        self.assertEqual(store.publish_calls, 0)
+        self.assertEqual(
+            sorted(mirrored),
+            [("BlackBearRevived", "good-repo", 2001), ("Other", "manual-repo", 3001)],
+        )
+        stderr_out = stderr_buf.getvalue()
+        self.assertIn(
+            "auto_discovery 1/1 (BlackBearRevived): repository ps5-native-app-boilerplate: "
+            "upstream identity changed (pinned id 1470348900, now 1472677129); "
+            "entry kept, not mirrored; remove the entry and re-add it to adopt",
+            stderr_out,
+        )
+        self.assertIn(
+            "auto_discovery 1/1 (BlackBearRevived): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1",
+            stderr_out,
+        )
+        self.assertIn("summary sources=3 discovery_failed=0 repositories=2 succeeded=2 failed=0", stderr_out)
+
+    def test_cli_still_fails_when_non_conflicted_repository_mirror_fails(self):
+        from contextlib import redirect_stderr
+
+        doc = _base_doc(
+            [{"url": "https://github.com/BlackBearRevived", "id": 42}],
+            [
+                {
+                    "source": {"url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate", "id": 1470348900},
+                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-ps5-native-app-boilerplate", "id": 5001}},
+                    "discovered_by": "https://github.com/BlackBearRevived",
+                },
+                {
+                    "source": {"url": "https://github.com/BlackBearRevived/good-repo", "id": 2001},
+                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-good-repo", "id": 5002}},
+                    "discovered_by": "https://github.com/BlackBearRevived",
+                },
+                {
+                    "source": {"url": "https://github.com/Other/manual-repo", "id": 3001},
+                    "mirrors": {"main": {"name": "mirror-Other-manual-repo", "id": 5003}},
+                },
+            ],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI()
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
+                    {
+                        "id": 1472677129,
+                        "name": "ps5-native-app-boilerplate",
+                        "full_name": "BlackBearRevived/ps5-native-app-boilerplate",
+                        "clone_url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git",
+                    },
+                    {
+                        "id": 2001,
+                        "name": "good-repo",
+                        "full_name": "BlackBearRevived/good-repo",
+                        "clone_url": "https://github.com/BlackBearRevived/good-repo.git",
+                    },
+                ]
+            },
+        )
+        mirrored = []
+
+        def fake_mirror(source, name, owner, *args, **kwargs):
+            mirrored.append(name)
+            if name == "manual-repo":
+                raise ValueError("source repository id mismatch")
+            return None
+
+        env = {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest", "MIRROR_TIMESTAMP_SECRET": "secret"}
+        stderr_buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_bytes(raw)
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
+                patch.object(cli, "SourceAPI", return_value=src),
+                patch.object(cli, "API", side_effect=[Mock(), dst]),
+                patch.object(cli, "mirror_repository", side_effect=fake_mirror),
+                redirect_stderr(stderr_buf),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "0 sources and 1 repositories failed"):
+                    cli.main(["--config", str(path)])
+
+        self.assertEqual(sorted(mirrored), ["good-repo", "manual-repo"])
+        self.assertIn("summary sources=3 discovery_failed=0 repositories=2 succeeded=1 failed=1", stderr_buf.getvalue())
+
 
 class RuleRelocationTests(unittest.TestCase):
     def test_github_relocation_rewrites_rule_and_children_in_one_cas_write_and_steady_state(self):
@@ -904,7 +1264,7 @@ class RuleRelocationTests(unittest.TestCase):
 
         log = stream.getvalue()
         self.assertIn("auto_discovery 1/1 (Alice): relocated to AliceNew", log)
-        self.assertIn("auto_discovery 1/1 (AliceNew): OK discovered=2 inducted=1 excluded=0 tracked=1", log)
+        self.assertIn("auto_discovery 1/1 (AliceNew): OK discovered=2 inducted=1 excluded=0 tracked=1 conflicts=0", log)
         self.assertNotIn("https://", log)
 
         # Steady-state re-run after relocation is a complete no-op.
@@ -928,7 +1288,7 @@ class RuleRelocationTests(unittest.TestCase):
         self.assertEqual(store.publish_calls, 1)
         self.assertEqual(dst.calls, [])
         self.assertNotIn("relocated to", steady_stream.getvalue())
-        self.assertIn("auto_discovery 1/1 (AliceNew): OK discovered=2 inducted=0 excluded=0 tracked=2", steady_stream.getvalue())
+        self.assertIn("auto_discovery 1/1 (AliceNew): OK discovered=2 inducted=0 excluded=0 tracked=2 conflicts=0", steady_stream.getvalue())
 
     def test_forgejo_and_gitlab_relocations_preserve_explicit_mirror_names(self):
         # Forgejo org rename

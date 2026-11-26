@@ -421,7 +421,7 @@ class ForgejoOnboardingEndToEndTests(unittest.TestCase):
         self.assertTrue(api.repos['mirror-alice-gamma']['private'])
         self.assertNotIn('mirror-Alice-skipme', by_name)
 
-        self.assertIn('auto_discovery 1/1 (Alice): OK discovered=4 inducted=3 excluded=1 tracked=0', stream.getvalue())
+        self.assertIn('auto_discovery 1/1 (Alice): OK discovered=4 inducted=3 excluded=1 tracked=0 conflicts=0', stream.getvalue())
         self.assertNotIn('https://', stream.getvalue())
         self.assertFalse(any('/actions/' in path for _, path, _ in api.calls))
 
@@ -435,7 +435,7 @@ class ForgejoOnboardingEndToEndTests(unittest.TestCase):
         self.assertEqual(api.replace_puts, 1)
         self.assertFalse(any(method == 'POST' for method, _, _ in api.calls))
         self.assertTrue(any(path.endswith('/contents/config.json?ref=refs/heads/main') for _, path, _ in api.calls))
-        self.assertIn('auto_discovery 1/1 (Alice): OK discovered=4 inducted=0 excluded=1 tracked=3', steady_stream.getvalue())
+        self.assertIn('auto_discovery 1/1 (Alice): OK discovered=4 inducted=0 excluded=1 tracked=3 conflicts=0', steady_stream.getvalue())
 
     def test_gitlab_public_source_respects_public_rule_visibility(self):
         doc = _base_doc(
@@ -764,7 +764,7 @@ class ForgejoScheduleIntegrationTests(unittest.TestCase):
                 ],
             )
             out = stdout.getvalue()
-            self.assertIn('auto_discovery 1/1 (Alice): OK discovered=1 inducted=1 excluded=0 tracked=0 missing_upstream=1', out)
+            self.assertIn('auto_discovery 1/1 (Alice): OK discovered=1 inducted=1 excluded=0 tracked=0 missing_upstream=1 conflicts=0', out)
             self.assertIn('orphaned child repository Alice/gone: destination mirror-Alice-gone untouched', out)
 
     def test_scheduler_refuses_groups_and_auto_discoveries_collision(self):
@@ -873,6 +873,112 @@ class ForgejoScheduleIntegrationTests(unittest.TestCase):
             self.assertEqual(status, 1)
             worker.assert_not_called()
             self.assertEqual(api.replace_puts, 0)
+
+    def test_scheduler_skips_conflicted_repository_and_continues(self):
+        conflicted_child = {
+            'source': {'url': 'https://github.com/BlackBearRevived/ps5-native-app-boilerplate', 'id': 1470348900},
+            'mirrors': {'forgejo-home': {'name': 'mirror-BlackBearRevived-ps5-native-app-boilerplate', 'id': 7001}},
+            'discovered_by': 'https://github.com/BlackBearRevived',
+        }
+        healthy_child = {
+            'source': {'url': 'https://github.com/BlackBearRevived/good-repo', 'id': 2001},
+            'mirrors': {'forgejo-home': {'name': 'mirror-BlackBearRevived-good-repo', 'id': 7002}},
+            'discovered_by': 'https://github.com/BlackBearRevived',
+        }
+        doc = _base_doc(
+            [{'url': 'https://github.com/BlackBearRevived', 'id': 42}],
+            [conflicted_child, healthy_child],
+        )
+        raw = _encode(doc)
+        api = FakeForgejoAPI(
+            owner='dest',
+            control_repo='dest/control',
+            control_files={
+                'config.json': raw,
+                'migrations.json': b'{"version": 1, "migrations": {}, "signatures": {}}',
+                'failures.json': b'{"version": 1, "journals": {}}\n',
+            },
+        )
+        src = FakeSourceAPI(
+            routes={'https://api.github.com/users/BlackBearRevived': {'id': 42, 'login': 'BlackBearRevived', 'type': 'User'}},
+            pages_routes={
+                'https://api.github.com/users/BlackBearRevived/repos?type=owner': [
+                    {
+                        'id': 1472677129,
+                        'name': 'ps5-native-app-boilerplate',
+                        'full_name': 'BlackBearRevived/ps5-native-app-boilerplate',
+                        'clone_url': 'https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git',
+                        'private': False,
+                    },
+                    {
+                        'id': 2001,
+                        'name': 'good-repo',
+                        'full_name': 'BlackBearRevived/good-repo',
+                        'clone_url': 'https://github.com/BlackBearRevived/good-repo.git',
+                        'private': False,
+                    },
+                ]
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'manifest').write_bytes(raw)
+            (root / 'secret').write_text('x' * 32)
+            (root / 'secret').chmod(0o600)
+            (root / 'token').write_text('forgejo-token')
+            (root / 'token').chmod(0o600)
+            (root / 'journal').mkdir(mode=0o700)
+
+            launched = []
+
+            def spawn(command, **kwargs):
+                launched.append(command[-1])
+                return Mock(poll=lambda: 0, pid=999999999, wait=lambda: 0)
+
+            stdout = io.StringIO()
+            with (
+                patch('repo_mirror.forgejo_control_config.ForgejoControlAPI', return_value=api),
+                patch('repo_mirror.forgejo_schedule._build_auto_discovery_source_client', return_value=lambda _: src),
+                patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=spawn),
+                redirect_stdout(stdout),
+            ):
+                status = forgejo_schedule.main(
+                    [
+                        'run',
+                        '--manifest',
+                        str(root / 'manifest'),
+                        '--token-file',
+                        str(root / 'token'),
+                        '--timestamp-secret-file',
+                        str(root / 'secret'),
+                        '--journal-dir',
+                        str(root / 'journal'),
+                        '--owner',
+                        'dest',
+                        '--lock',
+                        str(root / 'lock'),
+                        '--forgejo-config-repo',
+                        'dest/control',
+                        '--forgejo-config-id',
+                        '99',
+                    ]
+                )
+
+            self.assertEqual(status, 0, stdout.getvalue())
+            self.assertEqual(launched, ['https://github.com/BlackBearRevived/good-repo'])
+            self.assertEqual(api.replace_puts, 0)
+            out = stdout.getvalue()
+            self.assertIn(
+                'auto_discovery 1/1 (BlackBearRevived): repository ps5-native-app-boilerplate: '
+                'upstream identity changed (pinned id 1470348900, now 1472677129); '
+                'entry kept, not mirrored; remove the entry and re-add it to adopt',
+                out,
+            )
+            self.assertIn(
+                'auto_discovery 1/1 (BlackBearRevived): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1',
+                out,
+            )
 
 
 if __name__ == '__main__':

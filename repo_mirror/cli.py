@@ -244,6 +244,22 @@ def main(argv=None):
         plan.append((len(entries), entry, name))
     known_rules = {rule['url'] for rule in config.get('auto_discoveries', ())}
     plan = filter_plan(plan, selected_urls, case_insensitive=True, known_rules=known_rules)
+    if onboarding_result is not None and onboarding_result.conflicts:
+        from repo_mirror.auto_discoveries_onboarding import conflict_identity_keys
+        from repo_mirror.gitlab_onboarding_forgejo import group_origin_key
+
+        conflicted = conflict_identity_keys(onboarding_result.conflicts)
+        plan = [
+            (index, entry, name)
+            for index, entry, name in plan
+            if (
+                entry['type'],
+                group_origin_key(entry['base_url']),
+                entry['owner'].lower(),
+                name.lower(),
+                entry.get('mirror', {}).get('source_id'),
+            ) not in conflicted
+        ]
     if ignore_override != "keep":
         # A one-run override covers exactly the sources named in this run and is
         # never written back to the configuration.
