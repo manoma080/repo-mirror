@@ -86,16 +86,12 @@ def synchronize_snapshots(
     return True
 
 
-def create_archive(api, owner, mirror_name, account_type, timestamp):
-    """Create an empty private archive, and verify Actions is disabled."""
+def archive_name(mirror_name, timestamp):
+    """Return the archive repository name for ``mirror_name`` at ``timestamp``."""
     if (
-        not isinstance(owner, str)
-        or not NAME.fullmatch(owner)
-        or owner in (".", "..")
-        or not isinstance(mirror_name, str)
+        not isinstance(mirror_name, str)
         or not NAME.fullmatch(mirror_name)
         or mirror_name in (".", "..")
-        or account_type not in ("personal", "organization")
         or not isinstance(timestamp, str)
         or not re.fullmatch(r"\d{8}T\d{6}Z", timestamp)
     ):
@@ -103,14 +99,26 @@ def create_archive(api, owner, mirror_name, account_type, timestamp):
     suffix = "-wipe-" + timestamp
     if len(mirror_name) + len(suffix) > 100:
         suffix = "-" + hashlib.sha256(mirror_name.lower().encode()).hexdigest()[:16] + suffix
-    archive_name = mirror_name[: 100 - len(suffix)] + suffix
-    qowner, qname = quote(owner, safe=""), quote(archive_name, safe="")
+    return mirror_name[: 100 - len(suffix)] + suffix
+
+
+def create_archive(api, owner, mirror_name, account_type, timestamp):
+    """Create an empty private archive, and verify Actions is disabled."""
+    if (
+        not isinstance(owner, str)
+        or not NAME.fullmatch(owner)
+        or owner in (".", "..")
+        or account_type not in ("personal", "organization")
+    ):
+        raise ValueError("invalid archive identity")
+    target_name = archive_name(mirror_name, timestamp)
+    qowner, qname = quote(owner, safe=""), quote(target_name, safe="")
     target = f"{GITHUB}/repos/{qowner}/{qname}"
     endpoint = "/user/repos" if account_type == "personal" else f"/orgs/{qowner}/repos"
     created = api.request(
-        "POST", GITHUB + endpoint, {"name": archive_name, "private": True, "auto_init": False}
+        "POST", GITHUB + endpoint, {"name": target_name, "private": True, "auto_init": False}
     )
-    expected = (owner + "/" + archive_name).lower()
+    expected = (owner + "/" + target_name).lower()
     if (
         not isinstance(created, dict)
         or created.get("full_name", "").lower() != expected

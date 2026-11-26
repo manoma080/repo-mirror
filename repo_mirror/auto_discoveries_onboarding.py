@@ -2,6 +2,7 @@
 
 import copy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 import json
 import re
@@ -15,6 +16,7 @@ from repo_mirror.config_named import _normalize_auto_discoveries, normalize_conf
 from repo_mirror.constants import GITHUB, NAME
 from repo_mirror.forgejo_git import APIError, ForgejoDestination, LocalForgejoAPI, _name, _source_marker
 from repo_mirror.forgejo_sync import parse_manifest, parse_source
+from repo_mirror.git_sync import archive_name
 from repo_mirror.github_api import API as GitHubAPI, not_found
 from repo_mirror.gitlab_onboarding_forgejo import (
     gitlab_generated_name,
@@ -65,6 +67,15 @@ class IdentityConflict:
     name: str
     pinned_id: int
     discovered_id: int
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PlannedAdoption:
+    item: PlannedInduction
+    old_source_id: int
+    old_source_url: str
+    old_dest_id: int
 
 
 def conflict_identity_keys(conflicts):
@@ -89,6 +100,7 @@ class RulePlan:
     planned: tuple[PlannedInduction, ...]
     orphaned_children: tuple[tuple[str, str, str], ...]
     conflicts: tuple[IdentityConflict, ...] = ()
+    adoptions: tuple[PlannedAdoption, ...] = ()
     old_rule_url: str = ''
     old_owner: str = ''
     relocated_to: str | None = None
@@ -106,6 +118,7 @@ class OnboardingResult:
     orphaned_legacy: tuple[tuple[str, str, str], ...]
     inducted_total: int
     conflicts: tuple[IdentityConflict, ...] = ()
+    adopted_total: int = 0
     relocated_rules: tuple[tuple[str, str], ...] = ()
     active_group_bindings: frozenset[tuple[str, int, str]] = frozenset()
 
@@ -336,6 +349,58 @@ def _configured_child_dest_name(rule, child, profile, *, allow_forgejo_port=Fals
     return f"{rule['destination_name_prefix']}-{child_name}"
 
 
+def _utc_timestamp():
+    return datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')
+
+
+def _confirm_github_source_deleted(rule, pinned_id, api):
+    try:
+        data = api.request('GET', f"{source_api_base(rule)}/repositories/{pinned_id}")
+    except HTTPError as exc:
+        is_missing = not_found(exc)
+        exc.close()
+        if is_missing:
+            return 'deleted', None
+        return 'error', 'could not confirm upstream repository deletion'
+    except Exception:
+        return 'error', 'could not confirm upstream repository deletion'
+    if isinstance(data, dict):
+        return 'alive', None
+    return 'error', 'could not confirm upstream repository deletion'
+
+
+def _build_planned_induction(effective_rule, name, source_id, clone_url, full_name, source_is_public, runner):
+    ov = next((v for k, v in effective_rule['overrides'].items() if k.lower() == name.lower()), None)
+    dest_name = ov['name'] if (ov and 'name' in ov) else f"{effective_rule['destination_name_prefix']}-{name}"
+    if (
+        not isinstance(dest_name, str)
+        or not (1 <= len(dest_name) <= 100)
+        or not NAME.fullmatch(dest_name)
+        or dest_name in ('.', '..')
+        or _GENERATED.fullmatch(dest_name)
+    ):
+        raise ValueError('invalid destination repository name')
+    requested_visibility = ov['visibility'] if (ov and 'visibility' in ov) else effective_rule['visibility']
+    if runner == 'forgejo':
+        visibility = 'public' if (requested_visibility == 'public' and source_is_public) else 'private'
+    else:
+        visibility = requested_visibility
+    ignore_releases = ov['ignore_releases'] if (ov and 'ignore_releases' in ov) else effective_rule['ignore_releases']
+    return PlannedInduction(
+        name=name,
+        source_id=source_id,
+        clone_url=clone_url,
+        full_name=full_name,
+        dest_name=dest_name,
+        visibility=visibility,
+        ignore_releases=ignore_releases,
+        source_type=effective_rule['type'],
+        base_url=effective_rule['base_url'],
+        owner=effective_rule['owner'],
+        rule_url=effective_rule['url'],
+    )
+
+
 def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, api, *, runner='github', raw_index=None):
     allow_forgejo_port = runner == 'forgejo'
     from_groups = bool(rule.get('_from_groups'))
@@ -393,7 +458,8 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
     tracked_count = 0
     planned = []
     conflicts = []
-    conflicted_entry_ids = set()
+    adoptions = []
+    handled_entry_ids = set()
     active_bindings = []
 
     for name, source_id, clone_url, full_name, source_is_public in discovered:
@@ -445,17 +511,90 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
             pinned_id = matched.entry['source'].get('id')
             if type(pinned_id) is not int or pinned_id <= 0:
                 raise ValueError('source repository id mismatch or missing')
-            conflicts.append(
-                IdentityConflict(
-                    source_type=effective_rule['type'],
-                    base_url=effective_rule['base_url'],
-                    owner=effective_rule['owner'],
-                    name=name,
-                    pinned_id=pinned_id,
-                    discovered_id=source_id,
+
+            can_adopt = (
+                runner == 'github'
+                and effective_rule['type'] == 'github'
+                and not from_groups
+                and 'discovered_by' in matched.entry
+            )
+            if not can_adopt:
+                conflicts.append(
+                    IdentityConflict(
+                        source_type=effective_rule['type'],
+                        base_url=effective_rule['base_url'],
+                        owner=effective_rule['owner'],
+                        name=name,
+                        pinned_id=pinned_id,
+                        discovered_id=source_id,
+                    )
+                )
+                handled_entry_ids.add(id(matched.entry))
+                continue
+
+            status, reason = _confirm_github_source_deleted(effective_rule, pinned_id, api)
+            if status != 'deleted':
+                conflicts.append(
+                    IdentityConflict(
+                        source_type=effective_rule['type'],
+                        base_url=effective_rule['base_url'],
+                        owner=effective_rule['owner'],
+                        name=name,
+                        pinned_id=pinned_id,
+                        discovered_id=source_id,
+                        reason=None if status == 'alive' else reason,
+                    )
+                )
+                handled_entry_ids.add(id(matched.entry))
+                continue
+
+            derived_name = f"{effective_rule['destination_name_prefix']}-{name}"
+            ov = next((v for k, v in effective_rule['overrides'].items() if k.lower() == name.lower()), None)
+            mirror = matched.entry['mirrors'][profile]
+            configured_name = mirror.get('name')
+            if (ov is not None and 'name' in ov) or (configured_name is not None and configured_name != derived_name):
+                conflicts.append(
+                    IdentityConflict(
+                        source_type=effective_rule['type'],
+                        base_url=effective_rule['base_url'],
+                        owner=effective_rule['owner'],
+                        name=name,
+                        pinned_id=pinned_id,
+                        discovered_id=source_id,
+                        reason='cannot adopt a repository with a configured destination name',
+                    )
+                )
+                handled_entry_ids.add(id(matched.entry))
+                continue
+
+            old_dest_id = mirror.get('id')
+            if type(old_dest_id) is not int or old_dest_id <= 0:
+                conflicts.append(
+                    IdentityConflict(
+                        source_type=effective_rule['type'],
+                        base_url=effective_rule['base_url'],
+                        owner=effective_rule['owner'],
+                        name=name,
+                        pinned_id=pinned_id,
+                        discovered_id=source_id,
+                        reason='cannot adopt a repository without a pinned destination id',
+                    )
+                )
+                handled_entry_ids.add(id(matched.entry))
+                continue
+
+            item = _build_planned_induction(
+                effective_rule, name, source_id, clone_url, full_name, source_is_public, runner
+            )
+            adoptions.append(
+                PlannedAdoption(
+                    item=item,
+                    old_source_id=pinned_id,
+                    old_source_url=matched.entry['source']['url'],
+                    old_dest_id=old_dest_id,
                 )
             )
-            conflicted_entry_ids.add(id(matched.entry))
+            handled_entry_ids.add(id(matched.entry))
             continue
 
         if from_groups:
@@ -463,43 +602,32 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
             visibility = 'private'
             ignore_releases = False
             active_bindings.append((f"{effective_rule['base_url']}/{effective_rule['owner']}/{name}", source_id, dest_name))
-        else:
-            ov = next((v for k, v in effective_rule['overrides'].items() if k.lower() == name.lower()), None)
-            dest_name = ov['name'] if (ov and 'name' in ov) else f"{effective_rule['destination_name_prefix']}-{name}"
-            if (
-                not isinstance(dest_name, str)
-                or not (1 <= len(dest_name) <= 100)
-                or not NAME.fullmatch(dest_name)
-                or dest_name in ('.', '..')
-                or _GENERATED.fullmatch(dest_name)
-            ):
-                raise ValueError('invalid destination repository name')
-            requested_visibility = ov['visibility'] if (ov and 'visibility' in ov) else effective_rule['visibility']
-            if runner == 'forgejo':
-                visibility = 'public' if (requested_visibility == 'public' and source_is_public) else 'private'
-            else:
-                visibility = requested_visibility
-            ignore_releases = ov['ignore_releases'] if (ov and 'ignore_releases' in ov) else effective_rule['ignore_releases']
-        planned.append(
-            PlannedInduction(
-                name=name,
-                source_id=source_id,
-                clone_url=clone_url,
-                full_name=full_name,
-                dest_name=dest_name,
-                visibility=visibility,
-                ignore_releases=ignore_releases,
-                source_type=effective_rule['type'],
-                base_url=effective_rule['base_url'],
-                owner=effective_rule['owner'],
-                rule_url=effective_rule['url'],
+            planned.append(
+                PlannedInduction(
+                    name=name,
+                    source_id=source_id,
+                    clone_url=clone_url,
+                    full_name=full_name,
+                    dest_name=dest_name,
+                    visibility=visibility,
+                    ignore_releases=ignore_releases,
+                    source_type=effective_rule['type'],
+                    base_url=effective_rule['base_url'],
+                    owner=effective_rule['owner'],
+                    rule_url=effective_rule['url'],
+                )
             )
-        )
+        else:
+            planned.append(
+                _build_planned_induction(
+                    effective_rule, name, source_id, clone_url, full_name, source_is_public, runner
+                )
+            )
 
     raw_discovered_ids = {source_id for _, source_id, _, _, _ in discovered}
     orphaned_children = []
     for child in rule_children:
-        if id(child) in conflicted_entry_ids:
+        if id(child) in handled_entry_ids:
             continue
         if child['source'].get('id') not in raw_discovered_ids:
             _, _, c_owner, c_name = parse_repo_url(
@@ -526,6 +654,7 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
         planned=tuple(planned),
         orphaned_children=tuple(orphaned_children),
         conflicts=tuple(conflicts),
+        adoptions=tuple(adoptions),
         old_rule_url=old_rule_url,
         old_owner=old_owner,
         relocated_to=relocated_to,
@@ -631,6 +760,27 @@ class GitHubDestinationOnboardingAdapter:
             raise ValueError('created destination repository identity not verified')
         if marker is not None:
             check_existing(readback, marker)
+        return readback
+
+    def rename_repository(self, old_name, new_name, *, expected_id):
+        patched = self.dst.request('PATCH', self._repo_target(old_name), {'name': new_name})
+        if (
+            not isinstance(patched, dict)
+            or type(patched.get('id')) is not int
+            or patched['id'] != expected_id
+            or patched.get('name') != new_name
+            or str(patched.get('full_name', '')).lower() != (self.owner + '/' + new_name).lower()
+        ):
+            raise ValueError('adoption destination rename verification failed')
+        readback = self.get_repository(new_name)
+        if (
+            not isinstance(readback, dict)
+            or type(readback.get('id')) is not int
+            or readback['id'] != expected_id
+            or readback.get('name') != new_name
+            or str(readback.get('full_name', '')).lower() != (self.owner + '/' + new_name).lower()
+        ):
+            raise ValueError('adoption destination rename verification failed')
         return readback
 
 
@@ -813,6 +963,20 @@ def _log_rule_failure(rule_plan, exc, stream):
     )
 
 
+def _remove_adopted_entries(repositories, rule_plan, adoptions):
+    for adoption in adoptions:
+        matches = [
+            idx
+            for idx, entry in enumerate(repositories)
+            if entry.get('discovered_by') == rule_plan.old_rule_url
+            and entry.get('source', {}).get('id') == adoption.old_source_id
+            and entry.get('source', {}).get('url') == adoption.old_source_url
+        ]
+        if len(matches) != 1:
+            raise ValueError('authoritative configuration differs from checkout')
+        del repositories[matches[0]]
+
+
 def _prevalidate_plans(raw_config, profile, plans, destination_adapter, stream, *, runner='github'):
     allow_forgejo_port = runner == 'forgejo'
     rules_by_url = {plan.rule['url']: plan.rule for plan in plans}
@@ -822,6 +986,8 @@ def _prevalidate_plans(raw_config, profile, plans, destination_adapter, stream, 
     for rule_plan in plans:
         if rule_plan.from_groups:
             continue
+        if rule_plan.adoptions:
+            _remove_adopted_entries(projected['repositories'], rule_plan, rule_plan.adoptions)
         if rule_plan.needs_id_pin:
             projected['auto_discoveries'][rule_plan.raw_index]['id'] = rule_plan.owner_id
         if rule_plan.relocated_to is not None:
@@ -844,7 +1010,7 @@ def _prevalidate_plans(raw_config, profile, plans, destination_adapter, stream, 
         projected, profile, rules_by_url, forgejo=allow_forgejo_port
     )
     for rule_plan in plans:
-        for item in rule_plan.planned:
+        for item in (*rule_plan.planned, *(adoption.item for adoption in rule_plan.adoptions)):
             key = item.dest_name.lower()
             if key in existing_dests or key in planned_dests:
                 exc = ValueError('duplicate destination repository')
@@ -882,7 +1048,39 @@ def _create_destination(item, destination_adapter):
     return created_id
 
 
-def _publish_rule(store, config_bytes, rule_plan, created_entries, profile, *, runner='github'):
+def _archive_existing_destination(adoption, destination_adapter, stamp):
+    existing = destination_adapter.get_repository(adoption.item.dest_name)
+    if existing is None:
+        return None
+    if (
+        not isinstance(existing, dict)
+        or type(existing.get('id')) is not int
+        or existing['id'] != adoption.old_dest_id
+        or str(existing.get('full_name', '')).lower()
+        != f"{destination_adapter.owner}/{adoption.item.dest_name}".lower()
+    ):
+        raise ValueError('adoption destination identity mismatch')
+    target_archive = archive_name(adoption.item.dest_name, stamp)
+    if destination_adapter.get_repository(target_archive) is not None:
+        raise ValueError('adoption archive name already exists')
+    destination_adapter.rename_repository(
+        adoption.item.dest_name,
+        target_archive,
+        expected_id=adoption.old_dest_id,
+    )
+    return target_archive
+
+
+def _publish_rule(
+    store,
+    config_bytes,
+    rule_plan,
+    created_entries,
+    profile,
+    *,
+    runner='github',
+    removed_adoptions=(),
+):
     allow_forgejo_port = runner == 'forgejo'
     current, sha = store.read()
     if current != config_bytes:
@@ -905,6 +1103,8 @@ def _publish_rule(store, config_bytes, rule_plan, created_entries, profile, *, r
             raw_rule['id'] = rule_plan.owner_id
         elif raw_rule.get('id') != rule_plan.owner_id:
             raise ValueError('source owner identity mismatch')
+        if removed_adoptions:
+            _remove_adopted_entries(doc['repositories'], rule_plan, removed_adoptions)
         if rule_plan.relocated_to is not None:
             raw_rule['url'] = rule_plan.rule['url']
             if rule_plan.preserve_prefix is not None:
@@ -969,6 +1169,7 @@ def onboard_auto_discoveries(
     destination_adapter=None,
     runner='github',
     emit_group_warnings=True,
+    archive_timestamp=None,
 ):
     """Run fail-closed discovery, destination creation, and per-rule CAS publication."""
     stream = sys.stderr if stream is None else stream
@@ -1010,35 +1211,83 @@ def onboard_auto_discoveries(
 
     any_writes = False
     inducted_total = 0
+    adopted_total = 0
     all_orphaned_children = []
     all_conflicts = []
     rule_reports = []
     relocated_rules = []
     for rule_plan in plans:
-        if rule_plan.planned or rule_plan.needs_id_pin or rule_plan.relocated_to is not None:
+        runtime_conflicts = list(rule_plan.conflicts)
+        ready_adoptions = []
+        adopted_records = []
+        renamed_any = False
+        if rule_plan.planned or rule_plan.adoptions or rule_plan.needs_id_pin or rule_plan.relocated_to is not None:
             if store.read()[0] != config_bytes:
                 exc = ValueError('authoritative configuration differs from checkout')
                 _log_rule_failure(rule_plan, exc, stream)
                 raise exc
+        if rule_plan.adoptions:
+            stamp = archive_timestamp if archive_timestamp is not None else _utc_timestamp()
+            for adoption in rule_plan.adoptions:
+                try:
+                    archived = _archive_existing_destination(adoption, destination_adapter, stamp)
+                except Exception:
+                    runtime_conflicts.append(
+                        IdentityConflict(
+                            source_type=adoption.item.source_type,
+                            base_url=adoption.item.base_url,
+                            owner=adoption.item.owner,
+                            name=adoption.item.name,
+                            pinned_id=adoption.old_source_id,
+                            discovered_id=adoption.item.source_id,
+                            reason='failed to archive existing destination',
+                        )
+                    )
+                    continue
+                ready_adoptions.append((adoption, archived))
+                if archived is not None:
+                    renamed_any = True
+
+        if rule_plan.planned or ready_adoptions or rule_plan.needs_id_pin or rule_plan.relocated_to is not None:
             attempted = []
             created_entries = []
+            removed_adoptions = [adoption for adoption, _ in ready_adoptions]
             try:
                 for item in rule_plan.planned:
                     attempted.append(item.dest_name)
                     dest_id = _create_destination(item, destination_adapter)
                     created_entries.append(_build_repository_entry(item, profile, dest_id, from_groups=rule_plan.from_groups))
+                for adoption, _ in ready_adoptions:
+                    attempted.append(adoption.item.dest_name)
+                    dest_id = _create_destination(adoption.item, destination_adapter)
+                    created_entries.append(
+                        _build_repository_entry(adoption.item, profile, dest_id, from_groups=rule_plan.from_groups)
+                    )
                 config_bytes = _publish_rule(
-                    store, config_bytes, rule_plan, created_entries, profile, runner=runner
+                    store,
+                    config_bytes,
+                    rule_plan,
+                    created_entries,
+                    profile,
+                    runner=runner,
+                    removed_adoptions=removed_adoptions,
                 )
             except Exception as exc:
-                if attempted:
+                if renamed_any:
+                    wrapped = PartialOnboarding(
+                        attempted,
+                        message='adoption publication failed; archived destinations left in place; reconcile manually',
+                    )
+                elif attempted:
                     wrapped = PartialOnboarding(attempted)
                 else:
                     wrapped = OnboardingPublicationError('auto-discovery onboarding publication failed; reconcile manually')
                 _log_rule_failure(rule_plan, wrapped, stream)
                 raise wrapped from exc
             any_writes = True
-            inducted_total += len(created_entries)
+            inducted_total += len(rule_plan.planned)
+            adopted_records = list(ready_adoptions)
+            adopted_total += len(adopted_records)
 
         if rule_plan.relocated_to is not None:
             reloc_line = (
@@ -1049,17 +1298,46 @@ def onboard_auto_discoveries(
             rule_reports.append(reloc_line)
             relocated_rules.append((rule_plan.old_rule_url, rule_plan.rule['url']))
 
-        for conflict in rule_plan.conflicts:
-            conflict_line = (
-                f"auto_discovery {rule_plan.index}/{rule_plan.total} "
-                f"({safe_label(rule_plan.rule['owner'])}): "
-                f"repository {safe_label(conflict.name)}: "
-                f"upstream identity changed (pinned id {conflict.pinned_id}, now {conflict.discovered_id}); "
-                f"entry kept, not mirrored; remove the entry and re-add it to adopt"
-            )
+        for adoption, archived_name in adopted_records:
+            if archived_name is not None:
+                adopted_line = (
+                    f"auto_discovery {rule_plan.index}/{rule_plan.total} "
+                    f"({safe_label(rule_plan.rule['owner'])}): "
+                    f"repository {safe_label(adoption.item.name)}: "
+                    f"upstream recreated (pinned id {adoption.old_source_id}, now {adoption.item.source_id}); "
+                    f"archived as {safe_label(archived_name)}; adopted"
+                )
+            else:
+                adopted_line = (
+                    f"auto_discovery {rule_plan.index}/{rule_plan.total} "
+                    f"({safe_label(rule_plan.rule['owner'])}): "
+                    f"repository {safe_label(adoption.item.name)}: "
+                    f"upstream recreated (pinned id {adoption.old_source_id}, now {adoption.item.source_id}); "
+                    f"archived previously; adopted"
+                )
+            print(adopted_line, file=stream, flush=True)
+            rule_reports.append(adopted_line)
+
+        for conflict in runtime_conflicts:
+            if conflict.reason:
+                conflict_line = (
+                    f"auto_discovery {rule_plan.index}/{rule_plan.total} "
+                    f"({safe_label(rule_plan.rule['owner'])}): "
+                    f"repository {safe_label(conflict.name)}: "
+                    f"upstream identity changed (pinned id {conflict.pinned_id}, now {conflict.discovered_id}); "
+                    f"{conflict.reason}; entry kept, not mirrored"
+                )
+            else:
+                conflict_line = (
+                    f"auto_discovery {rule_plan.index}/{rule_plan.total} "
+                    f"({safe_label(rule_plan.rule['owner'])}): "
+                    f"repository {safe_label(conflict.name)}: "
+                    f"upstream identity changed (pinned id {conflict.pinned_id}, now {conflict.discovered_id}); "
+                    f"entry kept, not mirrored; remove the entry and re-add it to adopt"
+                )
             print(conflict_line, file=stream, flush=True)
             rule_reports.append(conflict_line)
-        all_conflicts.extend(rule_plan.conflicts)
+        all_conflicts.extend(runtime_conflicts)
 
         line = (
             f"auto_discovery {rule_plan.index}/{rule_plan.total} "
@@ -1071,7 +1349,7 @@ def onboard_auto_discoveries(
         )
         if rule_plan.missing_upstream_count > 0:
             line += f" missing_upstream={rule_plan.missing_upstream_count}"
-        line += f" conflicts={len(rule_plan.conflicts)}"
+        line += f" conflicts={len(runtime_conflicts)} adopted={len(adopted_records)}"
         print(line, file=stream, flush=True)
         rule_reports.append(line)
         all_orphaned_children.extend(rule_plan.orphaned_children)
@@ -1097,6 +1375,7 @@ def onboard_auto_discoveries(
         orphaned_legacy=orphaned_legacy,
         inducted_total=inducted_total,
         conflicts=tuple(all_conflicts),
+        adopted_total=adopted_total,
         relocated_rules=tuple(relocated_rules),
         active_group_bindings=all_active_group_bindings,
     )
