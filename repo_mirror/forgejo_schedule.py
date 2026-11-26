@@ -26,7 +26,7 @@ from repo_mirror.forgejo_sync import (HELPER_PATH_REQUIRED, INACTIVE_FIELDS, INA
                                       SAFE_REASONS, SOURCE_APP_OWNER_REQUIRED, parse_asset_max_bytes,
                                       parse_manifest, resolve_source_app_owner)
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
-from repo_mirror.logging_utils import safe_label
+from repo_mirror.logging_utils import error_detail, safe_label
 from repo_mirror.migrations_store import FileMigrations, MigrationsStore
 
 SOURCE = re.compile(r'https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}')
@@ -341,8 +341,9 @@ def main(argv=None):
                     else:
                         recorded = MigrationsStore(FileMigrations(os.path.join(args.journal_dir, 'migrations.json')),
                                                    secret).pending()
-                except (OSError, ValueError, TypeError):
-                    print('Batch configuration or lock error', file=sys.stderr)
+                except (OSError, ValueError, TypeError) as exc:
+                    detail = error_detail(exc)
+                    print(f'Batch configuration or lock error: {detail}' if detail else 'Batch configuration or lock error', file=sys.stderr)
                     return 2
                 if groups:
                     translate_groups(sources, stream=sys.stdout)
@@ -693,7 +694,8 @@ def main(argv=None):
         if type(exc) is ValueError and str(exc) in (SOURCE_APP_OWNER_REQUIRED, INSTALLATION_ID_REQUIRED, HELPER_PATH_REQUIRED):
             print(str(exc), file=sys.stderr)
         else:
-            print('Batch configuration or lock error', file=sys.stderr)
+            detail = error_detail(exc)
+            print(f'Batch configuration or lock error: {detail}' if detail else 'Batch configuration or lock error', file=sys.stderr)
         return 2
 
 
