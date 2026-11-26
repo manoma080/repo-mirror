@@ -457,7 +457,7 @@ class AutoUpdateIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, _clean_env(MIRROR_APP_INSTALLATION='123456'), clear=True):
             tmp = Path(directory)
             stderr = io.StringIO()
-            with redirect_stderr(stderr):
+            with patch.object(updater, '__file__', str(tmp / 'auto_update.py')), redirect_stderr(stderr):
                 rc = updater.main([
                     '--remote', str(tmp), '--state-dir', str(tmp / 'state'),
                     '--job-lock', str(tmp / 'job.lock'), '--', '--lock', str(tmp / 'sched.lock'),

@@ -587,12 +587,38 @@ def checked_process(command, *, cwd, env, lock_fd, quiet=True, scheduler=False):
     return status if status >= 0 else 128 - status
 
 
+def resolve_helper_path(helper_arg):
+    if helper_arg is None:
+        candidate = Path(__file__).resolve().with_name('github_app.py')
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            raise ValueError(HELPER_PATH_REQUIRED)
+        helper = str(candidate)
+    else:
+        helper = helper_arg
+        if not helper:
+            raise ValueError(HELPER_PATH_REQUIRED)
+        if '\n' in helper or '\r' in helper or helper.startswith('-'):
+            raise ValueError('helper')
+        try:
+            info = os.lstat(helper)
+        except OSError:
+            raise ValueError('helper')
+        helper = os.path.abspath(helper)
+    if '\n' in helper or '\r' in helper or helper.startswith('-'):
+        raise ValueError('helper')
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise ValueError('helper')
+    return helper
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--remote', required=True, help='trusted repository URL or local path')
     parser.add_argument('--state-dir', required=True, help='private directory for temporary snapshots')
     parser.add_argument('--job-lock', required=True, help='distinct from scheduler --lock')
-    parser.add_argument('--helper', help='path to the GitHub App helper script')
+    parser.add_argument('--helper', help='path to the GitHub App helper script (default: sibling github_app.py)')
     parser.add_argument('--helper-python', default=sys.executable, help='Python with PyJWT installed for the GitHub App helper')
     parser.add_argument('--installation')
     parser.add_argument('--app-id')
@@ -609,13 +635,10 @@ def main(argv=None):
             raise ValueError('GitHub App installation id is required')
         if not re.fullmatch(r'[0-9]+', installation):
             raise ValueError('installation')
-        if not args.helper:
-            raise ValueError(HELPER_PATH_REQUIRED)
-        if '\n' in args.helper or '\r' in args.helper or args.helper.startswith('-'):
-            raise ValueError('helper')
+        helper = resolve_helper_path(args.helper)
         if bool(args.app_id) != bool(args.private_key_file):
             raise ValueError('incomplete app credentials')
-        helper_prefix = [args.helper_python, args.helper]
+        helper_prefix = [args.helper_python, helper]
         if args.app_id:
             helper_prefix += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
         helper_prefix += ['--installation', installation, 'run', '--']
