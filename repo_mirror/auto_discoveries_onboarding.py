@@ -58,6 +58,24 @@ class PlannedInduction:
 
 
 @dataclass(frozen=True)
+class IdentityConflict:
+    source_type: str
+    base_url: str
+    owner: str
+    name: str
+    pinned_id: int
+    discovered_id: int
+
+
+def conflict_identity_keys(conflicts):
+    """Return normalized identity keys for conflicted entries skipped from mirroring."""
+    return frozenset(
+        (c.source_type, group_origin_key(c.base_url), c.owner.lower(), c.name.lower(), c.pinned_id)
+        for c in conflicts
+    )
+
+
+@dataclass(frozen=True)
 class RulePlan:
     index: int
     total: int
@@ -70,6 +88,7 @@ class RulePlan:
     missing_upstream_count: int
     planned: tuple[PlannedInduction, ...]
     orphaned_children: tuple[tuple[str, str, str], ...]
+    conflicts: tuple[IdentityConflict, ...] = ()
     old_rule_url: str = ''
     old_owner: str = ''
     relocated_to: str | None = None
@@ -86,6 +105,7 @@ class OnboardingResult:
     orphaned_children: tuple[tuple[str, str, str], ...]
     orphaned_legacy: tuple[tuple[str, str, str], ...]
     inducted_total: int
+    conflicts: tuple[IdentityConflict, ...] = ()
     relocated_rules: tuple[tuple[str, str], ...] = ()
     active_group_bindings: frozenset[tuple[str, int, str]] = frozenset()
 
@@ -372,6 +392,8 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
     excluded_count = 0
     tracked_count = 0
     planned = []
+    conflicts = []
+    conflicted_entry_ids = set()
     active_bindings = []
 
     for name, source_id, clone_url, full_name, source_is_public in discovered:
@@ -413,7 +435,28 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
             if (group_origin_key(rec.base), rec.owner.lower(), rec.name.lower()) == url_identity
         ]
         if url_matches:
-            raise ValueError('source repository id mismatch or missing')
+            if len(url_matches) > 1:
+                raise ValueError('existing source mapping conflicts')
+            matched = url_matches[0]
+            if matched.kind != effective_rule['type']:
+                raise ValueError('existing source mapping conflicts')
+            if 'discovered_by' in matched.entry and matched.entry['discovered_by'] != old_rule_url:
+                raise ValueError('existing source mapping conflicts')
+            pinned_id = matched.entry['source'].get('id')
+            if type(pinned_id) is not int or pinned_id <= 0:
+                raise ValueError('source repository id mismatch or missing')
+            conflicts.append(
+                IdentityConflict(
+                    source_type=effective_rule['type'],
+                    base_url=effective_rule['base_url'],
+                    owner=effective_rule['owner'],
+                    name=name,
+                    pinned_id=pinned_id,
+                    discovered_id=source_id,
+                )
+            )
+            conflicted_entry_ids.add(id(matched.entry))
+            continue
 
         if from_groups:
             dest_name = gitlab_generated_name(effective_rule['base_url'], owner_info['id'], source_id)
@@ -456,6 +499,8 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
     raw_discovered_ids = {source_id for _, source_id, _, _, _ in discovered}
     orphaned_children = []
     for child in rule_children:
+        if id(child) in conflicted_entry_ids:
+            continue
         if child['source'].get('id') not in raw_discovered_ids:
             _, _, c_owner, c_name = parse_repo_url(
                 child['source']['url'],
@@ -480,6 +525,7 @@ def _plan_rule(rule_index, total_rules, rule, raw_rule, profile, repositories, a
         missing_upstream_count=len(orphaned_children),
         planned=tuple(planned),
         orphaned_children=tuple(orphaned_children),
+        conflicts=tuple(conflicts),
         old_rule_url=old_rule_url,
         old_owner=old_owner,
         relocated_to=relocated_to,
@@ -882,7 +928,14 @@ def _publish_rule(store, config_bytes, rule_plan, created_entries, profile, *, r
     return after
 
 
-def _find_orphaned_legacy(raw_config, profile, *, allow_forgejo_port=False, active_group_bindings=frozenset()):
+def _find_orphaned_legacy(
+    raw_config,
+    profile,
+    *,
+    allow_forgejo_port=False,
+    active_group_bindings=frozenset(),
+    conflicted_keys=frozenset(),
+):
     orphans = []
     for entry in raw_config['repositories']:
         if 'discovered_by' in entry:
@@ -892,11 +945,13 @@ def _find_orphaned_legacy(raw_config, profile, *, allow_forgejo_port=False, acti
             continue
         if (entry['source']['url'], entry['source'].get('id'), mirror_name) in active_group_bindings:
             continue
-        kind, _, owner, name = parse_repo_url(
+        kind, base, owner, name = parse_repo_url(
             entry['source']['url'],
             source_type=entry['source'].get('type'),
             allow_forgejo_port=allow_forgejo_port,
         )
+        if (kind, group_origin_key(base), owner.lower(), name.lower(), entry['source'].get('id')) in conflicted_keys:
+            continue
         if kind == 'gitlab':
             orphans.append((owner, name, mirror_name))
     return tuple(orphans)
@@ -956,6 +1011,7 @@ def onboard_auto_discoveries(
     any_writes = False
     inducted_total = 0
     all_orphaned_children = []
+    all_conflicts = []
     rule_reports = []
     relocated_rules = []
     for rule_plan in plans:
@@ -993,6 +1049,18 @@ def onboard_auto_discoveries(
             rule_reports.append(reloc_line)
             relocated_rules.append((rule_plan.old_rule_url, rule_plan.rule['url']))
 
+        for conflict in rule_plan.conflicts:
+            conflict_line = (
+                f"auto_discovery {rule_plan.index}/{rule_plan.total} "
+                f"({safe_label(rule_plan.rule['owner'])}): "
+                f"repository {safe_label(conflict.name)}: "
+                f"upstream identity changed (pinned id {conflict.pinned_id}, now {conflict.discovered_id}); "
+                f"entry kept, not mirrored; remove the entry and re-add it to adopt"
+            )
+            print(conflict_line, file=stream, flush=True)
+            rule_reports.append(conflict_line)
+        all_conflicts.extend(rule_plan.conflicts)
+
         line = (
             f"auto_discovery {rule_plan.index}/{rule_plan.total} "
             f"({safe_label(rule_plan.rule['owner'])}): OK "
@@ -1003,6 +1071,7 @@ def onboard_auto_discoveries(
         )
         if rule_plan.missing_upstream_count > 0:
             line += f" missing_upstream={rule_plan.missing_upstream_count}"
+        line += f" conflicts={len(rule_plan.conflicts)}"
         print(line, file=stream, flush=True)
         rule_reports.append(line)
         all_orphaned_children.extend(rule_plan.orphaned_children)
@@ -1019,6 +1088,7 @@ def onboard_auto_discoveries(
         profile,
         allow_forgejo_port=(runner == 'forgejo'),
         active_group_bindings=all_active_group_bindings,
+        conflicted_keys=conflict_identity_keys(all_conflicts),
     )
     return OnboardingResult(
         config_bytes=config_bytes,
@@ -1026,6 +1096,7 @@ def onboard_auto_discoveries(
         orphaned_children=tuple(all_orphaned_children),
         orphaned_legacy=orphaned_legacy,
         inducted_total=inducted_total,
+        conflicts=tuple(all_conflicts),
         relocated_rules=tuple(relocated_rules),
         active_group_bindings=all_active_group_bindings,
     )

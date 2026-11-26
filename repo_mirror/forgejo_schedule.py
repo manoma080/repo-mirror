@@ -380,8 +380,14 @@ def main(argv=None):
                         print(f'{label}: FAILED: pending migration requires reconciliation', flush=True)
                         return 1
                     try:
-                        from repo_mirror.auto_discoveries_onboarding import PartialOnboarding, onboard_auto_discoveries_forgejo
+                        from repo_mirror.adhoc import parse_repo_url
+                        from repo_mirror.auto_discoveries_onboarding import (
+                            PartialOnboarding,
+                            conflict_identity_keys,
+                            onboard_auto_discoveries_forgejo,
+                        )
                         from repo_mirror.forgejo_git import LocalForgejoAPI
+                        from repo_mirror.gitlab_onboarding_forgejo import group_origin_key
                         if transaction is None:
                             transaction = forgejo_migration.build_migration(args, secret)
                         if transaction is None:
@@ -405,8 +411,23 @@ def main(argv=None):
                         worker_manifest = {k: v for k, v in expanded.items() if k != 'groups'}
                         profile = next(iter(expanded['destinations']))
                         active_bindings = onboarding_result.active_group_bindings
+                        conflicted = conflict_identity_keys(onboarding_result.conflicts)
                         def scheduled_auto(repo):
                             source = repo['source']
+                            if conflicted:
+                                kind, base, repo_owner, repo_name = parse_repo_url(
+                                    source['url'],
+                                    source_type=source.get('type'),
+                                    allow_forgejo_port=True,
+                                )
+                                if (
+                                    kind,
+                                    group_origin_key(base),
+                                    repo_owner.lower(),
+                                    repo_name.lower(),
+                                    source.get('id'),
+                                ) in conflicted:
+                                    return False
                             name = repo['mirrors'][profile].get('name', '')
                             if source.get('type') == 'gitlab' and re.fullmatch(r'gitlab-[0-9a-f]{24}', name):
                                 return bool(repo.get('discovered_by')) or (source.get('url'), source.get('id'), name) in active_bindings
