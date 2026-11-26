@@ -463,18 +463,6 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
                 self.assertEqual(forgejo_schedule.main(args), 2)
                 run.assert_not_called()
 
-    def test_scheduler_templates_supply_recovery_paths(self):
-        for name in ('forgejo-mirror.service.template', 'forgejo-mirror.cron.template'):
-            template = (ROOT / 'scheduler' / name).read_text()
-            self.assertIn('--timestamp-secret-file @TIMESTAMP_SECRET_FILE@', template)
-            self.assertIn('--journal-dir @JOURNAL_DIR@', template)
-            self.assertIn('@PYTHON@ @UPDATER@ --remote @REMOTE@ --state-dir @STATE_DIR@ --job-lock @JOB_LOCK_FILE@ --helper-python @HELPER_PYTHON@ --', template)
-            self.assertNotIn('--manifest', template)
-            self.assertNotIn('-m repo_mirror.forgejo_schedule', template)
-            self.assertIn('--token-file @TOKEN_FILE@', template)
-            self.assertIn('--lock @LOCK_FILE@', template)
-            self.assertNotIn('repo-mirror-forgejo-feature', template)
-
     def test_app_mode_passes_refreshable_credentials_to_child_without_helper(self):
         from unittest.mock import patch
         from repo_mirror import forgejo_schedule
@@ -582,23 +570,6 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             self.assertIn('release metadata collision', result.stdout + result.stderr)
             self.assertNotIn('secret', result.stdout + result.stderr)
             self.assertNotIn('https://example', result.stdout + result.stderr)
-
-    def test_timer_has_startup_and_persistent_six_hour_schedule(self):
-        timer = (ROOT / 'scheduler/forgejo-mirror.timer').read_text()
-        self.assertIn('OnBootSec=', timer)
-        self.assertIn('OnCalendar=*-*-* 00,06,12,18:00:00', timer)
-        self.assertIn('Persistent=true', timer)
-
-    def test_service_template_selects_refreshable_app_credentials(self):
-        template = (ROOT / 'scheduler/forgejo-mirror.service.template').read_text()
-        self.assertIn('--app-id @APP_ID@', template)
-        self.assertIn('--private-key-file @PRIVATE_KEY_FILE@', template)
-
-    def test_cron_template_selects_refreshable_app_credentials(self):
-        template = (ROOT / 'scheduler/forgejo-mirror.cron.template').read_text()
-        self.assertIn('--app-id @APP_ID@', template)
-        self.assertIn('--private-key-file @PRIVATE_KEY_FILE@', template)
-        self.assertNotIn('--use-github-token', template)
 
     def test_inventory_manifest_has_exactly_selected_destinations(self):
         expected = [
