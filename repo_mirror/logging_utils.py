@@ -228,6 +228,28 @@ SAFE_ERROR_MESSAGES = frozenset(
         "migration source identity mismatch",
         *ReleaseRecoveryError.MESSAGES.values(),
         "starter release asset detected; manually remove the starter asset from the pending GitHub release, then rerun",
+        # Scheduler and sync fixed configuration errors.
+        "invalid local configuration authority",
+        "invalid manual dispatch",
+        "Forgejo asset byte limit must be configured",
+        "destination account type mismatch",
+        "invalid installation or port",
+        "invalid repository timeout",
+        "incomplete app credentials",
+        "invalid configuration repository",
+        "invalid recovery secret file",
+        "recovery secret too short",
+        "recovery secret must be separate",
+        "invalid journal directory",
+        "lock must be an owner-only regular file",
+        "configuration changed since fetch",
+        "invalid port",
+        "invalid source URL",
+        "duplicate configured source",
+        "duplicate requested source",
+        "conflicting destination",
+        "requested source not exactly configured",
+        "invalid GitHub App configuration",
     }
 )
 
