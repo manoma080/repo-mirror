@@ -11,6 +11,7 @@ from mirror_test_support import patch_everywhere
 from test_reconcile_assets import SOURCE, Destination, Source
 
 import mirror
+from repo_mirror.git_sync import archive_name
 
 
 class LogSecretsTests(unittest.TestCase):
@@ -79,3 +80,55 @@ class LogSecretsTests(unittest.TestCase):
         self.assertNotIn("secret", mirror.error_detail(raised.exception))
         self.assertIn("HTTP 403", output.getvalue())
         self.assertNotIn("secret", output.getvalue())
+
+    def test_safe_label_allows_plain_and_hashed_archive_names(self):
+        plain = "mirror-BlackBearRevived-ps5-native-app-boilerplate-wipe-20261126T072618Z"
+        hashed_explicit = "mirror-BlackBearRevived-ps5-native-app-boilerplate-0123456789abcdef-wipe-20261126T072618Z"
+        hashed_generated = archive_name(
+            "mirror-BlackBearRevived-ps5-native-app-boilerplate-extended-edition-for-testing-long",
+            "20261126T072618Z",
+        )
+        self.assertEqual(len(hashed_generated), 100)
+        self.assertRegex(hashed_generated, r"-[0-9a-f]{16}-wipe-20261126T072618Z\Z")
+        for value in (plain, hashed_explicit, hashed_generated):
+            with self.subTest(value=value):
+                self.assertEqual(mirror.safe_label(value), value)
+
+    def test_safe_label_redacts_high_entropy_with_non_archive_suffix_or_secret_prefix(self):
+        for value in (
+            "mX9qR-2pL7v-K4nT8-wZ3bJ-0cY5-snap-987654",
+            "mirror-BlackBearRevived-ps5-app-bak-20261126T072618Z",
+            "aB7cD-9eF2g-H4iJ6-kL8mN-0pQ3r-S5tU7-vWxYz-wipe-20261126T072618Z",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(mirror.safe_label(value), "[redacted]")
+
+    def test_safe_label_preserves_existing_redaction_rules(self):
+        for value in (
+            "ghp_" + "A" * 36,
+            "github_pat_" + "A" * 40,
+            "aB7cD9eF2gH4iJ6kL8mN0pQ3rS5tU7vW",
+            "a" * 32 + "-wipe-20261126T072618Z",
+            "mirror-secret-repo-wipe-20261126T072618Z",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(mirror.safe_label(value), "[redacted]")
+
+        archive_like_secret = "mirror-BlackBearRevived-ps5-native-app-boilerplate-wipe-20261126T072618Z"
+        with patch.dict(
+            os.environ,
+            {
+                "GH_TOKEN": "gh-env-secret-value-123456",
+                "MIRROR_TIMESTAMP_SECRET": archive_like_secret,
+            },
+        ):
+            self.assertEqual(mirror.safe_label("gh-env-secret-value-123456"), "[redacted]")
+            self.assertEqual(mirror.safe_label(archive_like_secret), "[redacted]")
+
+    def test_safe_label_redacts_archive_suffix_only(self):
+        for value in (
+            "-wipe-20261126T072618Z",
+            "-0123456789abcdef-wipe-20261126T072618Z",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(mirror.safe_label(value), "[redacted]")
