@@ -64,6 +64,39 @@ class GitLabTokenTests(unittest.TestCase):
         self.assertEqual(seen[0].get_header('Private-token'), 'glpat-example')
         self.assertIsNone(seen[1].get_header('Private-token'))
 
+    def test_empty_env_gitlab_token_mirrors_gitlab_com_without_raising(self):
+        from repo_mirror import repository
+        from repo_mirror.sources import source_marker
+
+        source = {
+            'type': 'gitlab',
+            'base_url': 'https://gitlab.com',
+            'owner': 'g',
+            'mirror': {'source_id': 1, 'destination_id': 9},
+        }
+        destination = {
+            'id': 9,
+            'description': source_marker(source, 'p'),
+            'default_branch': 'main',
+        }
+        seen = []
+
+        class _Dst:
+            def request(self, method, url, data=None, **kwargs):
+                if '/releases' in url:
+                    return []
+                return destination
+
+        with patch.dict(os.environ, {'MIRROR_GITLAB_TOKEN': ''}, clear=False), \
+             patch('repo_mirror.gitlab_source_adapter.build_opener',
+                   return_value=_FakeOpener(seen, 'https://gitlab.com')), \
+             patch('repo_mirror.repository.mirror_git') as git:
+            repository.mirror_repository(source, 'p', 'dest', None, _Dst(), 'dest-token')
+
+        self.assertEqual(git.call_args.args[0], 'https://gitlab.com/g/p.git')
+        self.assertTrue(seen)
+        self.assertTrue(all(req.get_header('Private-token') is None for req in seen))
+
 
 class _FakeOpener:
     def __init__(self, seen, origin='https://gitlab.com'):
@@ -74,9 +107,9 @@ class _FakeOpener:
     def open(self, request, timeout=None):
         self.seen.append(request)
         body = {'id': 1, 'visibility': 'public', 'path_with_namespace': 'g/p',
-                'http_url_to_repo': self.origin + '/g/p.git'}
+                'http_url_to_repo': self.origin + '/g/p.git', 'default_branch': 'main'}
         url = request.full_url
-        if '/groups/' in url:
+        if '/groups/' in url or '/releases' in url:
             body = []
         response = _Response(body)
         response.geturl = lambda: url.split('/api/')[0] + '/api/v4/x'

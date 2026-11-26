@@ -148,6 +148,21 @@ github_api.API = API
         self.assertIn('--config "$MIRROR_CONFIG_DIR/config.json"', mirror)
         self.assertIn('--failures "$MIRROR_CONFIG_DIR/failures.json"', mirror)
 
+    def test_mirror_step_receives_gitlab_token_secret_only_in_mirror_step(self):
+        text = WORKFLOW.read_text()
+        mirror_step = text.split('      - name: Mirror\n', 1)[1].split('\n      - name:', 1)[0]
+        mirror_env = mirror_step.split('        env:\n', 1)[1].split('\n        run:', 1)[0]
+        non_comment_env_lines = [
+            line for line in mirror_env.splitlines()
+            if line.strip() and not line.lstrip().startswith('#')
+        ]
+        self.assertEqual(
+            non_comment_env_lines.count('          MIRROR_GITLAB_TOKEN: ${{ secrets.MIRROR_GITLAB_TOKEN }}'),
+            1,
+        )
+        self.assertNotIn('MIRROR_GITLAB_TOKEN', configure_step())
+        self.assertEqual(sum('MIRROR_GITLAB_TOKEN' in line for line in text.splitlines()), 1)
+
     def test_configuration_files_live_outside_this_repository(self):
         text = WORKFLOW.read_text()
         root = WORKFLOW.parents[2]
