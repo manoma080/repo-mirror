@@ -10,7 +10,7 @@ class ExactSnapshotTests(unittest.TestCase):
         oid = 'a' * 40
 
         class API:
-            base_url = 'http://127.0.0.1:3300'
+            base_url = 'http://127.0.0.1:3000'
 
             def token(self):
                 return 'local-secret'

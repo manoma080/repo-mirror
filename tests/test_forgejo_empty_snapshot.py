@@ -6,7 +6,7 @@ from repo_mirror.forgejo_git import ForgejoDestination, snapshot_refs, sync_refs
 
 
 class API:
-    base_url = 'http://127.0.0.1:3300'
+    base_url = 'http://127.0.0.1:3000'
 
     def __init__(self, state='initialized'):
         self.state = state

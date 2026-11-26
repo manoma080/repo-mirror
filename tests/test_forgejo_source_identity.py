@@ -10,8 +10,8 @@ class ForgejoSourceIdentityTests(unittest.TestCase):
                             forgejo_source_identity('https://forge.example/alice/project'))
 
     def test_github_identity_remains_unchanged(self):
-        self.assertEqual(parse_source('https://github.com/manoma080/mirror-demo'),
-                         'manoma080/mirror-demo')
+        self.assertEqual(parse_source('https://github.com/mirror-owner/mirror-demo'),
+                         'mirror-owner/mirror-demo')
 
     def test_rejects_credentials_query_and_github_policy_bypass(self):
         for url in ('https://user:password@codeberg.org/alice/project',

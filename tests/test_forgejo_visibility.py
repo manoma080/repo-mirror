@@ -95,7 +95,7 @@ class ForgejoVisibilityTests(unittest.TestCase):
                  patch('repo_mirror.forgejo_git.subprocess.run', side_effect=git), \
                  patch('repo_mirror.forgejo_sync.FailureJournal', wraps=FailureJournal) as open_journal, \
                  redirect_stderr(stderr), redirect_stdout(io.StringIO()):
-                code = main(['--config', str(config_path), '--source', SOURCE, '--owner', 'dest',
+                code = main(['--config', str(config_path), '--source', SOURCE, '--owner', 'dest', '--port', '3000',
                              '--token-file', str(token), '--timestamp-secret-file', str(secret),
                              '--journal-dir', str(journal), *extra_args])
             if journal_files is not None:
@@ -153,7 +153,7 @@ class ForgejoVisibilityTests(unittest.TestCase):
         self.assertEqual(repo['description'], MARKER + INITIALIZING)
         self.assertFalse(any('description' in payload for method, payload in mutations if method == 'PATCH'))
         self.assertTrue(git)
-        self.assertFalse(any('push' in args or 'http://127.0.0.1:3300/dest/copy.git' in args for args in git))
+        self.assertFalse(any('push' in args or 'http://127.0.0.1:3000/dest/copy.git' in args for args in git))
 
     def test_only_exact_visibility_values_are_allowed(self):
         for value in (None, True, [], {}, 'Public', 'internal', ''):
@@ -161,7 +161,7 @@ class ForgejoVisibilityTests(unittest.TestCase):
                 parse_manifest(manifest(visibility=value))
 
     def test_transient_target_journal_does_not_share_the_authoritative_filename(self):
-        stable = hashlib.sha256(f'3300:dest:{SOURCE.lower()}'.encode()).hexdigest() + '.json'
+        stable = hashlib.sha256(f'3000:dest:{SOURCE.lower()}'.encode()).hexdigest() + '.json'
         journals = []
         isolated = ('--isolated-dispatch-journal',)
         for name, flags in (('stable', ()), ('copy', isolated), ('copy', isolated), ('other', isolated)):

@@ -70,8 +70,8 @@ class MigrationAttestationTests(unittest.TestCase):
     def test_unsigned_forgejo_mapping_fails_before_initialization(self):
         from repo_mirror.forgejo_sync import _sync_requested
         args = Mock(port=3300, owner='dest')
-        entry = {'url': 'https://github.com/manoma080/mirror-new', 'identity': 'manoma080/mirror-new',
-                 'legacy_identity': 'manoma080/mirror-old', 'legacy_url': 'https://github.com/manoma080/mirror-old',
+        entry = {'url': 'https://github.com/mirror-owner/mirror-new', 'identity': 'mirror-owner/mirror-new',
+                 'legacy_identity': 'mirror-owner/mirror-old', 'legacy_url': 'https://github.com/mirror-owner/mirror-old',
                  'destination_name': 'new', 'legacy_destination_name': 'old', 'source_id': 1, 'destination_id': 2}
         dest = Mock()
         result = _sync_requested(args, [entry['identity']], dest, 'token', 'local', 'fixture-signing-secret-0123456789abcdef', '.', mappings={entry['identity']: entry})

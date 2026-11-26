@@ -153,7 +153,7 @@ github_api.API = API
         root = WORKFLOW.parents[2]
         for name in ('config.json', 'config-forgejo.json', 'failures.json', 'migrations.json'):
             self.assertFalse((root / name).exists(), name)
-        self.assertIn('MIRROR_CONFIG_REPOSITORY: manoma080/repo-mirror-config', text)
+        self.assertIn('MIRROR_CONFIG_REPOSITORY: ${{ github.repository_owner }}/repo-mirror-config', text)
         self.assertEqual(text.count('Check out the configuration repository'), 2)
 
     def test_one_installation_token_serves_the_whole_workflow(self):

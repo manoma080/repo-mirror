@@ -130,7 +130,7 @@ exit 1
             secret = tmp / 'secret'; secret.write_text('x' * 32); secret.chmod(0o600)
             journals = tmp / 'journals'; journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            sources = ['https://github.com/manoma080/mirror-a', 'https://Forge.Example:443/Owner/Repo']
+            sources = ['https://github.com/mirror-owner/mirror-a', 'https://Forge.Example:443/Owner/Repo']
             manifest.write_text(json.dumps(sources))
             helper = tmp / 'helper.py'
             helper.write_text('import os,sys\na=sys.argv[sys.argv.index("--")+1:]\nos.execvp(a[0], a)\n')
@@ -157,7 +157,7 @@ exit 1
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps([f'https://github.com/manoma080/mirror-{i}' for i in range(8)]))
+            manifest.write_text(json.dumps([f'https://github.com/mirror-owner/mirror-{i}' for i in range(8)]))
             helper = tmp / 'helper.py'
             helper.write_text('''import fcntl, os, pathlib, sys, time
 p = pathlib.Path(os.environ["STATE"])
@@ -191,7 +191,7 @@ with open(p / "guard", "w") as lock:
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a', 'https://github.com/mirror-owner/mirror-b']))
             helper = tmp / 'helper.py'
             helper.write_text('''import os, pathlib, signal, subprocess, sys, time
 if sys.argv[-1].endswith('-a'):
@@ -232,7 +232,7 @@ else:
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text('import os,pathlib,subprocess,sys,time\np = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"])\ntime.sleep(.2)\npathlib.Path(os.environ["MARK"]).write_text(str(os.getpid())+" "+str(p.pid))\ntime.sleep(60)\n')
             lock = tmp / 'lock'
@@ -277,7 +277,7 @@ else:
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text("import os,pathlib,time\npathlib.Path(os.environ['MARK']).write_text(str(os.getpid()))\ntime.sleep(60)\n")
             harness = tmp / 'harness.py'
@@ -323,7 +323,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text("import os,pathlib,subprocess,sys,time\np=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\npathlib.Path(os.environ['MARK']).write_text(str(p.pid))\n")
             command = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)]
@@ -357,7 +357,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps([f'https://github.com/manoma080/mirror-{i}' for i in range(4)]))
+            manifest.write_text(json.dumps([f'https://github.com/mirror-owner/mirror-{i}' for i in range(4)]))
             helper = tmp / 'helper.py'
             helper.write_text("import os,pathlib,signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\npathlib.Path(os.environ['STATE'],str(os.getpid())).touch()\ntime.sleep(60)\n")
             lock = tmp / 'lock'
@@ -396,7 +396,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             secret = tmp / 'key'
             secret.write_text('x' * 31)
             secret.chmod(0o600)
@@ -414,7 +414,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a', 'https://github.com/mirror-owner/mirror-b']))
             secret = tmp / 'recovery-key'
             secret.write_text('test-recovery-value-' * 2)
             secret.chmod(0o600)
@@ -438,7 +438,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             secret = tmp / 'key'
             secret.write_text('do-not-log-this-value-' * 2)
             secret.chmod(0o600)
@@ -474,7 +474,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=lambda *a, **kw: __import__('unittest.mock', fromlist=['Mock']).Mock(poll=lambda: 0, pid=999999999)) as run:
                 result = forgejo_schedule.main(['run', '--manifest', str(manifest), '--token-file', 'x',
                     '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--app-id', '123', '--private-key-file', '/key'])
@@ -493,7 +493,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             secret.chmod(0o600)
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
-            sources = ['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']
+            sources = ['https://github.com/mirror-owner/mirror-a', 'https://github.com/mirror-owner/mirror-b']
             manifest = tmp / 'sources.json'
             manifest.write_text(json.dumps(sources))
             calls = tmp / 'calls'
@@ -513,7 +513,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/MIRROR-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a', 'https://github.com/mirror-owner/MIRROR-a']))
             result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock')], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2)
             self.assertFalse((tmp / 'lock').exists())
@@ -528,7 +528,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             lock = tmp / 'lock'
             lock.touch(mode=0o600)
             with lock.open('r+') as held:
@@ -545,7 +545,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a', 'https://github.com/manoma080/mirror-b']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a', 'https://github.com/mirror-owner/mirror-b']))
             helper = tmp / 'helper.py'
             helper.write_text('import sys\nprint("secret", file=sys.stderr)\nsys.exit(1 if sys.argv[-1].endswith("-a") else 0)\n')
             result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
@@ -562,7 +562,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             manifest = tmp / 'sources.json'
-            manifest.write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text('import sys\nprint("FORGEJO_FAILURE: release metadata collision", file=sys.stderr)\nprint("FORGEJO_FAILURE: release metadata collision secret", file=sys.stderr)\nprint("secret https://example/token", file=sys.stderr)\nsys.exit(1)\n')
             result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
@@ -577,8 +577,8 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             'https://github.com/example-org-a/project-one',
             'https://github.com/example-org-a/project-two',
             'https://github.com/example-org-b/project-three',
-            'https://github.com/manoma080/mirror-fixture-owner-fixture-app',
-            'https://github.com/manoma080/mirror-fixture-org-a-project-four',
+            'https://github.com/mirror-owner/mirror-fixture-owner-fixture-app',
+            'https://github.com/mirror-owner/mirror-fixture-org-a-project-four',
         ]
         from repo_mirror.forgejo_sync import parse_manifest
 
@@ -601,6 +601,6 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
         skipped = {
             'https://github.com/example-org-c/project-skipped-one',
             'https://github.com/example-org-c/project-skipped-two',
-            'https://github.com/manoma080/mirror-fixture-org-b-skipped-repo',
+            'https://github.com/mirror-owner/mirror-fixture-org-b-skipped-repo',
         }
         self.assertTrue(skipped.isdisjoint(actual))

@@ -1,8 +1,8 @@
 name: Mirror to local Forgejo
 on:
   schedule:
-    - cron: '0 0,6,12,18 * * *'
-      timezone: Europe/Helsinki
+    - cron: '@SCHEDULE_CRON@'
+      timezone: '@SCHEDULE_TIMEZONE@'
   workflow_dispatch:
     inputs:
       # Forgejo sorts these keys alphabetically in the dispatch form.
@@ -12,7 +12,7 @@ on:
         type: string
         default: ''
       input_02_add_to_config:
-        description: 'Save these URLs to config.json in repo-mirror-control-config (unticked = one-time mirror only)'
+        description: 'Save these URLs to config.json in @CONFIG_REPOSITORY@ (unticked = one-time mirror only)'
         required: false
         type: boolean
         default: false
@@ -49,7 +49,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   mirror:
-    runs-on: forgejo-mirror-local
+    runs-on: '@RUNNER_LABEL@'
     timeout-minutes: 360
     steps:
       - name: Run installed launcher
@@ -69,4 +69,4 @@ jobs:
             export FORGEJO_MANUAL_INPUTS
           fi
           unset SOURCE_URLS ADD REMOVE DESTINATION VISIBILITY IGNORE_RELEASES
-          exec run-mirror mirror
+          exec @LAUNCHER_WRAPPER@ mirror

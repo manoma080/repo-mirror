@@ -14,7 +14,7 @@ from repo_mirror.adhoc import add_to_config
 from repo_mirror.config_named import normalize_config
 from repo_mirror.sources import source_marker, validate_source
 
-GITHUB_URL = 'https://github.com/manoma080/mirror-test'
+GITHUB_URL = 'https://github.com/mirror-owner/mirror-test'
 
 
 def named_config(ignore_releases=None):
@@ -169,10 +169,10 @@ class ForgejoRunnerTests(unittest.TestCase):
             return nullcontext()
         downstream = Mock()
         downstream.pages.return_value = []
-        downstream.request.return_value = {'id': 5, 'full_name': 'manoma080/mirror-test'}
+        downstream.request.return_value = {'id': 5, 'full_name': 'mirror-owner/mirror-test'}
         stack = [
             patch.object(forgejo_sync, 'source_pipeline', return_value=(
-                {'type': 'github', 'base_url': 'https://github.com', 'owner': 'manoma080'},
+                {'type': 'github', 'base_url': 'https://github.com', 'owner': 'mirror-owner'},
                 'token', downstream, 'mirror-test')),
             patch.object(forgejo_sync, 'validate_source_release_listing'),
             patch.object(forgejo_sync, 'validate_source_latest'),

@@ -15,7 +15,7 @@ spec.loader.exec_module(updater)
 
 def named():
     return {'destinations': {'local': {'account_type': 'personal'}}, 'repositories': [
-        {'source': {'url': 'https://github.com/manoma080/mirror-a'},
+        {'source': {'url': 'https://github.com/mirror-owner/mirror-a'},
          'mirrors': {'local': {'name': 'mirror-a'}}}]}
 
 

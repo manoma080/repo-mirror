@@ -10,11 +10,11 @@ SECRET = 'k' * 40
 def document(with_name):
     mirror = {'id': 22} if not with_name else {'id': 22, 'name': with_name}
     return {
-        'destinations': {'github-manoma080': {'type': 'github', 'url': 'https://github.com',
-                                              'owner': 'manoma080', 'auth': 'mirrorbot'}},
+        'destinations': {'github-mirror-owner': {'type': 'github', 'url': 'https://github.com',
+                                              'owner': 'mirror-owner', 'auth': 'mirrorbot'}},
         'repositories': [
             {'source': {'url': 'https://github.com/old/repo', 'id': 11},
-             'mirrors': {'github-manoma080': mirror}},
+             'mirrors': {'github-mirror-owner': mirror}},
         ],
     }
 
@@ -27,7 +27,7 @@ def relocation():
         'original_name': 'repo',
         'owner': 'new',
         'name': 'repo',
-        'destination': {'profile': 'github-manoma080', 'owner': 'manoma080',
+        'destination': {'profile': 'github-mirror-owner', 'owner': 'mirror-owner',
                         'name': 'mirror-old-repo', 'id': 22},
     }
 
@@ -58,11 +58,11 @@ class DestinationPlanTests(unittest.TestCase):
 
 def _config_with_legacy(source_owner, source_name, dest_name, legacy, source_id=1395104116, dest_id=42):
     return {
-        'destinations': {'github-manoma080': {'type': 'github', 'url': 'https://github.com',
-                                              'owner': 'manoma080', 'auth': 'mirrorbot'}},
+        'destinations': {'github-mirror-owner': {'type': 'github', 'url': 'https://github.com',
+                                              'owner': 'mirror-owner', 'auth': 'mirrorbot'}},
         'repositories': [
             {'source': {'url': f'https://github.com/{source_owner}/{source_name}', 'id': source_id},
-             'mirrors': {'github-manoma080': {'id': dest_id, 'name': dest_name, 'legacy': legacy}}},
+             'mirrors': {'github-mirror-owner': {'id': dest_id, 'name': dest_name, 'legacy': legacy}}},
         ],
     }
 
@@ -76,7 +76,7 @@ def _relocation_step(orig_owner, orig_name, new_owner, new_name, dest_name,
         'original_name': orig_name,
         'owner': new_owner,
         'name': new_name,
-        'destination': {'profile': 'github-manoma080', 'owner': 'manoma080',
+        'destination': {'profile': 'github-mirror-owner', 'owner': 'mirror-owner',
                         'name': dest_name, 'id': dest_id},
     }
 
@@ -93,12 +93,12 @@ def _legacy_from_entry(entry):
 class RepeatedRelocationPlanTests(unittest.TestCase):
     def test_second_relocation_resigns_while_preserving_original_legacy_binding(self):
         doc1 = {
-            'destinations': {'github-manoma080': {'type': 'github', 'url': 'https://github.com',
-                                                  'owner': 'manoma080', 'auth': 'mirrorbot'}},
+            'destinations': {'github-mirror-owner': {'type': 'github', 'url': 'https://github.com',
+                                                  'owner': 'mirror-owner', 'auth': 'mirrorbot'}},
             'repositories': [
                 {'source': {'url': 'https://github.com/upstream-owner/legacy-project',
                             'id': 1395104116},
-                 'mirrors': {'github-manoma080': {'id': 42,
+                 'mirrors': {'github-mirror-owner': {'id': 42,
                                                   'name': 'mirror-upstream-owner-legacy-project'}}},
             ],
         }
@@ -133,11 +133,11 @@ class RepeatedRelocationPlanTests(unittest.TestCase):
 
     def test_third_relocation_has_no_drift_or_accumulation(self):
         doc1 = {
-            'destinations': {'github-manoma080': {'type': 'github', 'url': 'https://github.com',
-                                                  'owner': 'manoma080', 'auth': 'mirrorbot'}},
+            'destinations': {'github-mirror-owner': {'type': 'github', 'url': 'https://github.com',
+                                                  'owner': 'mirror-owner', 'auth': 'mirrorbot'}},
             'repositories': [
                 {'source': {'url': 'https://github.com/owner1/repo1', 'id': 11},
-                 'mirrors': {'github-manoma080': {'id': 22, 'name': 'mirror-owner1-repo1'}}},
+                 'mirrors': {'github-mirror-owner': {'id': 22, 'name': 'mirror-owner1-repo1'}}},
             ],
         }
         entry1 = plan_migration(

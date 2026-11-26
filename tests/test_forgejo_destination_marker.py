@@ -23,10 +23,10 @@ class Repository:
 def entry(marker):
     return {
         'source': {'origin': 'https://github.com', 'id': 1461542642,
-                   'owner': 'manoma080', 'name': 'mirror-manoma080-test-repo'},
-        'destination': {'profile': 'forgejo-home', 'owner': 'labadmin',
-                        'name': 'mirror-manoma080-test-repo', 'id': 26},
-        'recovery': {'source_origin': 'https://github.com', 'source_owner': 'manoma080',
+                   'owner': 'mirror-owner', 'name': 'mirror-mirror-owner-test-repo'},
+        'destination': {'profile': 'forgejo-home', 'owner': 'forgejo-owner',
+                        'name': 'mirror-mirror-owner-test-repo', 'id': 26},
+        'recovery': {'source_origin': 'https://github.com', 'source_owner': 'mirror-owner',
                      'source_name': 'mirror-fixture-owner-test-repo',
                      'destination_name': 'mirror-fixture-owner-test-repo',
                      'signature': 'c0ffee'},
@@ -37,27 +37,27 @@ def entry(marker):
 
 def repository(marker):
     return Repository({'mirror-fixture-owner-test-repo': {
-        'id': 26, 'full_name': 'labadmin/mirror-fixture-owner-test-repo',
+        'id': 26, 'full_name': 'forgejo-owner/mirror-fixture-owner-test-repo',
         'private': True, 'description': marker}})
 
 
 class ForgejoDestinationMarkerTests(unittest.TestCase):
     def setUp(self):
-        self.policy = _ForgejoPolicy({}, 3300, 'labadmin', SECRET)
+        self.policy = _ForgejoPolicy({}, 3300, 'forgejo-owner', SECRET)
 
     def test_forgejo_marker_from_the_original_binding_is_accepted(self):
-        marker = _source_marker('manoma080/mirror-fixture-owner-test-repo')
+        marker = _source_marker('mirror-owner/mirror-fixture-owner-test-repo')
         repo = repository(marker + ' [repo-mirror:initialized:v1]')
         self.policy._verify_repo(repo, entry(marker), 'mirror-fixture-owner-test-repo')
 
     def test_github_style_marker_is_still_rejected(self):
-        marker = '[repo-mirror: github:https://github.com/manoma080/mirror-fixture-owner-test-repo]'
+        marker = '[repo-mirror: github:https://github.com/mirror-owner/mirror-fixture-owner-test-repo]'
         with self.assertRaises(MigrationRefused):
             self.policy._verify_repo(repository(marker), entry(marker),
                                      'mirror-fixture-owner-test-repo')
 
     def test_wrong_id_or_public_destination_is_rejected(self):
-        marker = _source_marker('manoma080/mirror-fixture-owner-test-repo')
+        marker = _source_marker('mirror-owner/mirror-fixture-owner-test-repo')
         repo = repository(marker)
         repo.repos['mirror-fixture-owner-test-repo']['private'] = False
         with self.assertRaises(MigrationRefused):

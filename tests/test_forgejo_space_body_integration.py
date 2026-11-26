@@ -38,7 +38,7 @@ class Source:
 
 
 class ForgejoAPI:
-    origin = 'http://127.0.0.1:3300'
+    origin = 'http://127.0.0.1:3000'
     base = '/api/v1/repos/team/project'
 
     def __init__(self, existing=True):

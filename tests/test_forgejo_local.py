@@ -9,8 +9,8 @@ class ForgejoTests(unittest.TestCase):
         with patch('pathlib.Path.read_text', return_value='secret\n'), patch('http.client.HTTPConnection') as factory:
             response = factory.return_value.getresponse.return_value
             response.status = 200
-            response.read.return_value = b'{"login":"labadmin"}'
-            self.assertEqual(forgejo_local.local_api('api/v1/user', '/tmp/token'), {'login': 'labadmin'})
+            response.read.return_value = b'{"login":"forgejo-owner"}'
+            self.assertEqual(forgejo_local.local_api('api/v1/user', '/tmp/token'), {'login': 'forgejo-owner'})
             factory.assert_called_once_with('127.0.0.1', 3300, timeout=30)
             factory.return_value.request.assert_called_once_with('GET', '/api/v1/user', headers={'Authorization': 'token secret'})
 
