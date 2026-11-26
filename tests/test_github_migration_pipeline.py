@@ -16,7 +16,15 @@ from urllib.error import HTTPError
 
 from repo_mirror import cli
 from repo_mirror.config_named import normalize_config
-from repo_mirror.migrations import blob_sha
+from repo_mirror.forgejo_git import APIError
+from repo_mirror.forgejo_migration import ForgejoRenameAPI
+from repo_mirror.github_migration import GitHubRepositories
+from repo_mirror.migrations import (
+    blob_sha,
+    config_document as parse_config_document,
+    is_published,
+    verify_recovery,
+)
 from repo_mirror.migrations_journal import parse
 
 MANAGEMENT = 'manoma080/repo-mirror'
@@ -97,6 +105,14 @@ class FakeGitHub:
         if '/contents/' in url:
             return self._contents_request(method, url.split('/contents/', 1)[1].split('?', 1)[0],
                                           payload, url)
+        if url.startswith(API + '/repositories/'):
+            repo_id = int(url.rsplit('/', 1)[1])
+            matches = [dict(repo) for repo in self.repos.values() if repo.get('id') == repo_id]
+            if not matches:
+                raise HTTPError(url, 404, 'Not Found', None, None)
+            if len(matches) == 1:
+                return matches[0]
+            return matches
         if url.startswith(REPO_URL):
             return self._repo_request(method, url.rsplit('/', 1)[1], payload, url)
         raise AssertionError(f'unexpected request {method} {url}')
@@ -133,6 +149,10 @@ class FakeGitHub:
         repo = {**self.repos.pop(name), 'name': payload['name'],
                 'full_name': 'dest/' + payload['name']}
         self.repos[payload['name']] = repo
+        self.aliases.pop(payload['name'], None)
+        for alias_name, target in list(self.aliases.items()):
+            if target == name:
+                self.aliases[alias_name] = payload['name']
         self.aliases[name] = payload['name']
         if self.crash_after == (method, url):
             # Model a crash after the rename committed but before the caller
@@ -397,6 +417,186 @@ class MigrationPipelineTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'migrations failed'):
                     cli.main(['--config', str(config_path)])
             self.assertIn('migration recovery failed', stderr.getvalue())
+
+    def test_second_and_third_relocations_resolve_by_id_and_resign_legacy(self):
+        self.api.seed_config((json.dumps(
+            config_document(name='mirror-Anonymous941-QuestEnhancer',
+                            source_owner='Anonymous941', source_name='QuestEnhancer'),
+            indent=2) + '\n').encode())
+        self.api.repos = {}
+        self.api.seed_repo('mirror-Anonymous941-QuestEnhancer', 2)
+
+        move1 = {
+            'source_origin': API, 'source_id': 1,
+            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer',
+            'owner': 'Anonymous941', 'name': 'QuestEnhancer-Bubbagum88',
+            'destination': {'profile': 'github-dest', 'owner': 'dest',
+                            'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2},
+        }
+        error, _, stderr = run_cli(self.directory, self.api,
+                                   mirror=move_map({'Anonymous941': move1}))
+        self.assertIsNone(error, stderr)
+        sig1 = self.published()['mirror']['legacy']['signature']
+
+        # Second relocation back to the original name: target name resolves via
+        # GitHub redirect alias to the intermediate name, so lookup by ID must
+        # resolve the current name and rename intermediate -> original.
+        move2 = {
+            'source_origin': API, 'source_id': 1,
+            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer-Bubbagum88',
+            'owner': 'Anonymous941', 'name': 'QuestEnhancer',
+            'destination': {'profile': 'github-dest', 'owner': 'dest',
+                            'name': 'mirror-Anonymous941-QuestEnhancer-Bubbagum88', 'id': 2},
+        }
+        error, _, stderr = run_cli(self.directory, self.api,
+                                   mirror=move_map({'Anonymous941': move2}))
+        self.assertIsNone(error, stderr)
+        self.assertIn(('GET', API + '/repositories/2', {}), self.api.calls)
+        self.assertIn(('PATCH', REPO_URL + 'mirror-Anonymous941-QuestEnhancer-Bubbagum88',
+                       {'name': 'mirror-Anonymous941-QuestEnhancer'}), self.api.calls)
+        self.assertEqual(set(self.api.repos), {'mirror-Anonymous941-QuestEnhancer'})
+        published2 = self.published()
+        self.assertEqual(published2['mirror']['name'], 'mirror-Anonymous941-QuestEnhancer')
+        self.assertEqual(published2['mirror']['legacy']['source_owner'], 'Anonymous941')
+        self.assertEqual(published2['mirror']['legacy']['source_name'], 'QuestEnhancer')
+        self.assertEqual(published2['mirror']['legacy']['destination_name'],
+                         'mirror-Anonymous941-QuestEnhancer')
+        sig2 = published2['mirror']['legacy']['signature']
+        self.assertNotEqual(sig2, sig1)
+        entry2 = {
+            'source': {'origin': 'https://github.com', 'id': 1,
+                       'owner': 'Anonymous941', 'name': 'QuestEnhancer'},
+            'destination': {'profile': 'github-dest', 'owner': 'dest',
+                            'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2},
+            'recovery': {'source_origin': 'https://github.com',
+                         **published2['mirror']['legacy']},
+        }
+        verify_recovery(entry2, SECRET)
+        self.assertTrue(is_published(parse_config_document(self.api.config()), entry2))
+        self.assertEqual(self.pending_count(), 0)
+
+        # Third relocation from that state: no drift, no name accumulation.
+        move3 = {
+            'source_origin': API, 'source_id': 1,
+            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer',
+            'owner': 'ThirdOwner', 'name': 'QuestEnhancer-Final',
+            'destination': {'profile': 'github-dest', 'owner': 'dest',
+                            'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2},
+        }
+        error, _, stderr = run_cli(self.directory, self.api,
+                                   mirror=move_map({'Anonymous941': move3}))
+        self.assertIsNone(error, stderr)
+        self.assertIn('mirror-ThirdOwner-QuestEnhancer-Final', self.api.repos)
+        published3 = self.published()
+        self.assertEqual(published3['mirror']['legacy']['source_owner'], 'Anonymous941')
+        self.assertEqual(published3['mirror']['legacy']['source_name'], 'QuestEnhancer')
+        self.assertEqual(published3['mirror']['legacy']['destination_name'],
+                         'mirror-Anonymous941-QuestEnhancer')
+        self.assertNotIn(published3['mirror']['legacy']['signature'], (sig1, sig2))
+        entry3 = {
+            'source': {'origin': 'https://github.com', 'id': 1,
+                       'owner': 'ThirdOwner', 'name': 'QuestEnhancer-Final'},
+            'destination': {'profile': 'github-dest', 'owner': 'dest',
+                            'name': 'mirror-ThirdOwner-QuestEnhancer-Final', 'id': 2},
+            'recovery': {'source_origin': 'https://github.com',
+                         **published3['mirror']['legacy']},
+        }
+        verify_recovery(entry3, SECRET)
+        self.assertTrue(is_published(parse_config_document(self.api.config()), entry3))
+        self.assertEqual(self.pending_count(), 0)
+
+    def test_crash_after_rename_on_second_relocation_resumes_without_renaming_twice(self):
+        error, _, stderr = run_cli(self.directory, self.api, relocation())
+        self.assertIsNone(error, stderr)
+        sig1 = self.published()['mirror']['legacy']['signature']
+
+        move2 = {
+            'source_origin': API, 'source_id': 1,
+            'original_owner': 'new-owner', 'original_name': 'renamed',
+            'owner': 'third-owner', 'name': 'final-repo',
+            'destination': {'profile': 'github-dest', 'owner': 'dest',
+                            'name': 'mirror-new-owner-renamed', 'id': 2},
+        }
+        self.api.crash_after = ('PATCH', REPO_URL + 'mirror-new-owner-renamed')
+        error, _, _ = run_cli(self.directory, self.api, mirror=move_map({'new-owner': move2}))
+        self.assertIsNotNone(error)
+        self.assertIn('mirror-third-owner-final-repo', self.api.repos)
+        self.assertEqual(self.published()['mirror']['legacy']['signature'], sig1)
+        self.assertEqual([entry['phase'] for entry in self.api.pending().values()], ['synced'])
+        patches_before_resume = len(self.api.methods('PATCH'))
+
+        error, _, stderr = run_cli(self.directory, self.api, mirror=move_map({'new-owner': move2}))
+        self.assertIsNone(error, stderr)
+        self.assertIn('migration recovery resumed=1', stderr)
+        self.assertEqual(len(self.api.methods('PATCH')), patches_before_resume)
+        published2 = self.published()
+        self.assertEqual(published2['mirror']['name'], 'mirror-third-owner-final-repo')
+        self.assertEqual(published2['mirror']['legacy']['destination_name'], 'mirror-old-owner-repo')
+        self.assertNotEqual(published2['mirror']['legacy']['signature'], sig1)
+        self.assertEqual(self.pending_count(), 0)
+
+    def test_missing_or_ambiguous_destination_id_stops_with_fixed_error(self):
+        with self.subTest('missing id'):
+            self.api.repos = {}
+            original = self.api.config()
+            error, _, stderr = run_cli(self.directory, self.api, relocation())
+            self.assertIsNotNone(error)
+            self.assertIn('migration destination missing', stderr)
+            self.assertEqual(self.api.methods('PATCH'), [])
+            self.assertEqual(self.api.config(), original)
+
+        with self.subTest('ambiguous id'):
+            self.api = FakeGitHub()
+            self.api.seed_config((json.dumps(config_document(), indent=2) + '\n').encode())
+            self.api.seed_repo('mirror-old-owner-repo', 2)
+            self.api.seed_repo('mirror-duplicate', 2)
+            original = self.api.config()
+            error, _, stderr = run_cli(self.directory, self.api, relocation())
+            self.assertIsNotNone(error)
+            self.assertIn('migration destination pin is ambiguous', stderr)
+            self.assertEqual(self.api.methods('PATCH'), [])
+            self.assertEqual(self.api.config(), original)
+
+
+class RepositoryLookupByIdTests(unittest.TestCase):
+    def test_github_and_forgejo_name_by_id_contracts(self):
+        for label, make_adapter, not_found_exc in (
+            ('github', lambda api: GitHubRepositories(api, 'dest'),
+             lambda: HTTPError(API + '/repositories/2', 404, 'Not Found', None, None)),
+            ('forgejo', lambda api: ForgejoRenameAPI(api, 'dest'),
+             lambda: APIError(404)),
+        ):
+            with self.subTest(adapter=label):
+                api = Mock()
+                adapter = make_adapter(api)
+
+                api.request.return_value = {'id': 2, 'name': 'mirror-a', 'full_name': 'dest/mirror-a'}
+                self.assertEqual(adapter.name_by_id(2), 'mirror-a')
+
+                api.request.side_effect = not_found_exc()
+                with self.assertRaisesRegex(ValueError, '^migration destination missing$'):
+                    adapter.name_by_id(2)
+
+                api.request.side_effect = None
+                api.request.return_value = [
+                    {'id': 2, 'name': 'a', 'full_name': 'dest/a'},
+                    {'id': 2, 'name': 'b', 'full_name': 'dest/b'},
+                ]
+                with self.assertRaisesRegex(ValueError, '^migration destination pin is ambiguous$'):
+                    adapter.name_by_id(2)
+
+                for bad_payload in (
+                    {'id': 99, 'name': 'mirror-a', 'full_name': 'dest/mirror-a'},
+                    {'id': 2, 'name': 'mirror-a', 'full_name': 'other/mirror-a'},
+                    {'id': 2, 'name': '..', 'full_name': 'dest/..'},
+                    [{'id': 2, 'name': 'mirror-a', 'full_name': 'dest/mirror-a'}],
+                ):
+                    api.request.return_value = bad_payload
+                    with self.assertRaisesRegex(ValueError, '^migration destination identity mismatch$'):
+                        adapter.name_by_id(2)
+
+                with self.assertRaisesRegex(ValueError, '^migration destination identity mismatch$'):
+                    adapter.name_by_id('2')
 
 
 if __name__ == '__main__':

@@ -12,7 +12,8 @@ provider state plus the pinned IDs. Nothing is ever renamed blindly: a name
 that no longer resolves to the pinned ID fails closed for operator review.
 
 Helpers here are provider-neutral. They take a duck-typed destination
-(``get(name)`` returning ``{'id', 'full_name'}`` or ``None``, and
+(``get(name)`` returning ``{'id', 'full_name'}`` or ``None``,
+``name_by_id(id)`` returning the current repository name, and
 ``rename(old, new)``) and a configuration store (``read()`` returning
 ``(bytes, blob_sha)`` and ``publish(expected_sha, replacement)``).
 ``MigrationTransaction`` owns the journal phase protocol; the format-specific
@@ -223,7 +224,7 @@ def plan_migration(relocation, config, secret=None, destination_origin=GITHUB_WE
                    'source_name': legacy['source_name'], 'destination_name': legacy['destination_name']}
         if isinstance(secret, str) and len(secret.encode()) >= 32:
             # The surviving binding was signed against the configuration that is
-            # being replaced; verify it before carrying it forward unchanged.
+            # being replaced; verify it before re-signing for the new state.
             previous = {
                 'source': {'origin': origin, 'id': source_id,
                            'owner': source_owner, 'name': source_name},
@@ -232,7 +233,17 @@ def plan_migration(relocation, config, secret=None, destination_origin=GITHUB_WE
                 'recovery': {**binding, 'signature': legacy['signature']},
             }
             verify_recovery(previous, secret, destination_origin)
-        signature = legacy['signature']
+            plan = build_entry({
+                'source': {'origin': origin, 'id': source_id,
+                           'owner': relocation['owner'], 'name': relocation['name']},
+                'destination': {'profile': profile, 'owner': destination['owner'],
+                                'name': target_name, 'id': destination['id']},
+                'recovery': {**binding, 'signature': '0' * 64},
+                'config': {'path': path, 'base_sha': base_sha},
+            })
+            signature = sign(claim(plan, destination_origin), secret)
+        else:
+            signature = legacy['signature']
     entry = build_entry({
         'source': {'origin': origin, 'id': source_id,
                    'owner': relocation['owner'], 'name': relocation['name']},
@@ -332,8 +343,7 @@ def _same_binding(mirror, entry):
     recovery = entry['recovery']
     return (legacy.get('source_owner') == recovery['source_owner']
             and legacy.get('source_name') == recovery['source_name']
-            and legacy.get('destination_name') == recovery['destination_name']
-            and legacy.get('signature') == recovery['signature'])
+            and legacy.get('destination_name') == recovery['destination_name'])
 
 
 def is_published(document, entry):
@@ -347,7 +357,8 @@ def is_published(document, entry):
     source = repository.get('source')
     return (isinstance(source, dict) and source.get('url') == _published_target(entry)
             and mirror.get('name') == entry['destination']['name']
-            and _same_binding(mirror, entry))
+            and _same_binding(mirror, entry)
+            and mirror['legacy'].get('signature') == entry['recovery']['signature'])
 
 
 def rewrite_config(raw, entry):
@@ -380,6 +391,8 @@ def rewrite_config(raw, entry):
                             'signature': entry['recovery']['signature']}
     elif not _same_binding(target, entry):
         raise ValueError('migration original binding changed')
+    else:
+        target['legacy']['signature'] = entry['recovery']['signature']
     start, end = _repository_span(text, entry['destination']['id'])
     replacement = _render_element(text, start, updated)
     result = (text[:start] + replacement + text[end:]).encode('utf-8')
@@ -429,48 +442,63 @@ def _pinned(repository, name, entry):
         raise ValueError('migration destination identity mismatch')
 
 
+def _resolve_current_name(repository, entry):
+    try:
+        current_name = repository.name_by_id(entry['destination']['id'])
+    except ValueError as exc:
+        if str(exc) == 'migration destination missing':
+            fallback = repository.get(entry['recovery']['destination_name'])
+            if fallback is not None and _repo_id(fallback) != entry['destination']['id']:
+                raise ValueError('migration destination pin replaced') from None
+        raise
+    if not isinstance(current_name, str) or not current_name:
+        raise ValueError('migration destination identity mismatch')
+    return current_name
+
+
 def _verify_destination(repository, entry):
-    old_name = entry['recovery']['destination_name']
     new_name = entry['destination']['name']
-    if new_name.lower() == old_name.lower():
-        _pinned(repository, new_name, entry)
-        return
     existing = repository.get(new_name)
     if existing is not None:
-        if _repo_id(existing) != entry['destination']['id'] or not _same_repo(
-                existing, entry['destination']['owner'], new_name):
+        if _repo_id(existing) != entry['destination']['id']:
             raise ValueError('migration destination name collision')
-        return
-    old = repository.get(old_name)
+        if _same_repo(existing, entry['destination']['owner'], new_name):
+            return
+    current_name = _resolve_current_name(repository, entry)
+    old = repository.get(current_name)
     if old is None:
         raise ValueError('migration destination missing')
     if _repo_id(old) != entry['destination']['id']:
         raise ValueError('migration destination pin replaced')
-    if not _same_repo(old, entry['destination']['owner'], old_name):
+    if not _same_repo(old, entry['destination']['owner'], current_name):
         raise ValueError('migration destination identity mismatch')
 
 
 def _rename_destination(repository, entry):
-    old_name = entry['recovery']['destination_name']
     new_name = entry['destination']['name']
-    if new_name.lower() == old_name.lower():
-        _pinned(repository, new_name, entry)
-        return
     existing = repository.get(new_name)
     if existing is not None:
         # A previous attempt already renamed; the pinned ID proves it.
-        if _repo_id(existing) != entry['destination']['id'] or not _same_repo(
-                existing, entry['destination']['owner'], new_name):
+        if _repo_id(existing) != entry['destination']['id']:
             raise ValueError('migration destination identity mismatch')
-        return
-    old = repository.get(old_name)
+        if _same_repo(existing, entry['destination']['owner'], new_name):
+            return
+    current_name = _resolve_current_name(repository, entry)
+    old = repository.get(current_name)
     if old is None:
         raise ValueError('migration destination missing')
     if _repo_id(old) != entry['destination']['id']:
         raise ValueError('migration destination pin replaced')
-    if not _same_repo(old, entry['destination']['owner'], old_name):
+    if not _same_repo(old, entry['destination']['owner'], current_name):
         raise ValueError('migration destination identity mismatch')
-    repository.rename(old_name, new_name)
+    if current_name.lower() == new_name.lower():
+        _pinned(repository, new_name, entry)
+        return
+    renamed = repository.rename(current_name, new_name)
+    if renamed is not None and (
+            _repo_id(renamed) != entry['destination']['id']
+            or not _same_repo(renamed, entry['destination']['owner'], new_name)):
+        raise ValueError('migration destination identity mismatch')
     _pinned(repository, new_name, entry)
 
 
