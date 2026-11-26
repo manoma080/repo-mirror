@@ -104,7 +104,7 @@ class ReleaseBodyV3Tests(unittest.TestCase):
         self.assertNotIn(secret, stderr.getvalue())
 
     def test_long_title_survives_interruption_and_restart(self):
-        title = "PS5X360 " + "long release title " * 10
+        title = "ExampleApp " + "long release title " * 10
 
         class LongTitleSource(Source):
             def pages(self, url):

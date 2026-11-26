@@ -11,7 +11,7 @@ from repo_mirror import forgejo_sync
 from repo_mirror.forgejo_releases import SyncConflict
 from repo_mirror.forgejo_git import APIError
 
-URL = 'https://github.com/manoma080/mirror-Gezine-CivSwitch'
+URL = 'https://github.com/manoma080/mirror-fixture-org-d-fixture-repo'
 
 
 class RunnerTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class RunnerTests(unittest.TestCase):
             def request(self, method, path, payload=None):
                 if path == '/api/v1/user': return {'login': 'local'}
                 if method == 'POST':
-                    self.repo = dict(payload, id=1, full_name='local/mirror-Gezine-CivSwitch')
+                    self.repo = dict(payload, id=1, full_name='local/mirror-fixture-org-d-fixture-repo')
                 elif method == 'PATCH':
                     self.repo.update(payload)
                 elif self.repo is None:
@@ -143,7 +143,7 @@ class RunnerTests(unittest.TestCase):
             app.assert_called_once_with('123', 'fake-key', 'manoma080')
             self.assertIs(refs.call_args.kwargs['source_token'], provider)
             self.assertIs(github.call_args.args[0], provider)
-            github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch/releases')
+            github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-fixture-org-d-fixture-repo/releases')
 
     def run_main(self, configured, sources):
         with tempfile.TemporaryDirectory() as directory, tempfile.NamedTemporaryFile(mode='w', suffix='.json') as f:
@@ -170,11 +170,11 @@ class RunnerTests(unittest.TestCase):
     def test_runs_exact_source_and_both_syncs(self, snapshot, api, refs, releases, adapter):
         api.return_value.token.return_value = 'test-local'
         self.assertEqual(self.run_main([URL], [URL]), 0)
-        self.assertEqual(refs.call_args.args[1:], ('mirror-Gezine-CivSwitch', 'manoma080/mirror-Gezine-CivSwitch'))
+        self.assertEqual(refs.call_args.args[1:], ('mirror-fixture-org-d-fixture-repo', 'manoma080/mirror-fixture-org-d-fixture-repo'))
         releases.assert_called_once()
         args, kwargs = releases.call_args
         self.assertEqual(args[0], {'type': 'github', 'base_url': 'https://github.com', 'owner': 'manoma080'})
-        self.assertEqual(args[5], 'https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch')
+        self.assertEqual(args[5], 'https://api.github.com/repos/manoma080/mirror-fixture-org-d-fixture-repo')
         self.assertFalse(kwargs['initializing'])
         self.assertIsNotNone(kwargs['journal'])
 
@@ -189,7 +189,7 @@ class RunnerTests(unittest.TestCase):
     @patch('repo_mirror.forgejo_sync.LocalForgejoAPI')
     def test_sync_failure_is_nonzero(self, api, refs):
         self.assertEqual(self.run_main([URL], [URL]), 1)
-        self.github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch/releases')
+        self.github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-fixture-org-d-fixture-repo/releases')
         refs.assert_called_once()
 
     @patch.dict(os.environ, {'GITHUB_TOKEN': 'test'})
@@ -202,7 +202,7 @@ class RunnerTests(unittest.TestCase):
              'body': '[repo-mirror:pending:v3]', 'draft': False, 'assets': []}
         ]
         self.assertEqual(self.run_main([URL], [URL]), 1)
-        self.github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-Gezine-CivSwitch/releases')
+        self.github.return_value.pages.assert_called_once_with('https://api.github.com/repos/manoma080/mirror-fixture-org-d-fixture-repo/releases')
         refs.assert_not_called()
         releases.assert_not_called()
         api.return_value.request.assert_not_called()
@@ -239,9 +239,9 @@ class RunnerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, output, b'')
             api.return_value.base_url = 'http://127.0.0.1:3300'
             api.return_value.token.return_value = 'local'
-            api.return_value.request.return_value = {'id': 1, 'full_name': 'labadmin/mirror-Gezine-CivSwitch',
+            api.return_value.request.return_value = {'id': 1, 'full_name': 'labadmin/mirror-fixture-org-d-fixture-repo',
                 'private': True, 'has_actions': False, 'default_branch': 'main',
-                'description': 'repo-mirror-source: github.com/manoma080/mirror-Gezine-CivSwitch'}
+                'description': 'repo-mirror-source: github.com/manoma080/mirror-fixture-org-d-fixture-repo'}
             def releases(*args, **kwargs):
                 state['releases_done'] = True
             with self.subTest(side=changed_side), patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter'), patch('repo_mirror.forgejo_sync.mirror_releases', side_effect=releases), \
@@ -304,7 +304,7 @@ class SourceTests(unittest.TestCase):
         # Parity with the GitHub runner: any configured GitHub source works, not
         # only the mirror-* repositories owned by the mirror account.
         cases = {
-            'https://github.com/manoma080/mirror-Gezine-CivSwitch': 'manoma080/mirror-Gezine-CivSwitch',
+            'https://github.com/manoma080/mirror-fixture-org-d-fixture-repo': 'manoma080/mirror-fixture-org-d-fixture-repo',
             'https://github.com/other/mirror-x': 'other/mirror-x',
             'https://github.com/octocat/Hello-World': 'octocat/Hello-World',
             'https://github.com/some-user/repo.name_1': 'some-user/repo.name_1',

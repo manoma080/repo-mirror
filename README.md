@@ -107,7 +107,7 @@ See [docs/auto-discoveries.md](docs/auto-discoveries.md) for the full discovery 
   "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "manoma080", "auth": "mirrorbot"}},
   "repositories": [],
   "auto_discoveries": [
-    {"url": "https://github.com/BlackBearRevived", "visibility": "private"}
+    {"url": "https://github.com/example-owner", "visibility": "private"}
   ]
 }
 ```

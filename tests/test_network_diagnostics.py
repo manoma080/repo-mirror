@@ -52,10 +52,10 @@ class ApiTransportAnnotationTests(unittest.TestCase):
     @patch("time.sleep")
     def test_escaping_transport_error_keeps_operation(self, sleep):
         api = API(None)
-        api.trusted_api_origin = ("https", "theghostonline.dev", 443)
+        api.trusted_api_origin = ("https", "fixture-org-h.dev", 443)
         api.opener.open = Mock(side_effect=URLError(TimeoutError("timed out")))
         with self.assertRaises(URLError) as caught:
-            api.request("GET", "https://theghostonline.dev/api/v1/repos/o/r")
+            api.request("GET", "https://fixture-org-h.dev/api/v1/repos/o/r")
         exc = caught.exception
         self.assertEqual(getattr(exc, "mirror_operation", None), ("source", "API", "GET"))
         self.assertEqual(error_detail(exc), "URLError (timeout) (source API GET)")

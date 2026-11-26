@@ -27,8 +27,8 @@ def entry(marker):
         'destination': {'profile': 'forgejo-home', 'owner': 'labadmin',
                         'name': 'mirror-manoma080-test-repo', 'id': 26},
         'recovery': {'source_origin': 'https://github.com', 'source_owner': 'manoma080',
-                     'source_name': 'mirror-helloano420-test-repo',
-                     'destination_name': 'mirror-helloano420-test-repo',
+                     'source_name': 'mirror-fixture-owner-test-repo',
+                     'destination_name': 'mirror-fixture-owner-test-repo',
                      'signature': 'c0ffee'},
         'config': {'path': 'config-forgejo.json', 'base_sha': 'a' * 40},
         'phase': 'prepared',
@@ -36,8 +36,8 @@ def entry(marker):
 
 
 def repository(marker):
-    return Repository({'mirror-helloano420-test-repo': {
-        'id': 26, 'full_name': 'labadmin/mirror-helloano420-test-repo',
+    return Repository({'mirror-fixture-owner-test-repo': {
+        'id': 26, 'full_name': 'labadmin/mirror-fixture-owner-test-repo',
         'private': True, 'description': marker}})
 
 
@@ -46,22 +46,22 @@ class ForgejoDestinationMarkerTests(unittest.TestCase):
         self.policy = _ForgejoPolicy({}, 3300, 'labadmin', SECRET)
 
     def test_forgejo_marker_from_the_original_binding_is_accepted(self):
-        marker = _source_marker('manoma080/mirror-helloano420-test-repo')
+        marker = _source_marker('manoma080/mirror-fixture-owner-test-repo')
         repo = repository(marker + ' [repo-mirror:initialized:v1]')
-        self.policy._verify_repo(repo, entry(marker), 'mirror-helloano420-test-repo')
+        self.policy._verify_repo(repo, entry(marker), 'mirror-fixture-owner-test-repo')
 
     def test_github_style_marker_is_still_rejected(self):
-        marker = '[repo-mirror: github:https://github.com/manoma080/mirror-helloano420-test-repo]'
+        marker = '[repo-mirror: github:https://github.com/manoma080/mirror-fixture-owner-test-repo]'
         with self.assertRaises(MigrationRefused):
             self.policy._verify_repo(repository(marker), entry(marker),
-                                     'mirror-helloano420-test-repo')
+                                     'mirror-fixture-owner-test-repo')
 
     def test_wrong_id_or_public_destination_is_rejected(self):
-        marker = _source_marker('manoma080/mirror-helloano420-test-repo')
+        marker = _source_marker('manoma080/mirror-fixture-owner-test-repo')
         repo = repository(marker)
-        repo.repos['mirror-helloano420-test-repo']['private'] = False
+        repo.repos['mirror-fixture-owner-test-repo']['private'] = False
         with self.assertRaises(MigrationRefused):
-            self.policy._verify_repo(repo, entry(marker), 'mirror-helloano420-test-repo')
+            self.policy._verify_repo(repo, entry(marker), 'mirror-fixture-owner-test-repo')
 
 
 if __name__ == '__main__':

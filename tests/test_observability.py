@@ -89,8 +89,8 @@ class ObservabilityTests(unittest.TestCase):
 
     def test_long_hyphenated_repository_and_asset_names_are_visible(self):
         for value in (
-            "Ghostcontrol-PS5-USB-Controller-Patcher",
-            "Ghostcontrol-PS5-USB-Controller-Patcher.zip",
+            "Example-Device-USB-Controller-Patcher",
+            "Example-Device-USB-Controller-Patcher.zip",
         ):
             with self.subTest(value=value):
                 self.assertEqual(mirror.safe_label(value), value)
@@ -123,7 +123,7 @@ class ObservabilityTests(unittest.TestCase):
                 self.assertEqual(mirror.safe_label(value), "[redacted]")
 
     def test_exact_configured_secret_overrides_meaningful_name(self):
-        name = "Ghostcontrol-PS5-USB-Controller-Patcher"
+        name = "Example-Device-USB-Controller-Patcher"
         context = mirror.LOG_SECRETS.set((name,))
         try:
             self.assertEqual(mirror.safe_label(name + ".zip"), "[redacted]")

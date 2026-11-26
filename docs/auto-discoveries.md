@@ -31,12 +31,12 @@ Duplicate JSON keys remain rejected everywhere (`repo_mirror/config_json.py:4-10
 {
   "auto_discoveries": [
     {
-      "url": "https://github.com/BlackBearRevived",
+      "url": "https://github.com/example-owner",
       "type": "github",
       "id": 123456,
       "visibility": "private",
       "ignore_releases": false,
-      "destination_name_prefix": "mirror-BlackBearRevived",
+      "destination_name_prefix": "mirror-example-owner",
       "exclude": ["some-repo"],
       "overrides": {
         "other-repo": {"visibility": "public", "ignore_releases": true}
@@ -65,9 +65,9 @@ Each `repositories[]` entry materialized by a rule carries a top-level string fi
 
 ```json
 {
-  "source": {"url": "https://github.com/BlackBearRevived/alpha", "id": 9001},
-  "mirrors": {"github": {"name": "mirror-BlackBearRevived-alpha", "id": 7001, "visibility": "private"}},
-  "discovered_by": "https://github.com/BlackBearRevived"
+  "source": {"url": "https://github.com/example-owner/alpha", "id": 9001},
+  "mirrors": {"github": {"name": "mirror-example-owner-alpha", "id": 7001, "visibility": "private"}},
+  "discovered_by": "https://github.com/example-owner"
 }
 ```
 

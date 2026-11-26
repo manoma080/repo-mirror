@@ -82,10 +82,10 @@ class LogSecretsTests(unittest.TestCase):
         self.assertNotIn("secret", output.getvalue())
 
     def test_safe_label_allows_plain_and_hashed_archive_names(self):
-        plain = "mirror-BlackBearRevived-ps5-native-app-boilerplate-wipe-20261126T072618Z"
-        hashed_explicit = "mirror-BlackBearRevived-ps5-native-app-boilerplate-0123456789abcdef-wipe-20261126T072618Z"
+        plain = "mirror-example-owner-example-app-v2-starter-kit-build-wipe-20261126T072618Z"
+        hashed_explicit = "mirror-example-owner-example-app-0123456789abcdef-wipe-20261126T072618Z"
         hashed_generated = archive_name(
-            "mirror-BlackBearRevived-ps5-native-app-boilerplate-extended-edition-for-testing-long",
+            "mirror-example-owner-example-app-extended-edition-for-testing-long-archive-name-case",
             "20261126T072618Z",
         )
         self.assertEqual(len(hashed_generated), 100)
@@ -97,7 +97,7 @@ class LogSecretsTests(unittest.TestCase):
     def test_safe_label_redacts_high_entropy_with_non_archive_suffix_or_secret_prefix(self):
         for value in (
             "mX9qR-2pL7v-K4nT8-wZ3bJ-0cY5-snap-987654",
-            "mirror-BlackBearRevived-ps5-app-bak-20261126T072618Z",
+            "mirror-example-owner-ps5-app-bak-20261126T072618Z",
             "aB7cD-9eF2g-H4iJ6-kL8mN-0pQ3r-S5tU7-vWxYz-wipe-20261126T072618Z",
         ):
             with self.subTest(value=value):
@@ -114,7 +114,7 @@ class LogSecretsTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(mirror.safe_label(value), "[redacted]")
 
-        archive_like_secret = "mirror-BlackBearRevived-ps5-native-app-boilerplate-wipe-20261126T072618Z"
+        archive_like_secret = "mirror-example-owner-example-app-v2-starter-kit-build-wipe-20261126T072618Z"
         with patch.dict(
             os.environ,
             {

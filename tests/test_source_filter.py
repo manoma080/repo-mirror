@@ -17,12 +17,12 @@ class SourceFilterTests(unittest.TestCase):
             filter_plan([entry], "https://api.github.com/alice/demo,https://github.com/alice/demo")
 
     def setUp(self):
-        self.one = {"base_url": "https://github.com", "owner": "premohq"}
-        self.two = {"base_url": "https://github.com", "owner": "BrinooTk"}
-        self.plan = [(1, self.one, "PlayTendoh"), (1, self.one, "Other"), (2, self.two, "PS5X360")]
+        self.one = {"base_url": "https://github.com", "owner": "fixture-owner"}
+        self.two = {"base_url": "https://github.com", "owner": "fixture-org-b"}
+        self.plan = [(1, self.one, "fixture-app"), (1, self.one, "Other"), (2, self.two, "fixture-project")]
 
     def test_single_selects_only_exact_repository(self):
-        self.assertEqual(filter_plan(self.plan, "https://github.com/premohq/PlayTendoh"), self.plan[:1])
+        self.assertEqual(filter_plan(self.plan, "https://github.com/fixture-owner/fixture-app"), self.plan[:1])
 
     def test_blank_means_all(self):
         for value in ("", "  ", None):
@@ -30,21 +30,21 @@ class SourceFilterTests(unittest.TestCase):
                 self.assertEqual(filter_plan(self.plan, value), self.plan)
 
     def test_multi_select_preserves_plan_order(self):
-        value = " https://github.com/BrinooTk/PS5X360, https://github.com/premohq/PlayTendoh "
+        value = " https://github.com/fixture-org-b/fixture-project, https://github.com/fixture-owner/fixture-app "
         self.assertEqual(filter_plan(self.plan, value), [self.plan[0], self.plan[2]])
 
     def test_unknown_and_nonexact_urls_rejected(self):
         for value in (
-            "https://github.com/premohq",
-            "https://github.com/premohq/Missing",
-            "https://github.com/premohq/playtendoh",
-            "https://github.com/premohq/PlayTendoh/",
-            "https://github.com/premohq/PlayTendoh.git",
-            "https://github.com/premohq/PlayTendoh?x=1",
-            "https://github.com/premohq/PlayTendoh#x",
-            "ssh://github.com/premohq/PlayTendoh",
-            "https://github.com/premohq/PlayTendoh,",
-            "https://github.com/premohq/PlayTendoh,$(touch pwned)",
+            "https://github.com/fixture-owner",
+            "https://github.com/fixture-owner/Missing",
+            "https://github.com/fixture-owner/Fixture-App",
+            "https://github.com/fixture-owner/fixture-app/",
+            "https://github.com/fixture-owner/fixture-app.git",
+            "https://github.com/fixture-owner/fixture-app?x=1",
+            "https://github.com/fixture-owner/fixture-app#x",
+            "ssh://github.com/fixture-owner/fixture-app",
+            "https://github.com/fixture-owner/fixture-app,",
+            "https://github.com/fixture-owner/fixture-app,$(touch pwned)",
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 filter_plan(self.plan, value)
@@ -52,23 +52,23 @@ class SourceFilterTests(unittest.TestCase):
     def test_credentials_never_appear_in_errors(self):
         secret = "super-secret-value"
         with self.assertRaises(ValueError) as caught:
-            filter_plan(self.plan, f"https://user:{secret}@github.com/premohq/PlayTendoh")
+            filter_plan(self.plan, f"https://user:{secret}@github.com/fixture-owner/fixture-app")
         self.assertNotIn(secret, str(caught.exception))
 
     def test_duplicate_requested_url_rejected(self):
-        url = "https://github.com/premohq/PlayTendoh"
+        url = "https://github.com/fixture-owner/fixture-app"
         with self.assertRaises(ValueError):
             filter_plan(self.plan, f"{url}, {url}")
 
     def test_ambiguous_discovered_source_rejected(self):
         with self.assertRaises(ValueError):
-            filter_plan(self.plan + [self.plan[0]], "https://github.com/premohq/PlayTendoh")
+            filter_plan(self.plan + [self.plan[0]], "https://github.com/fixture-owner/fixture-app")
 
     def test_different_hosts_are_distinct(self):
-        forge = {"base_url": "https://forge.example", "owner": "premohq"}
-        entry = (3, forge, "PlayTendoh")
+        forge = {"base_url": "https://forge.example", "owner": "fixture-owner"}
+        entry = (3, forge, "fixture-app")
         self.assertEqual(
-            filter_plan(self.plan + [entry], "https://forge.example/premohq/PlayTendoh"), [entry]
+            filter_plan(self.plan + [entry], "https://forge.example/fixture-owner/fixture-app"), [entry]
         )
 
 

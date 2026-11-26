@@ -420,21 +420,21 @@ class MigrationPipelineTests(unittest.TestCase):
 
     def test_second_and_third_relocations_resolve_by_id_and_resign_legacy(self):
         self.api.seed_config((json.dumps(
-            config_document(name='mirror-Anonymous941-QuestEnhancer',
-                            source_owner='Anonymous941', source_name='QuestEnhancer'),
+            config_document(name='mirror-upstream-owner-legacy-project',
+                            source_owner='upstream-owner', source_name='legacy-project'),
             indent=2) + '\n').encode())
         self.api.repos = {}
-        self.api.seed_repo('mirror-Anonymous941-QuestEnhancer', 2)
+        self.api.seed_repo('mirror-upstream-owner-legacy-project', 2)
 
         move1 = {
             'source_origin': API, 'source_id': 1,
-            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer',
-            'owner': 'Anonymous941', 'name': 'QuestEnhancer-Bubbagum88',
+            'original_owner': 'upstream-owner', 'original_name': 'legacy-project',
+            'owner': 'upstream-owner', 'name': 'legacy-project-extended',
             'destination': {'profile': 'github-dest', 'owner': 'dest',
-                            'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2},
+                            'name': 'mirror-upstream-owner-legacy-project', 'id': 2},
         }
         error, _, stderr = run_cli(self.directory, self.api,
-                                   mirror=move_map({'Anonymous941': move1}))
+                                   mirror=move_map({'upstream-owner': move1}))
         self.assertIsNone(error, stderr)
         sig1 = self.published()['mirror']['legacy']['signature']
 
@@ -443,31 +443,31 @@ class MigrationPipelineTests(unittest.TestCase):
         # resolve the current name and rename intermediate -> original.
         move2 = {
             'source_origin': API, 'source_id': 1,
-            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer-Bubbagum88',
-            'owner': 'Anonymous941', 'name': 'QuestEnhancer',
+            'original_owner': 'upstream-owner', 'original_name': 'legacy-project-extended',
+            'owner': 'upstream-owner', 'name': 'legacy-project',
             'destination': {'profile': 'github-dest', 'owner': 'dest',
-                            'name': 'mirror-Anonymous941-QuestEnhancer-Bubbagum88', 'id': 2},
+                            'name': 'mirror-upstream-owner-legacy-project-extended', 'id': 2},
         }
         error, _, stderr = run_cli(self.directory, self.api,
-                                   mirror=move_map({'Anonymous941': move2}))
+                                   mirror=move_map({'upstream-owner': move2}))
         self.assertIsNone(error, stderr)
         self.assertIn(('GET', API + '/repositories/2', {}), self.api.calls)
-        self.assertIn(('PATCH', REPO_URL + 'mirror-Anonymous941-QuestEnhancer-Bubbagum88',
-                       {'name': 'mirror-Anonymous941-QuestEnhancer'}), self.api.calls)
-        self.assertEqual(set(self.api.repos), {'mirror-Anonymous941-QuestEnhancer'})
+        self.assertIn(('PATCH', REPO_URL + 'mirror-upstream-owner-legacy-project-extended',
+                       {'name': 'mirror-upstream-owner-legacy-project'}), self.api.calls)
+        self.assertEqual(set(self.api.repos), {'mirror-upstream-owner-legacy-project'})
         published2 = self.published()
-        self.assertEqual(published2['mirror']['name'], 'mirror-Anonymous941-QuestEnhancer')
-        self.assertEqual(published2['mirror']['legacy']['source_owner'], 'Anonymous941')
-        self.assertEqual(published2['mirror']['legacy']['source_name'], 'QuestEnhancer')
+        self.assertEqual(published2['mirror']['name'], 'mirror-upstream-owner-legacy-project')
+        self.assertEqual(published2['mirror']['legacy']['source_owner'], 'upstream-owner')
+        self.assertEqual(published2['mirror']['legacy']['source_name'], 'legacy-project')
         self.assertEqual(published2['mirror']['legacy']['destination_name'],
-                         'mirror-Anonymous941-QuestEnhancer')
+                         'mirror-upstream-owner-legacy-project')
         sig2 = published2['mirror']['legacy']['signature']
         self.assertNotEqual(sig2, sig1)
         entry2 = {
             'source': {'origin': 'https://github.com', 'id': 1,
-                       'owner': 'Anonymous941', 'name': 'QuestEnhancer'},
+                       'owner': 'upstream-owner', 'name': 'legacy-project'},
             'destination': {'profile': 'github-dest', 'owner': 'dest',
-                            'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2},
+                            'name': 'mirror-upstream-owner-legacy-project', 'id': 2},
             'recovery': {'source_origin': 'https://github.com',
                          **published2['mirror']['legacy']},
         }
@@ -478,26 +478,26 @@ class MigrationPipelineTests(unittest.TestCase):
         # Third relocation from that state: no drift, no name accumulation.
         move3 = {
             'source_origin': API, 'source_id': 1,
-            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer',
-            'owner': 'ThirdOwner', 'name': 'QuestEnhancer-Final',
+            'original_owner': 'upstream-owner', 'original_name': 'legacy-project',
+            'owner': 'ThirdOwner', 'name': 'legacy-project-Final',
             'destination': {'profile': 'github-dest', 'owner': 'dest',
-                            'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2},
+                            'name': 'mirror-upstream-owner-legacy-project', 'id': 2},
         }
         error, _, stderr = run_cli(self.directory, self.api,
-                                   mirror=move_map({'Anonymous941': move3}))
+                                   mirror=move_map({'upstream-owner': move3}))
         self.assertIsNone(error, stderr)
-        self.assertIn('mirror-ThirdOwner-QuestEnhancer-Final', self.api.repos)
+        self.assertIn('mirror-ThirdOwner-legacy-project-Final', self.api.repos)
         published3 = self.published()
-        self.assertEqual(published3['mirror']['legacy']['source_owner'], 'Anonymous941')
-        self.assertEqual(published3['mirror']['legacy']['source_name'], 'QuestEnhancer')
+        self.assertEqual(published3['mirror']['legacy']['source_owner'], 'upstream-owner')
+        self.assertEqual(published3['mirror']['legacy']['source_name'], 'legacy-project')
         self.assertEqual(published3['mirror']['legacy']['destination_name'],
-                         'mirror-Anonymous941-QuestEnhancer')
+                         'mirror-upstream-owner-legacy-project')
         self.assertNotIn(published3['mirror']['legacy']['signature'], (sig1, sig2))
         entry3 = {
             'source': {'origin': 'https://github.com', 'id': 1,
-                       'owner': 'ThirdOwner', 'name': 'QuestEnhancer-Final'},
+                       'owner': 'ThirdOwner', 'name': 'legacy-project-Final'},
             'destination': {'profile': 'github-dest', 'owner': 'dest',
-                            'name': 'mirror-ThirdOwner-QuestEnhancer-Final', 'id': 2},
+                            'name': 'mirror-ThirdOwner-legacy-project-Final', 'id': 2},
             'recovery': {'source_origin': 'https://github.com',
                          **published3['mirror']['legacy']},
         }

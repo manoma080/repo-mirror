@@ -184,39 +184,39 @@ class MigrationRecoveryTests(unittest.TestCase):
         doc = {
             'destinations': {'github-dest': {'account_type': 'personal'}},
             'repositories': [
-                {'source': {'url': 'https://github.com/Anonymous941/QuestEnhancer', 'id': 1},
-                 'mirrors': {'github-dest': {'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2}}},
+                {'source': {'url': 'https://github.com/upstream-owner/legacy-project', 'id': 1},
+                 'mirrors': {'github-dest': {'name': 'mirror-upstream-owner-legacy-project', 'id': 2}}},
             ],
         }
         self.configuration.raw = (json.dumps(doc, indent=2) + '\n').encode()
-        self.repositories = Repositories(('mirror-Anonymous941-QuestEnhancer', 2))
+        self.repositories = Repositories(('mirror-upstream-owner-legacy-project', 2))
         self.transaction = MigrationTransaction(
             self.store, self.repositories, self.configuration, secret=SECRET)
 
         move1 = {
             'source_origin': 'https://api.github.com', 'source_id': 1,
-            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer',
-            'owner': 'Anonymous941', 'name': 'QuestEnhancer-Bubbagum88',
+            'original_owner': 'upstream-owner', 'original_name': 'legacy-project',
+            'owner': 'upstream-owner', 'name': 'legacy-project-extended',
             'destination': {'profile': 'github-dest', 'owner': 'dest',
-                            'name': 'mirror-Anonymous941-QuestEnhancer', 'id': 2},
+                            'name': 'mirror-upstream-owner-legacy-project', 'id': 2},
         }
         entry1 = self.transaction.migrate(move1)
         move2 = {
             'source_origin': 'https://api.github.com', 'source_id': 1,
-            'original_owner': 'Anonymous941', 'original_name': 'QuestEnhancer-Bubbagum88',
-            'owner': 'Anonymous941', 'name': 'QuestEnhancer',
+            'original_owner': 'upstream-owner', 'original_name': 'legacy-project-extended',
+            'owner': 'upstream-owner', 'name': 'legacy-project',
             'destination': {'profile': 'github-dest', 'owner': 'dest',
-                            'name': 'mirror-Anonymous941-QuestEnhancer-Bubbagum88', 'id': 2},
+                            'name': 'mirror-upstream-owner-legacy-project-extended', 'id': 2},
         }
         entry2 = self.transaction.migrate(move2)
-        self.assertEqual(entry2['destination']['name'], 'mirror-Anonymous941-QuestEnhancer')
-        self.assertEqual(entry2['recovery']['destination_name'], 'mirror-Anonymous941-QuestEnhancer')
+        self.assertEqual(entry2['destination']['name'], 'mirror-upstream-owner-legacy-project')
+        self.assertEqual(entry2['recovery']['destination_name'], 'mirror-upstream-owner-legacy-project')
         self.assertNotEqual(entry2['recovery']['signature'], entry1['recovery']['signature'])
         verify_recovery(entry2, SECRET)
         self.assertTrue(is_published(config_document(self.configuration.raw), entry2))
         self.assertEqual(self.repositories.renames, [
-            ('mirror-Anonymous941-QuestEnhancer', 'mirror-Anonymous941-QuestEnhancer-Bubbagum88'),
-            ('mirror-Anonymous941-QuestEnhancer-Bubbagum88', 'mirror-Anonymous941-QuestEnhancer'),
+            ('mirror-upstream-owner-legacy-project', 'mirror-upstream-owner-legacy-project-extended'),
+            ('mirror-upstream-owner-legacy-project-extended', 'mirror-upstream-owner-legacy-project'),
         ])
         self.assertEqual(self.store.pending(), {})
 
