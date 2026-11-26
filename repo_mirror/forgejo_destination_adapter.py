@@ -17,7 +17,7 @@ class ForgejoDestinationAdapter:
     def validate_release_source(self, release):
         pass
 
-    def __init__(self, owner_repo, token, port=3300, *, client=None, guard=None):
+    def __init__(self, owner_repo, token, port=3000, *, client=None, guard=None):
         owner, repo = source_identity(owner_repo)
         if owner in ('.', '..') or repo in ('.', '..'):
             raise ValueError('invalid destination identity')

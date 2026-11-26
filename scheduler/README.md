@@ -1,6 +1,6 @@
 # Forgejo scheduler
 
-Scheduling and manual dispatch are handled by the Forgejo Actions workflow ([`forgejo-actions.yml`](forgejo-actions.yml)) invoking the separately installed [`auto_update.py`](auto_update.py) launcher.
+Scheduling and manual dispatch are handled by the Forgejo Actions workflow ([`forgejo-actions.yml`](forgejo-actions.yml)) invoking the separately installed [`auto_update.py`](auto_update.py) launcher alongside [`github_app.py`](github_app.py).
 
 ### Forgejo Actions control repository
 
@@ -12,7 +12,7 @@ Seed the local control files from the old Forgejo authority and local state only
 
 Forgejo sorts the dispatch form alphabetically by input key. The workflow uses `input_01_source_urls`, `input_02_add_to_config`, `input_03_destination_name`, `input_04_visibility`, `input_05_remove_from_config` and `input_06_ignore_releases` to match the GitHub form’s order. Use these names for Forgejo API dispatches; scheduler options and GitHub inputs keep their existing names.
 
-Explicit named destination profiles use `{"type":"forgejo","url":"http://127.0.0.1:3000","owner":"forgejo-owner","auth":"forgejo-home"}`. The standalone updater, scheduler and sync worker each reject a mismatch with `--owner` or `--port` before starting mirroring; explicit profiles represent personal accounts and reject `--organization`. The `forgejo-home` alias means the supplied `--token-file`, not the Manobot GitHub source helper, and is not a secret or cryptographic proof of token identity. Provision the correct owner-only token file; destination API identity checks still apply. Legacy named profiles and list manifests retain their existing behavior.
+Explicit named destination profiles use `{"type":"forgejo","url":"http://127.0.0.1:3000","owner":"forgejo-owner","auth":"forgejo-home"}`. The standalone updater, scheduler and sync worker each reject a mismatch with `--owner` or `--port` before starting mirroring; explicit profiles represent personal accounts and reject `--organization`. The `forgejo-home` alias means the supplied `--token-file`, not the GitHub App source helper, and is not a secret or cryptographic proof of token identity. Provision the correct owner-only token file; destination API identity checks still apply. Legacy named profiles and list manifests retain their existing behavior.
 
 For each Forgejo destination choose an operator policy `--asset-max-bytes N` and pass it in the launcher invocation (for example in the launcher wrapper). N is an integer from 1 through 2147483647 bytes. This is a transfer policy, not a detected or verified server upload limit; select a value no larger than the actual server, proxy, and operational limits. The launcher passes it to the scheduler and each worker; direct worker runs must also pass it. GitLab sources require this option before a batch starts. Links over the selected cap are preserved in release text rather than uploaded. A missing or invalid cap fails configuration.
 
@@ -24,7 +24,7 @@ The named Forgejo manifest supports pinned GitLab projects and a top-level `grou
 
 **Staged upgrade:** install the updated standalone `auto_update.py` outside the checkout before publishing a named manifest; old installed launchers reject the new shape. The updated launcher supports old and new manifests. Do not deploy while writers are active; coordinate upgrades and preserve credentials, journal paths and locks.
 
-Entries may be HTTPS Forgejo repository URLs of the form `https://forge.example/owner/repo` (optional port), or any public GitHub repository URL of the form `https://github.com/owner/repo`, matching the GitHub runner's source freedom. Credentials, query strings, fragments, subpaths, and `.git` suffixes are not accepted. A GitHub source is read with the configured Manobot app credentials, so its visibility is limited by that installation, not by the URL alone; a private GitHub source therefore mirrors successfully while a private Forgejo source does not. Ordinary string entries use the final URL component as destination name. A separately verified relocation may instead use a structured mapping with an explicit destination name and original recovery identity; see [Explicit relocation bindings](../README.md#explicit-relocation-bindings). Do not publish a structured entry until the separately installed launcher has been upgraded to understand it. Source URLs are passed unchanged to workers. Case-insensitive current and historical name collisions are rejected before workers start. The standalone launcher performs structural checks, while the fetched scheduler validates the full manifest again before the batch lock and workers. Neither check proves the host actually serves Forgejo, that the source is reachable, or that a historical association is valid. Review hosts and mappings before use; do not put credentials in URLs. A mirror mapping may set `"ignore_releases": true` to skip release synchronization for that repository, leaving existing destination releases and recovery journals untouched; the worker's optional `--ignore-releases` applies only to the exact `--source` URLs of that invocation and is never written back to the manifest.
+Entries may be HTTPS Forgejo repository URLs of the form `https://forge.example/owner/repo` (optional port), or any public GitHub repository URL of the form `https://github.com/owner/repo`, matching the GitHub runner's source freedom. Credentials, query strings, fragments, subpaths, and `.git` suffixes are not accepted. A GitHub source is read with the configured GitHub App credentials, so its visibility is limited by that installation, not by the URL alone; a private GitHub source therefore mirrors successfully while a private Forgejo source does not. Ordinary string entries use the final URL component as destination name. A separately verified relocation may instead use a structured mapping with an explicit destination name and original recovery identity; see [Explicit relocation bindings](../README.md#explicit-relocation-bindings). Do not publish a structured entry until the separately installed launcher has been upgraded to understand it. Source URLs are passed unchanged to workers. Case-insensitive current and historical name collisions are rejected before workers start. The standalone launcher performs structural checks, while the fetched scheduler validates the full manifest again before the batch lock and workers. Neither check proves the host actually serves Forgejo, that the source is reachable, or that a historical association is valid. Review hosts and mappings before use; do not put credentials in URLs. A mirror mapping may set `"ignore_releases": true` to skip release synchronization for that repository, leaving existing destination releases and recovery journals untouched; the worker's optional `--ignore-releases` applies only to the exact `--source` URLs of that invocation and is never written back to the manifest.
 
 ### Automatic owner-change migration
 
@@ -60,15 +60,17 @@ Never commit a rendered workflow file containing operator values back to this re
 After that gate, configure the launcher invocation (in the launcher wrapper and any manual runs) with these required paths and options:
 
 - Python executable: absolute Python executable with the sync package's dependencies available; it runs both the installed launcher and fetched scheduler. Ensure `openssl` and `git` are available on the scheduler's PATH.
-- Launcher path: absolute path to the separately installed, reviewed `auto_update.py`, outside any checkout or snapshot.
+- Launcher path: absolute path to the separately installed, reviewed `auto_update.py`, outside any checkout or snapshot. `github_app.py` ships beside `auto_update.py` in `scheduler/` and must be installed alongside it.
 - `--remote`: trusted repository HTTPS URL without embedded credentials (or a trusted local repository path); the launcher fetches its `refs/heads/main` on every run. SSH-style URLs are not supported.
 - `--state-dir`: absolute path to an owner-only persistent directory for temporary snapshots (mode 0700). Protect its parents.
 - `--job-lock`: absolute path to the launcher job lock in an owner-controlled directory, distinct from `--lock` and not a hard link to it.
-- `--helper-python`: absolute Python executable with PyJWT installed for the Manobot helper. This may differ from the launcher Python executable. The launcher uses its configured default Manobot helper path; to override it, add `--helper /absolute/path/to/github_app.py` before `--`. Configure the helper's credentials separately and securely for the scheduler environment.
+- `--helper`: **required** absolute path to the installed `github_app.py` helper (no built-in default path). Pass `--helper /absolute/path/to/github_app.py` before `--` (and also after `--` if the scheduler falls back to the helper without `--app-id`). Supply the helper's app credentials via `--app-id` / `--private-key-file` before `--` or via `MIRROR_APP_ID` / `MIRROR_APP_PRIVATE_KEY_FILE` in the environment.
+- `--helper-python`: **required** absolute Python executable with PyJWT installed for `github_app.py` (pass explicitly before `--`, and after `--` when the scheduler uses the helper fallback; defaults to `sys.executable` only if omitted). This may differ from the launcher Python executable.
 - `--installation` (or `MIRROR_APP_INSTALLATION`): required numeric GitHub App installation ID for the external `github_app.py` helper path (launcher `git fetch` before `--`, and the scheduler's non-`--app-id` fallback). `--installation` overrides `MIRROR_APP_INSTALLATION`; omitting both fails closed.
 - `--token-file`: absolute path to the Forgejo token file.
 - `--lock`: absolute path to the persistent batch lock file in an owner-controlled directory.
 - `--owner`: verified Forgejo account name.
+- `--port`: local Forgejo HTTP port (defaults to `3000`; pass `--port N` to match your instance).
 - `--app-id`: GitHub App ID.
 - `--private-key-file`: absolute path to the GitHub App private key file, not its contents.
 - `--source-app-owner` (or `MIRROR_APP_OWNER`): required GitHub App installation owner for source access when using `--app-id` and `--private-key-file` (and for `--forgejo-config-repo` publication). `--source-app-owner` overrides `MIRROR_APP_OWNER`; omitting both fails closed without defaulting to destination `--owner`. `auto_update.py` intentionally does not accept `--source-app-owner` in its forwarded scheduler options, so launcher invocations must export `MIRROR_APP_OWNER` in the environment (for example in the launcher wrapper). Direct `forgejo_schedule` or `forgejo_sync` runs may pass `--source-app-owner` or set `MIRROR_APP_OWNER`.
@@ -85,6 +87,7 @@ From a reviewed checkout, install a stable copy **outside** the checkout, in an 
 umask 077
 install -d -m 700 /absolute/protected/forgejo-launcher
 install -m 700 /absolute/reviewed/checkout/scheduler/auto_update.py /absolute/protected/forgejo-launcher/auto_update.py
+install -m 700 /absolute/reviewed/checkout/scheduler/github_app.py /absolute/protected/forgejo-launcher/github_app.py
 install -d -m 700 /absolute/protected/forgejo-state
 ```
 
@@ -114,10 +117,10 @@ The file contains 64 hexadecimal characters representing 32 random bytes; the sc
 For a manual run, use the same launcher command and both lock paths as the launcher wrapper, not `python -m repo_mirror.forgejo_schedule` directly. For example (substitute your installed paths, credential files and options):
 
 ```sh
-MIRROR_APP_OWNER=APP_OWNER /path/to/python /path/to/auto_update.py --remote https://... --state-dir /path/to/state --job-lock /path/to/job.lock --helper-python /path/to/helper-python --installation INSTALLATION_ID -- --token-file /path/to/token --timestamp-secret-file /path/to/recovery-secret --journal-dir /path/to/journals --owner OWNER --app-id APP_ID --private-key-file /path/to/app.pem --config-repo OWNER/NAME --asset-max-bytes N --lock /path/to/batch.lock
+MIRROR_APP_OWNER=APP_OWNER MIRROR_APP_ID=APP_ID MIRROR_APP_PRIVATE_KEY_FILE=/path/to/app.pem /path/to/python /path/to/auto_update.py --remote https://... --state-dir /path/to/state --job-lock /path/to/job.lock --helper /path/to/github_app.py --helper-python /path/to/helper-python --installation INSTALLATION_ID -- --token-file /path/to/token --timestamp-secret-file /path/to/recovery-secret --journal-dir /path/to/journals --owner OWNER --app-id APP_ID --private-key-file /path/to/app.pem --config-repo OWNER/NAME --asset-max-bytes N --lock /path/to/batch.lock
 ```
 
-(`MIRROR_APP_INSTALLATION` may be exported instead of passing `--installation INSTALLATION_ID`, and `--installation INSTALLATION_ID` may also be passed after `--` if the scheduler falls back to the helper without `--app-id`.)
+(`MIRROR_APP_INSTALLATION` may be exported instead of passing `--installation INSTALLATION_ID`, `--app-id` and `--private-key-file` may also be passed before `--` for `github_app.py`, and `--helper`, `--helper-python`, and `--installation` may also be passed after `--` if the scheduler falls back to the helper without `--app-id`.)
 
 The launcher injects the fetched manifest; do not supply `--manifest`. Add any scheduler options after `--` (or use `--forgejo-config-repo` and `--forgejo-config-id` instead of `--config-repo` when storing control files in a local Forgejo control repository).
 

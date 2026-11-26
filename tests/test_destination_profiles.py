@@ -27,7 +27,7 @@ class ProfileTests(unittest.TestCase):
         from repo_mirror.destination_profile import validate_runtime
         github = {**GITHUB, 'auth': 'mirrorbot'}
         validate_runtime(github, 'github', 'https://github.com', 'mirror-owner', 'mirrorbot')
-        for changes in ({'owner': 'other'}, {'url': 'https://evil.example'}, {'auth': 'manobot'}, {'type': 'forgejo'}):
+        for changes in ({'owner': 'other'}, {'url': 'https://evil.example'}, {'auth': 'other-app'}, {'type': 'forgejo'}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 validate_runtime({**github, **changes}, 'github', 'https://github.com', 'mirror-owner', 'mirrorbot')
         validate_runtime(FORGEJO, 'forgejo', 'http://127.0.0.1:3000', 'forgejo-owner', 'forgejo-home')

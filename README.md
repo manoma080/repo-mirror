@@ -86,7 +86,7 @@ A top-level `host_concurrency_limits` map caps how many repositories are mirrore
 
 Hosts are lower-case names, optionally with a non-default port; limits count repositories in flight per source host, not per provider, and never exceed the runner's worker pool. Capping a host trades throughput there for predictable request rates — a host that answers HTTP 429 when several repositories are fetched at once mirrors its repositories in several waves instead of failing.
 
-Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to Mirrorbot. The workflow uses those app secrets, while the Forgejo scheduler's separate Manobot helper authenticates GitHub source access. Named profiles with `account_type` (`personal` or `organization`) are also supported. Source URLs may point to GitHub, a public Forgejo instance or a public GitLab instance. GitLab repositories specifically require both source and destination ID pins before syncing; see [GitLab sources](#gitlab-sources). Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. A mirror entry may also set `"ignore_releases": true` to skip release synchronization for that repository only; the key is optional and defaults to `false`, and anything other than a JSON boolean is rejected. For other sources, IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
+Exactly one destination profile and one mirror per repository are supported; extra profiles or mirrors are rejected. Explicit profiles have exactly `type`, `url`, `owner`, and `auth`; the example is a personal account, and the CLI requires `DESTINATION_OWNER` to match, the URL to be exactly `https://github.com`, and `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY` for the `mirrorbot` alias. This applies to scheduled and manual runs; fixed `GH_TOKEN` is not accepted for this explicit alias. The alias identifies the configured credential source, not a secret or independent proof of app identity: verify the deployed secret values belong to your GitHub App. The workflow uses those app secrets, while the Forgejo scheduler's separate GitHub App helper authenticates GitHub source access. Named profiles with `account_type` (`personal` or `organization`) are also supported. Source URLs may point to GitHub, a public Forgejo instance or a public GitLab instance. GitLab repositories specifically require both source and destination ID pins before syncing; see [GitLab sources](#gitlab-sources). Mirror names default to `mirror-OWNER-REPO` and visibility defaults to private. A mirror entry may also set `"ignore_releases": true` to skip release synchronization for that repository only; the key is optional and defaults to `false`, and anything other than a JSON boolean is rejected. For other sources, IDs are optional positive integers: a pinned source must return the specified ID, and a pinned destination must already exist with the specified ID and matching source marker; a missing destination is not created. The source clone URL check still applies. These checks are not atomic protection against a repository changing after a check. Manual add/remove retains the named format.
 
 This named shape (`destinations`, `repositories`, optional `host_concurrency_limits`, and optional `auto_discoveries`) is the only supported configuration format; legacy `sources` and `destination_account_type` configurations are no longer supported. The deployed GitHub (`config.json`) and Forgejo (`config-forgejo.json`) manifests are already in the named format. See [docs/auto-discoveries.md](docs/auto-discoveries.md) as the reference for discovery rules (and the deprecated Forgejo-only `groups` compatibility window).
 
@@ -247,25 +247,22 @@ The Forgejo scheduler performs the same transaction with its own durable store: 
 
 Both runners share one transaction engine: `repo_mirror/migrations.py` owns the phase protocol, the journal writes, the pinned identity checks and the byte-exact config rewrite; each provider supplies a thin policy adapter (`github_migration.py` for the named GitHub config, `forgejo_migration.py` for the Forgejo manifest). Change the protocol in the shared engine, not in a provider.
 
-## Set up the GitHub App
+## Using your own GitHub App
 
-The mirror uses a [GitHub App](https://docs.github.com/apps) to act on your behalf. Install it on the account or organization that owns the mirrors, with access to all repositories, including new ones.
+Anyone forking this repository creates and runs **their own** [GitHub App](https://docs.github.com/apps). Install the app on the personal account or organization that owns both source access and mirror destinations (with access to all repositories, including new ones).
 
 | Permission | Level | Why |
 | --- | --- | --- |
 | Contents | Read and write | Copy branches, tags and releases. |
-| Workflows | Read and write | Copy repositories that contain workflow files. |
 | Administration | Read and write | Create repositories and turn off their Actions. |
+| Actions | Read and write | Manage repository Actions permissions on mirrors. |
+| Workflows | Read and write | Copy repositories that contain workflow files. |
 
-In the management repository, go to **Settings → Secrets and variables → Actions** and add:
+Generate a private key (`.pem`) for the app and store it owner-only (`chmod 600`) outside any repository; never commit keys or tokens to Git. If GitHub asks you to approve a permission change, approve it on the app installation.
 
-| Name | Type | Value |
-| --- | --- | --- |
-| `MIRROR_APP_ID` | Secret | The app's ID. |
-| `MIRROR_APP_PRIVATE_KEY` | Secret | The app's full private key. |
-| `MIRROR_OWNER` | Variable | The account or organization that owns the mirrors. |
-
-Never put keys or tokens in the repository's files. If GitHub asks you to approve a permission change, approve it on the app installation.
+- **GitHub runner:** In the management repository (**Settings → Secrets and variables → Actions**), add `MIRROR_APP_ID` (Secret), `MIRROR_APP_PRIVATE_KEY` (Secret, full PEM contents), `MIRROR_TIMESTAMP_SECRET` (Secret; see [Secret setup](#secret-setup)), optional `MIRROR_GITLAB_TOKEN` (Secret), `MIRROR_OWNER` (Variable, the account or organization that owns the mirrors), and optional `MIRROR_ACCOUNT_TYPE` (Variable, `personal` or `organization`). Store your private configuration in `<owner>/repo-mirror-config` on `main`.
+- **Forgejo runner:** Install [`scheduler/github_app.py`](scheduler/github_app.py) beside [`scheduler/auto_update.py`](scheduler/auto_update.py) and pass its path with `--helper` (and `--helper-python` pointing to Python with PyJWT installed). Provide `MIRROR_APP_OWNER` (or `--source-app-owner`), `--app-id`, `--private-key-file` (path to the `0600` `.pem` file), and `--installation` (or `MIRROR_APP_INSTALLATION`). The standalone helper also reads `MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY_FILE` (or `--app-id` / `--private-key-file` before `--`) when used by the launcher or the scheduler's non-`--app-id` fallback.
+- **Neutral `mirrorbot` alias:** In `config.json`, `"auth": "mirrorbot"` inside `destinations.<profile>` is a neutral project-defined alias rather than an external service or specific account name. It instructs the GitHub runner to require your configured GitHub App credentials (`MIRROR_APP_ID` and `MIRROR_APP_PRIVATE_KEY`) and reject a static `GH_TOKEN`.
 
 ### How the app login works
 
@@ -278,6 +275,23 @@ Never put keys or tokens in the repository's files. If GitHub asks you to approv
 - A transfer already in progress keeps its old token. If it fails, that repository is reported as failed and retried on a later run.
 
 The token is also sent with GitHub API read requests (to `api.github.com` only, on port 443). This reduces rate-limit errors. Forgejo, GitLab and public file downloads never get the token, and redirects to other sites never get it either.
+
+## Using your own Forgejo
+
+To mirror to a self-hosted Forgejo instance:
+
+1. **Local Forgejo instance:** Run Forgejo reachable on loopback HTTP (`http://127.0.0.1:<port>`, default port `3000`; override with `--port`) and create the dedicated destination account or organization (`--owner`, plus `--organization` for an organization).
+2. **Control-config repository:** Create a private repository for operational state (`config.json`, `failures.json`, `migrations.json`), either on the local Forgejo instance with Actions disabled (`--forgejo-config-repo OWNER/NAME` and immutable `--forgejo-config-id ID`) or as a private GitHub repository (`--config-repo OWNER/NAME` holding `config-forgejo.json`).
+3. **API token file:** Create an API token for the Forgejo destination account and store it as a single line in an owner-only file (`chmod 600`), passed via `--token-file` and kept separate from `--timestamp-secret-file` and `--private-key-file`. Explicit Forgejo destination profiles use `"auth": "forgejo-home"` as a neutral alias for that `--token-file`.
+4. **Runner and workflow installation:** Install reviewed copies of both [`scheduler/auto_update.py`](scheduler/auto_update.py) and [`scheduler/github_app.py`](scheduler/github_app.py) outside any repository checkout (`chmod 700` in a `0700` directory). Create a separate private, trusted Forgejo workflow repository, bind a Forgejo Actions runner and host launcher wrapper to that repository only, and copy [`scheduler/forgejo-actions.yml`](scheduler/forgejo-actions.yml) to `.forgejo/workflows/mirror.yml` on its default branch.
+5. **Template placeholders:** Before committing your private `.forgejo/workflows/mirror.yml`, replace all five placeholders (never commit rendered values back to this repository):
+   - `@SCHEDULE_CRON@` — cron schedule expression
+   - `@SCHEDULE_TIMEZONE@` — schedule timezone
+   - `@RUNNER_LABEL@` — Forgejo Actions runner label (`runs-on`)
+   - `@CONFIG_REPOSITORY@` — control/configuration repository slug shown in dispatch input help text
+   - `@LAUNCHER_WRAPPER@` — host launcher wrapper executable name
+
+See [scheduler/README.md](scheduler/README.md) for the full Forgejo scheduler options, trust boundary, and pilot checklist.
 
 ## Logs and errors
 
@@ -336,7 +350,7 @@ Failed uploads are saved in `failures.json` on the management branch. The next r
 | --- | --- |
 | A run is cancelled or cannot save the file | A valid release marker can let the next run resume if the source and transaction state remain compatible; otherwise manual review may be needed. |
 | Someone changes the management branch during a run | Saving may fail instead of overwriting their change. Run again. |
-| Branch protection blocks the workflow | Allow the Mirrorbot installation to push `failures.json` on the configuration repository. |
+| Branch protection blocks the workflow | Allow your GitHub App installation (the `mirrorbot` credentials) to push `failures.json` on the configuration repository. |
 | A source or marker is changed or removed | Old entries may need manual review. |
 
 ## Checking files

@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 
 SOURCE = re.compile(r'https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}')
 FORGEJO_SOURCE = re.compile(r'https://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9_][A-Za-z0-9_-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*')
-DEFAULT_HELPER = Path.home() / '.hermes/workspace/github-app-manobot/github_app.py'
+HELPER_PATH_REQUIRED = 'GitHub App helper path is required'
 
 
 def unique_pairs(pairs):
@@ -592,9 +592,11 @@ def main(argv=None):
     parser.add_argument('--remote', required=True, help='trusted repository URL or local path')
     parser.add_argument('--state-dir', required=True, help='private directory for temporary snapshots')
     parser.add_argument('--job-lock', required=True, help='distinct from scheduler --lock')
-    parser.add_argument('--helper', default=str(DEFAULT_HELPER))
-    parser.add_argument('--helper-python', default=sys.executable, help='Python with PyJWT installed for Manobot')
+    parser.add_argument('--helper', help='path to the GitHub App helper script')
+    parser.add_argument('--helper-python', default=sys.executable, help='Python with PyJWT installed for the GitHub App helper')
     parser.add_argument('--installation')
+    parser.add_argument('--app-id')
+    parser.add_argument('--private-key-file')
     parser.add_argument('scheduler_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     extra = args.scheduler_args
@@ -607,6 +609,16 @@ def main(argv=None):
             raise ValueError('GitHub App installation id is required')
         if not re.fullmatch(r'[0-9]+', installation):
             raise ValueError('installation')
+        if not args.helper:
+            raise ValueError(HELPER_PATH_REQUIRED)
+        if '\n' in args.helper or '\r' in args.helper or args.helper.startswith('-'):
+            raise ValueError('helper')
+        if bool(args.app_id) != bool(args.private_key_file):
+            raise ValueError('incomplete app credentials')
+        helper_prefix = [args.helper_python, args.helper]
+        if args.app_id:
+            helper_prefix += ['--app-id', args.app_id, '--private-key-file', args.private_key_file]
+        helper_prefix += ['--installation', installation, 'run', '--']
         if args.remote.startswith('-') or '\n' in args.remote or '\r' in args.remote:
             raise ValueError('remote')
         if '://' in args.remote:
@@ -697,7 +709,7 @@ def main(argv=None):
                 stage = 'git initialization'
                 if run(['git', 'init', '--bare', str(root / 'objects')]):
                     raise ValueError('git init')
-                fetch = [args.helper_python, args.helper, '--installation', installation, 'run', '--',
+                fetch = [*helper_prefix,
                          'git', '--git-dir', str(root / 'objects'), 'fetch', '--no-tags', '--no-recurse-submodules', '--', args.remote, 'refs/heads/main']
                 stage = 'fetch'
                 if run(fetch):
@@ -723,7 +735,7 @@ def main(argv=None):
                             tar.extract(member, destination, filter='data')
 
                 def fetch_commit(git_dir, url, label):
-                    fetch = [args.helper_python, args.helper, '--installation', installation, 'run', '--',
+                    fetch = [*helper_prefix,
                              'git', '--git-dir', str(git_dir), 'fetch', '--no-tags', '--no-recurse-submodules', '--',
                              url, 'refs/heads/main']
                     if run(fetch):
@@ -750,7 +762,7 @@ def main(argv=None):
                 manifest = snapshot / 'config-forgejo.json'
                 if local_repo is not None:
                     stage = 'local configuration fetch'
-                    port = int(seen.get('--port', '3300'))
+                    port = int(seen.get('--port', '3000'))
                     if not 1 <= port <= 65535:
                         raise ValueError('invalid local Forgejo port')
                     manifest = root / 'config.json'
@@ -779,7 +791,7 @@ def main(argv=None):
                     raise ValueError('invalid manifest')
                 if isinstance(sources, dict):
                     settings = next(iter(sources['destinations'].values()))
-                    if 'type' in settings and (settings['url'] != f"http://127.0.0.1:{seen.get('--port', '3300')}" or settings['owner'].lower() != seen.get('--owner', '').lower() or settings['auth'] != 'forgejo-home' or '--organization' in seen):
+                    if 'type' in settings and (settings['url'] != f"http://127.0.0.1:{seen.get('--port', '3000')}" or settings['owner'].lower() != seen.get('--owner', '').lower() or settings['auth'] != 'forgejo-home' or '--organization' in seen):
                         raise ValueError('destination profile runtime mismatch')
                 if not (snapshot / 'repo_mirror' / 'forgejo_schedule.py').is_file():
                     raise ValueError('scheduler missing')
@@ -791,7 +803,7 @@ def main(argv=None):
                 print(f'Updater fetched commit: {commit}', file=sys.stderr, flush=True)
                 return checked_process([sys.executable, '-m', 'repo_mirror.forgejo_schedule', 'run', '--manifest', str(manifest), *extra], cwd=snapshot, env=scheduler_env, lock_fd=fd, quiet=False, scheduler=True)
     except (OSError, ValueError, http.client.HTTPException, subprocess.SubprocessError, tarfile.TarError) as exc:
-        if type(exc) is ValueError and str(exc) == 'GitHub App installation id is required':
+        if type(exc) is ValueError and str(exc) in ('GitHub App installation id is required', HELPER_PATH_REQUIRED):
             print(str(exc), file=sys.stderr)
         else:
             print(f'Updater failed: {stage}', file=sys.stderr)

@@ -54,7 +54,7 @@ class JournalLockTests(unittest.TestCase):
             first_ready, second_ready = ctx.Queue(), ctx.Queue()
             first_release, release = ctx.Event(), ctx.Event()
             first = ctx.Process(target=_hold_destination, args=(home, 'mirror-owner/mirror-test', first_ready, first_release))
-            second = ctx.Process(target=_hold_destination, args=(home, 'MANOMA080/MIRROR-TEST', second_ready, release))
+            second = ctx.Process(target=_hold_destination, args=(home, 'MIRROR-OWNER/MIRROR-TEST', second_ready, release))
             first.start()
             try:
                 self.assertEqual(first_ready.get(timeout=5), 'entered')

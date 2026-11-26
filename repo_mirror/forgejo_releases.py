@@ -86,7 +86,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class ForgejoReleases:
-    def __init__(self, owner_repo, token, port=3300):
+    def __init__(self, owner_repo, token, port=3000):
         owner, repo = source_identity(owner_repo)
         if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
             raise ValueError('invalid local port')

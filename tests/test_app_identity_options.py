@@ -20,6 +20,8 @@ LAUNCHER = ROOT / 'scheduler' / 'auto_update.py'
 URL = 'https://github.com/mirror-owner/mirror-demo'
 OWNER_REQUIRED = 'source GitHub App owner is required'
 INSTALLATION_REQUIRED = 'GitHub App installation id is required'
+HELPER_REQUIRED = 'GitHub App helper path is required'
+GITHUB_TOKEN_HELPER_REQUIRED = 'GITHUB_TOKEN required; run under the GitHub App helper'
 
 
 def _load_updater():
@@ -215,6 +217,7 @@ class SchedulerIdentityOptionsTests(unittest.TestCase):
                 'run', '--manifest', files['manifest'], '--token-file', files['token'],
                 '--timestamp-secret-file', files['secret'], '--journal-dir', files['journals'],
                 '--owner', 'dest-owner', '--lock', files['lock'],
+                '--helper', str(Path(directory) / 'helper.py'),
             ]
 
             with (
@@ -443,19 +446,90 @@ class AutoUpdateIdentityTests(unittest.TestCase):
             with redirect_stderr(stderr):
                 rc = updater.main([
                     '--remote', str(tmp), '--state-dir', str(tmp / 'state'),
-                    '--job-lock', str(tmp / 'job.lock'), '--', '--lock', str(tmp / 'sched.lock'),
+                    '--job-lock', str(tmp / 'job.lock'), '--helper', str(tmp / 'helper.py'),
+                    '--', '--lock', str(tmp / 'sched.lock'),
                 ])
             self.assertEqual(rc, 2)
             self.assertIn(INSTALLATION_REQUIRED, stderr.getvalue())
 
+    def test_updater_requires_helper_flag(self):
+        updater = _load_updater()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, _clean_env(MIRROR_APP_INSTALLATION='123456'), clear=True):
+            tmp = Path(directory)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                rc = updater.main([
+                    '--remote', str(tmp), '--state-dir', str(tmp / 'state'),
+                    '--job-lock', str(tmp / 'job.lock'), '--', '--lock', str(tmp / 'sched.lock'),
+                ])
+            self.assertEqual(rc, 2)
+            self.assertIn(HELPER_REQUIRED, stderr.getvalue())
+
+    def test_scheduler_helper_mode_requires_helper_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            manifest = tmp / 'manifest.json'
+            manifest.write_text(json.dumps([URL]))
+            secret = tmp / 'secret'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            token = tmp / 'token'
+            token.write_text('local-token')
+            token.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            lock = tmp / 'lock'
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, _clean_env(MIRROR_APP_INSTALLATION='123456'), clear=True),
+                patch('repo_mirror.forgejo_schedule.subprocess.Popen') as popen,
+                redirect_stderr(stderr),
+            ):
+                rc = forgejo_schedule.main([
+                    'run', '--manifest', str(manifest), '--token-file', str(token),
+                    '--timestamp-secret-file', str(secret), '--journal-dir', str(journals),
+                    '--owner', 'dest-owner', '--lock', str(lock),
+                ])
+            self.assertEqual(rc, 2)
+            self.assertIn(HELPER_REQUIRED, stderr.getvalue())
+            popen.assert_not_called()
+            self.assertFalse(lock.exists())
+
+    def test_sync_missing_github_token_reports_generic_helper_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            config = tmp / 'config.json'
+            config.write_text(json.dumps([URL]))
+            token = tmp / 'token'
+            token.write_text('local-token')
+            token.chmod(0o600)
+            secret = tmp / 'secret'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, _clean_env(), clear=True),
+                redirect_stderr(stderr),
+            ):
+                rc = forgejo_sync.main([
+                    '--config', str(config), '--source', URL, '--token-file', str(token),
+                    '--timestamp-secret-file', str(secret), '--journal-dir', str(journals),
+                    '--owner', 'dest-owner', '--use-github-token',
+                ])
+            self.assertEqual(rc, 2)
+            self.assertIn(GITHUB_TOKEN_HELPER_REQUIRED, stderr.getvalue())
+
 
 class ErrorDetailTests(unittest.TestCase):
     def test_new_fixed_messages_are_safe_and_surfaced(self):
-        for message in (OWNER_REQUIRED, INSTALLATION_REQUIRED):
+        for message in (OWNER_REQUIRED, INSTALLATION_REQUIRED, HELPER_REQUIRED, GITHUB_TOKEN_HELPER_REQUIRED):
             with self.subTest(message=message):
                 self.assertIn(message, SAFE_ERROR_MESSAGES)
                 self.assertEqual(error_detail(ValueError(message)), message)
-        self.assertEqual(forgejo_sync.safe_reason(ValueError(OWNER_REQUIRED), configuration=True), OWNER_REQUIRED)
+        for message in (OWNER_REQUIRED, HELPER_REQUIRED, GITHUB_TOKEN_HELPER_REQUIRED):
+            self.assertEqual(forgejo_sync.safe_reason(ValueError(message), configuration=True), message)
         self.assertEqual(forgejo_sync.safe_reason(ValueError(OWNER_REQUIRED)), 'unexpected sync failure')
 
 
