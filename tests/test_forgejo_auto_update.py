@@ -43,7 +43,7 @@ def launch(tmp_path, repo, helper, extra=None):
     env = dict(os.environ, RESULT=str(tmp_path / 'result'))
     if extra is None:
         extra = ['--lock', str(tmp_path / 'scheduler.lock')]
-    return subprocess.run([sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp_path / 'state'), '--job-lock', str(tmp_path / 'job.lock'), '--helper', str(helper), '--', *extra], env=env, capture_output=True, text=True)
+    return subprocess.run([sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp_path / 'state'), '--job-lock', str(tmp_path / 'job.lock'), '--helper', str(helper), '--installation', '123456', '--', *extra], env=env, capture_output=True, text=True)
 
 
 class AutoUpdateIntegrationTests(unittest.TestCase):
@@ -160,7 +160,7 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
         env = dict(os.environ, RESULT=str(tmp / 'result'), CONFIG_REMOTE=str(config))
         result = subprocess.run(
             [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp / 'state'),
-             '--job-lock', str(tmp / 'job.lock'), '--helper', str(helper), '--',
+             '--job-lock', str(tmp / 'job.lock'), '--helper', str(helper), '--installation', '123456', '--',
              '--config-repo', 'mirror-owner/repo-mirror-config', '--lock', str(tmp / 'scheduler.lock')],
             env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -219,7 +219,7 @@ sys.exit(0 if status == 143 else 1)
             'pathlib.Path(os.environ["RESULT"]).write_text(str(p.pid))\n'
             'while True: time.sleep(.05)\n')
         env = dict(os.environ, RESULT=str(tmp / 'result'))
-        cmd = [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp / 'state'), '--job-lock', str(tmp / 'job.lock'), '--helper', str(helper), '--', '--lock', str(tmp / 'scheduler.lock')]
+        cmd = [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp / 'state'), '--job-lock', str(tmp / 'job.lock'), '--helper', str(helper), '--installation', '123456', '--', '--lock', str(tmp / 'scheduler.lock')]
         child = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         descendant = None
         try:
@@ -365,7 +365,7 @@ sys.exit(0 if status == 143 else 1)
         git(repo, 'add', '.')
         git(repo, 'commit', '-m', 'wait')
         env = dict(os.environ, RESULT=str(tmp_path / 'result'))
-        cmd = [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp_path / 'state'), '--job-lock', str(tmp_path / 'job.lock'), '--helper', str(helper), '--', '--lock', str(tmp_path / 'scheduler.lock')]
+        cmd = [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp_path / 'state'), '--job-lock', str(tmp_path / 'job.lock'), '--helper', str(helper), '--installation', '123456', '--', '--lock', str(tmp_path / 'scheduler.lock')]
         child = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             deadline = time.monotonic() + 10

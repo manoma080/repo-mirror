@@ -136,7 +136,7 @@ exit 1
             helper.write_text('import os,sys\na=sys.argv[sys.argv.index("--")+1:]\nos.execvp(a[0], a)\n')
             worker = tmp / 'worker'
             worker.write_text('#!/bin/sh\nfor last; do :; done\nprintf "%s\\n" "$last" >> "$CALLS"\n'); worker.chmod(0o700)
-            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--sync-python', str(worker)]
+            cmd = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper), '--sync-python', str(worker)]
             env = {**os.environ, 'CALLS': str(tmp / 'calls')}
             result = subprocess.run(cmd, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -176,7 +176,7 @@ with open(p / "guard", "w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     (p / (name + ".active")).unlink()
 ''')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--jobs', '4'], env={**os.environ, 'STATE': str(tmp)}, capture_output=True, text=True, timeout=20)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper), '--jobs', '4'], env={**os.environ, 'STATE': str(tmp)}, capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertEqual(len(list(tmp.glob('*.started'))), 8)
             self.assertFalse((tmp / 'overlimit').exists())
@@ -202,7 +202,7 @@ if sys.argv[-1].endswith('-a'):
 else:
     time.sleep(.15)
 ''')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--jobs', '1', '--repository-timeout', '.5'], env={**os.environ, 'PIDFILE': str(tmp / 'pid')}, capture_output=True, text=True, timeout=8)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper), '--jobs', '1', '--repository-timeout', '.5'], env={**os.environ, 'PIDFILE': str(tmp / 'pid')}, capture_output=True, text=True, timeout=8)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn('1 succeeded, 1 failed', result.stdout)
             self.assertIn('timed out', result.stdout)
@@ -236,7 +236,7 @@ else:
             helper = tmp / 'helper.py'
             helper.write_text('import os,pathlib,subprocess,sys,time\np = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"])\ntime.sleep(.2)\npathlib.Path(os.environ["MARK"]).write_text(str(os.getpid())+" "+str(p.pid))\ntime.sleep(60)\n')
             lock = tmp / 'lock'
-            child = subprocess.Popen([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--helper', str(helper)], env={**os.environ, 'MARK': str(tmp / 'mark')}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            child = subprocess.Popen([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--installation', '123456', '--helper', str(helper)], env={**os.environ, 'MARK': str(tmp / 'mark')}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 deadline = time.monotonic() + 10
                 while not (tmp / 'mark').exists() and time.monotonic() < deadline:
@@ -294,7 +294,7 @@ forgejo_schedule.subprocess.Popen = spawn
 sys.exit(forgejo_schedule.main(sys.argv[1:]))
 """)
             lock = tmp / 'lock'
-            command = [sys.executable, str(harness), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--helper', str(helper)]
+            command = [sys.executable, str(harness), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--installation', '123456', '--helper', str(helper)]
             env = {**os.environ, 'MARK': str(tmp / 'mark'), 'PYTHONPATH': str(ROOT)}
             worker = None
             try:
@@ -326,7 +326,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text("import os,pathlib,subprocess,sys,time\np=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\npathlib.Path(os.environ['MARK']).write_text(str(p.pid))\n")
-            command = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)]
+            command = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper)]
             pid = None
             try:
                 result = subprocess.run(command, env={**os.environ, 'MARK': str(tmp / 'mark')}, capture_output=True, timeout=8)
@@ -361,7 +361,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             helper = tmp / 'helper.py'
             helper.write_text("import os,pathlib,signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\npathlib.Path(os.environ['STATE'],str(os.getpid())).touch()\ntime.sleep(60)\n")
             lock = tmp / 'lock'
-            command = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--helper', str(helper), '--jobs', '4']
+            command = [sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--installation', '123456', '--helper', str(helper), '--jobs', '4']
             state = tmp / 'workers'
             state.mkdir()
             child = subprocess.Popen(command, env={**os.environ, 'STATE': str(state)}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -403,7 +403,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             args = ['run', '--manifest', str(manifest), '--token-file', 'unused', '--owner', 'alice',
-                    '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen') as run:
                 self.assertEqual(forgejo_schedule.main(args), 2)
                 run.assert_not_called()
@@ -421,7 +421,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             journals = tmp / 'journals'
             journals.mkdir(mode=0o700)
             args = ['run', '--manifest', str(manifest), '--token-file', 'x', '--owner', 'alice',
-                    '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=lambda *a, **kw: __import__('unittest.mock', fromlist=['Mock']).Mock(poll=lambda: 0, pid=999999999)) as run:
                 self.assertEqual(forgejo_schedule.main(args), 0)
                 self.assertEqual(forgejo_schedule.main(args), 0)
@@ -449,7 +449,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             hardlink = tmp / 'hardlink'
             os.link(secret, hardlink)
             args = ['run', '--manifest', str(manifest), '--token-file', str(hardlink), '--owner', 'alice',
-                    '--lock', str(tmp / 'lock'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
+                    '--lock', str(tmp / 'lock'), '--installation', '123456', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals)]
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen') as run:
                 self.assertEqual(forgejo_schedule.main(args), 2)  # hardlink to credential
                 args[args.index('--token-file') + 1] = 'unused'
@@ -477,12 +477,13 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             with patch('repo_mirror.forgejo_schedule.subprocess.Popen', side_effect=lambda *a, **kw: __import__('unittest.mock', fromlist=['Mock']).Mock(poll=lambda: 0, pid=999999999)) as run:
                 result = forgejo_schedule.main(['run', '--manifest', str(manifest), '--token-file', 'x',
-                    '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--app-id', '123', '--private-key-file', '/key'])
+                    '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--app-id', '123', '--private-key-file', '/key', '--source-app-owner', 'mirror-owner'])
             self.assertEqual(result, 0)
             command = run.call_args.args[0]
             self.assertEqual(command[0], sys.executable)
             self.assertIn('repo_mirror.forgejo_sync', command)
             self.assertIn('--private-key-file', command)
+            self.assertEqual(command[command.index('--source-app-owner') + 1], 'mirror-owner')
             self.assertNotIn('run', command)
 
     def test_run_refreshes_per_source_and_suppresses_child_output(self):
@@ -499,7 +500,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             calls = tmp / 'calls'
             helper = tmp / 'helper.py'
             helper.write_text('import os,sys\nwith open(os.environ["CALLS"], "a") as f: f.write(sys.argv[-1]+"\\n")\nprint("SECRET_FROM_CHILD")\n')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', str(tmp / 'token'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper), '--helper-python', sys.executable], env={**os.environ, 'CALLS': str(calls)}, capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', str(tmp / 'token'), '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper), '--helper-python', sys.executable], env={**os.environ, 'CALLS': str(calls)}, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertCountEqual(calls.read_text().splitlines(), sources)
             self.assertNotIn('SECRET_FROM_CHILD', result.stdout + result.stderr)
@@ -533,7 +534,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             lock.touch(mode=0o600)
             with lock.open('r+') as held:
                 fcntl.flock(held, fcntl.LOCK_EX)
-                result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock)], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(lock), '--installation', '123456'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 75)
 
     def test_failure_does_not_stop_later_repositories(self):
@@ -548,7 +549,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a', 'https://github.com/mirror-owner/mirror-b']))
             helper = tmp / 'helper.py'
             helper.write_text('import sys\nprint("secret", file=sys.stderr)\nsys.exit(1 if sys.argv[-1].endswith("-a") else 0)\n')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 1)
             self.assertIn('1 succeeded, 1 failed', result.stdout)
             self.assertNotIn('secret', result.stdout + result.stderr)
@@ -565,7 +566,7 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text('import sys\nprint("FORGEJO_FAILURE: release metadata collision", file=sys.stderr)\nprint("FORGEJO_FAILURE: release metadata collision secret", file=sys.stderr)\nprint("secret https://example/token", file=sys.stderr)\nsys.exit(1)\n')
-            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--helper', str(helper)], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, str(SCRIPT), 'run', '--manifest', str(manifest), '--token-file', 'unused', '--timestamp-secret-file', str(secret), '--journal-dir', str(journals), '--owner', 'alice', '--lock', str(tmp / 'lock'), '--installation', '123456', '--helper', str(helper)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 1)
             self.assertIn('release metadata collision', result.stdout + result.stderr)
             self.assertNotIn('secret', result.stdout + result.stderr)

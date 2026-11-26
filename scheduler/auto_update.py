@@ -594,7 +594,7 @@ def main(argv=None):
     parser.add_argument('--job-lock', required=True, help='distinct from scheduler --lock')
     parser.add_argument('--helper', default=str(DEFAULT_HELPER))
     parser.add_argument('--helper-python', default=sys.executable, help='Python with PyJWT installed for Manobot')
-    parser.add_argument('--installation', default='178997310')
+    parser.add_argument('--installation')
     parser.add_argument('scheduler_args', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     extra = args.scheduler_args
@@ -602,7 +602,10 @@ def main(argv=None):
         extra = extra[1:]
     stage = 'configuration'
     try:
-        if not re.fullmatch(r'[0-9]+', args.installation):
+        installation = args.installation if args.installation is not None else os.environ.get('MIRROR_APP_INSTALLATION')
+        if not installation:
+            raise ValueError('GitHub App installation id is required')
+        if not re.fullmatch(r'[0-9]+', installation):
             raise ValueError('installation')
         if args.remote.startswith('-') or '\n' in args.remote or '\r' in args.remote:
             raise ValueError('remote')
@@ -694,7 +697,7 @@ def main(argv=None):
                 stage = 'git initialization'
                 if run(['git', 'init', '--bare', str(root / 'objects')]):
                     raise ValueError('git init')
-                fetch = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--',
+                fetch = [args.helper_python, args.helper, '--installation', installation, 'run', '--',
                          'git', '--git-dir', str(root / 'objects'), 'fetch', '--no-tags', '--no-recurse-submodules', '--', args.remote, 'refs/heads/main']
                 stage = 'fetch'
                 if run(fetch):
@@ -720,7 +723,7 @@ def main(argv=None):
                             tar.extract(member, destination, filter='data')
 
                 def fetch_commit(git_dir, url, label):
-                    fetch = [args.helper_python, args.helper, '--installation', args.installation, 'run', '--',
+                    fetch = [args.helper_python, args.helper, '--installation', installation, 'run', '--',
                              'git', '--git-dir', str(git_dir), 'fetch', '--no-tags', '--no-recurse-submodules', '--',
                              url, 'refs/heads/main']
                     if run(fetch):
@@ -787,8 +790,11 @@ def main(argv=None):
                 stage = 'scheduler launch'
                 print(f'Updater fetched commit: {commit}', file=sys.stderr, flush=True)
                 return checked_process([sys.executable, '-m', 'repo_mirror.forgejo_schedule', 'run', '--manifest', str(manifest), *extra], cwd=snapshot, env=scheduler_env, lock_fd=fd, quiet=False, scheduler=True)
-    except (OSError, ValueError, http.client.HTTPException, subprocess.SubprocessError, tarfile.TarError):
-        print(f'Updater failed: {stage}', file=sys.stderr)
+    except (OSError, ValueError, http.client.HTTPException, subprocess.SubprocessError, tarfile.TarError) as exc:
+        if type(exc) is ValueError and str(exc) == 'GitHub App installation id is required':
+            print(str(exc), file=sys.stderr)
+        else:
+            print(f'Updater failed: {stage}', file=sys.stderr)
         return 2
 
 
