@@ -94,3 +94,18 @@ class ArchiveCreationTests(unittest.TestCase):
             create_archive(api, "owner", name, "organization", "20261109T120000Z")
         self.assertEqual(len(set(api.names)), 2)
         self.assertTrue(all(len(name) <= 100 for name in api.names))
+
+    def test_archive_name_helper_normal_hash_fallback_and_validation(self):
+        self.assertEqual(
+            git_sync.archive_name("mirror-Alice-alpha", "20261109T120000Z"),
+            "mirror-Alice-alpha-wipe-20261109T120000Z",
+        )
+        long_a = git_sync.archive_name("a" * 90 + "x", "20261109T120000Z")
+        long_b = git_sync.archive_name("a" * 90 + "y", "20261109T120000Z")
+        self.assertEqual(len(long_a), 100)
+        self.assertEqual(len(long_b), 100)
+        self.assertNotEqual(long_a, long_b)
+        self.assertTrue(long_a.endswith("-wipe-20261109T120000Z"))
+        for bad_name, bad_ts in (("", "20261109T120000Z"), ("..", "20261109T120000Z"), ("mirror", "bad-ts")):
+            with self.assertRaisesRegex(ValueError, "invalid archive identity"):
+                git_sync.archive_name(bad_name, bad_ts)

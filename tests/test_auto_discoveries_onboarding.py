@@ -14,12 +14,15 @@ from repo_mirror import cli
 from repo_mirror.auto_discoveries_onboarding import (
     OnboardingPublicationError,
     PartialOnboarding,
+    _plan_rule,
     discover_rule_repositories,
     onboard_auto_discoveries,
     report_orphans,
     resolve_owner,
 )
 from repo_mirror.config_named import normalize_config
+from repo_mirror.git_sync import archive_name
+from repo_mirror.logging_utils import safe_label
 from repo_mirror.sources import source_marker
 
 
@@ -79,8 +82,10 @@ class FakeDestinationAPI:
         self.repos = dict(existing or {})
         self.actions = {}
         self.calls = []
-        self._next_id = 5000
+        self._next_id = max([5000, *(r.get("id", 0) for r in self.repos.values() if isinstance(r, dict))])
         self.fail_on_create = None
+        self.fail_on_patch = None
+        self.patch_response_override = None
         self.actions_readback_override = None
 
     def request(self, method, url, data=None):
@@ -104,6 +109,23 @@ class FakeDestinationAPI:
                 if repo is None:
                     raise _http_error(url, 404)
                 return dict(repo)
+            if method == "PATCH":
+                if self.fail_on_patch is not None and (self.fail_on_patch is True or rest == self.fail_on_patch):
+                    raise _http_error(url, 500)
+                repo = self.repos.get(rest.lower())
+                if repo is None:
+                    raise _http_error(url, 404)
+                new_name = data["name"]
+                if self.patch_response_override is not None:
+                    if callable(self.patch_response_override):
+                        return self.patch_response_override(rest, new_name, dict(repo))
+                    return dict(self.patch_response_override)
+                del self.repos[rest.lower()]
+                updated = dict(repo)
+                updated["name"] = new_name
+                updated["full_name"] = f"{self.owner}/{new_name}"
+                self.repos[new_name.lower()] = updated
+                return dict(updated)
         create_url = (
             "https://api.github.com/user/repos"
             if self.account_type == "personal"
@@ -825,7 +847,13 @@ class OnboardingBehaviorTests(unittest.TestCase):
         store = FakeStore(raw)
         dst = FakeDestinationAPI()
         src = FakeSourceAPI(
-            routes={"https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"}},
+            routes={
+                "https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"},
+                "https://api.github.com/repositories/1470348900": {
+                    "id": 1470348900,
+                    "full_name": "BlackBearRevived/moved-elsewhere",
+                },
+            },
             pages_routes={
                 "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
                     {
@@ -873,7 +901,7 @@ class OnboardingBehaviorTests(unittest.TestCase):
         log = stream.getvalue()
         self.assertEqual(log.count(expected_conflict_line), 1)
         self.assertIn(
-            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=1 excluded=0 tracked=1 conflicts=1",
+            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=1 excluded=0 tracked=1 conflicts=1 adopted=0",
             log,
         )
         self.assertNotIn("https://", log)
@@ -892,7 +920,7 @@ class OnboardingBehaviorTests(unittest.TestCase):
         log2 = stream2.getvalue()
         self.assertEqual(log2.count(expected_conflict_line), 1)
         self.assertIn(
-            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=0 excluded=0 tracked=2 conflicts=1",
+            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=0 excluded=0 tracked=2 conflicts=1 adopted=0",
             log2,
         )
 
@@ -1078,7 +1106,13 @@ class CliIntegrationTests(unittest.TestCase):
         store = FakeStore(raw)
         dst = FakeDestinationAPI()
         src = FakeSourceAPI(
-            routes={"https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"}},
+            routes={
+                "https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"},
+                "https://api.github.com/repositories/1470348900": {
+                    "id": 1470348900,
+                    "full_name": "BlackBearRevived/moved-elsewhere",
+                },
+            },
             pages_routes={
                 "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
                     {
@@ -1131,7 +1165,7 @@ class CliIntegrationTests(unittest.TestCase):
             stderr_out,
         )
         self.assertIn(
-            "auto_discovery 1/1 (BlackBearRevived): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1",
+            "auto_discovery 1/1 (BlackBearRevived): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1 adopted=0",
             stderr_out,
         )
         self.assertIn("summary sources=3 discovery_failed=0 repositories=2 succeeded=2 failed=0", stderr_out)
@@ -1162,7 +1196,13 @@ class CliIntegrationTests(unittest.TestCase):
         store = FakeStore(raw)
         dst = FakeDestinationAPI()
         src = FakeSourceAPI(
-            routes={"https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"}},
+            routes={
+                "https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"},
+                "https://api.github.com/repositories/1470348900": {
+                    "id": 1470348900,
+                    "full_name": "BlackBearRevived/moved-elsewhere",
+                },
+            },
             pages_routes={
                 "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
                     {
@@ -1475,6 +1515,705 @@ class RuleRelocationTests(unittest.TestCase):
         self.assertEqual(store.publish_calls, 0)
         self.assertEqual(dst.calls, [])
         self.assertNotIn("relocated to", stream.getvalue())
+
+
+class AdoptionTests(unittest.TestCase):
+    def test_adoption_happy_path_renames_creates_and_publishes_in_one_cas_write(self):
+        old_child = {
+            "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+            "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/Alice",
+        }
+        tracked_child = {
+            "source": {"url": "https://github.com/Alice/beta", "id": 12},
+            "mirrors": {"main": {"name": "mirror-Alice-beta", "id": 5002, "visibility": "private"}},
+            "discovered_by": "https://github.com/Alice",
+        }
+        doc = _base_doc(
+            [
+                {
+                    "url": "https://github.com/Alice",
+                    "id": 100,
+                    "overrides": {"alpha": {"visibility": "public", "ignore_releases": True}},
+                }
+            ],
+            [old_child, tracked_child],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                    "private": True,
+                }
+            }
+        )
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    },
+                    {
+                        "id": 12,
+                        "name": "beta",
+                        "full_name": "Alice/beta",
+                        "clone_url": "https://github.com/Alice/beta.git",
+                    },
+                ]
+            },
+        )
+        stamp = "20261126T090000Z"
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            raw,
+            store,
+            lambda _: src,
+            dst,
+            owner="dest",
+            account_type="personal",
+            stream=stream,
+            archive_timestamp=stamp,
+        )
+        self.assertEqual(store.publish_calls, 1)
+        self.assertEqual(res.inducted_total, 0)
+        self.assertEqual(res.adopted_total, 1)
+        self.assertEqual(res.conflicts, ())
+        self.assertEqual(res.orphaned_children, ())
+        self.assertIn(("GET", "https://api.github.com/repositories/11"), src.requests)
+
+        expected_archive = f"mirror-Alice-alpha-wipe-{stamp}"
+        patch_calls = [c for c in dst.calls if c[0] == "PATCH"]
+        self.assertEqual(
+            patch_calls,
+            [("PATCH", "https://api.github.com/repos/dest/mirror-Alice-alpha", {"name": expected_archive})],
+        )
+        self.assertIn(expected_archive.lower(), dst.repos)
+        self.assertEqual(dst.repos[expected_archive.lower()]["id"], 5001)
+        self.assertIn("mirror-alice-alpha", dst.repos)
+        new_dest_id = dst.repos["mirror-alice-alpha"]["id"]
+        self.assertNotEqual(new_dest_id, 5001)
+        self.assertEqual(dst.actions["mirror-Alice-alpha"], False)
+
+        post_payloads = [data for method, _, data in dst.calls if method == "POST"]
+        self.assertEqual(len(post_payloads), 1)
+        self.assertEqual(post_payloads[0]["name"], "mirror-Alice-alpha")
+        self.assertEqual(post_payloads[0]["private"], False)
+        self.assertEqual(post_payloads[0]["auto_init"], False)
+        self.assertIn("[repo-mirror:initializing:v1]", post_payloads[0]["description"])
+
+        published = json.loads(res.config_bytes)
+        self.assertEqual(len(published["repositories"]), 2)
+        by_url = {entry["source"]["url"]: entry for entry in published["repositories"]}
+        adopted = by_url["https://github.com/Alice/alpha"]
+        self.assertEqual(adopted["source"], {"url": "https://github.com/Alice/alpha", "id": 211})
+        self.assertEqual(
+            adopted["mirrors"]["main"],
+            {
+                "name": "mirror-Alice-alpha",
+                "id": new_dest_id,
+                "visibility": "public",
+                "ignore_releases": True,
+            },
+        )
+        self.assertEqual(adopted["discovered_by"], "https://github.com/Alice")
+
+        log = stream.getvalue()
+        self.assertIn(
+            f"auto_discovery 1/1 (Alice): repository alpha: upstream recreated (pinned id 11, now 211); "
+            f"archived as {expected_archive}; adopted",
+            log,
+        )
+        self.assertIn(
+            "auto_discovery 1/1 (Alice): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=0 adopted=1",
+            log,
+        )
+        self.assertNotIn("https://", log)
+
+        # Steady-state second run is a complete no-op.
+        dst.calls.clear()
+        steady = onboard_auto_discoveries(
+            res.config_bytes,
+            store,
+            lambda _: src,
+            dst,
+            owner="dest",
+            account_type="personal",
+            archive_timestamp=stamp,
+        )
+        self.assertEqual(steady.config_bytes, res.config_bytes)
+        self.assertEqual(store.publish_calls, 1)
+        self.assertEqual(dst.calls, [])
+        self.assertEqual(steady.adopted_total, 0)
+
+    def test_cli_adopts_recreated_repository_and_mirrors_in_same_run(self):
+        from contextlib import redirect_stderr
+
+        doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [
+                {
+                    "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+                    "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"}},
+                    "discovered_by": "https://github.com/Alice",
+                },
+                {
+                    "source": {"url": "https://github.com/Alice/beta", "id": 12},
+                    "mirrors": {"main": {"name": "mirror-Alice-beta", "id": 5002, "visibility": "private"}},
+                    "discovered_by": "https://github.com/Alice",
+                },
+            ],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                    "private": True,
+                }
+            }
+        )
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    },
+                    {
+                        "id": 12,
+                        "name": "beta",
+                        "full_name": "Alice/beta",
+                        "clone_url": "https://github.com/Alice/beta.git",
+                    },
+                ]
+            },
+        )
+        mirrored = []
+
+        def fake_mirror(source, name, owner, *args, **kwargs):
+            mirrored.append((name, source["mirror"]["source_id"], source["mirror"]["destination_id"]))
+            return None
+
+        env = {"GH_TOKEN": "token", "DESTINATION_OWNER": "dest", "MIRROR_TIMESTAMP_SECRET": "secret"}
+        stderr_buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_bytes(raw)
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("repo_mirror.github_migration.store_from_environment", return_value=store),
+                patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
+                patch.object(cli, "SourceAPI", return_value=src),
+                patch.object(cli, "API", side_effect=[Mock(), dst]),
+                patch.object(cli, "mirror_repository", side_effect=fake_mirror),
+                redirect_stderr(stderr_buf),
+            ):
+                cli.main(["--config", str(path)])
+
+        self.assertEqual(store.publish_calls, 1)
+        patch_calls = [c for c in dst.calls if c[0] == "PATCH"]
+        self.assertEqual(len(patch_calls), 1)
+        archived_name = patch_calls[0][2]["name"]
+        self.assertTrue(archived_name.startswith("mirror-Alice-alpha-wipe-"))
+        self.assertIn(archived_name.lower(), dst.repos)
+        new_alpha_id = dst.repos["mirror-alice-alpha"]["id"]
+        self.assertEqual(
+            sorted(mirrored),
+            [("alpha", 211, new_alpha_id), ("beta", 12, 5002)],
+        )
+        stderr_out = stderr_buf.getvalue()
+        self.assertIn(
+            f"auto_discovery 1/1 (Alice): repository alpha: upstream recreated (pinned id 11, now 211); "
+            f"archived as {safe_label(archived_name)}; adopted",
+            stderr_out,
+        )
+        self.assertIn(
+            "auto_discovery 1/1 (Alice): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=0 adopted=1",
+            stderr_out,
+        )
+        self.assertIn("summary sources=2 discovery_failed=0 repositories=2 succeeded=2 failed=0", stderr_out)
+
+    def test_adoption_refuses_when_pinned_id_still_alive_or_lookup_errors(self):
+        child = {
+            "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+            "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/Alice",
+        }
+        doc = _base_doc([{"url": "https://github.com/Alice", "id": 100}], [child])
+        raw = _encode(doc)
+
+        # Case 1: GET /repositories/11 returns 200 (moved/transferred) -> conflict, no rename.
+        store_alive = FakeStore(raw)
+        dst_alive = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                }
+            }
+        )
+        src_alive = FakeSourceAPI(
+            routes={
+                "https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"},
+                "https://api.github.com/repositories/11": {"id": 11, "full_name": "Alice/moved-alpha"},
+            },
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    }
+                ]
+            },
+        )
+        stream_alive = io.StringIO()
+        res_alive = onboard_auto_discoveries(
+            raw, store_alive, lambda _: src_alive, dst_alive, owner="dest", account_type="personal", stream=stream_alive
+        )
+        self.assertEqual(store_alive.publish_calls, 0)
+        self.assertEqual(dst_alive.calls, [])
+        self.assertEqual(res_alive.adopted_total, 0)
+        self.assertEqual(len(res_alive.conflicts), 1)
+        self.assertIn("conflicts=1 adopted=0", stream_alive.getvalue())
+
+        # Case 2: GET /repositories/11 fails with HTTP 500 -> fixed safe message, keeps conflict, no rename.
+        store_err = FakeStore(raw)
+        dst_err = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                }
+            }
+        )
+        src_err = FakeSourceAPI(
+            routes={
+                "https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"},
+                "https://api.github.com/repositories/11": _http_error("https://api.github.com/repositories/11", 500),
+            },
+            pages_routes=src_alive.pages_routes,
+        )
+        stream_err = io.StringIO()
+        res_err = onboard_auto_discoveries(
+            raw, store_err, lambda _: src_err, dst_err, owner="dest", account_type="personal", stream=stream_err
+        )
+        self.assertEqual(store_err.publish_calls, 0)
+        self.assertEqual(dst_err.calls, [])
+        self.assertEqual(res_err.adopted_total, 0)
+        self.assertEqual(len(res_err.conflicts), 1)
+        self.assertIn(
+            "auto_discovery 1/1 (Alice): repository alpha: upstream identity changed (pinned id 11, now 211); "
+            "could not confirm upstream repository deletion; entry kept, not mirrored",
+            stream_err.getvalue(),
+        )
+        self.assertIn("conflicts=1 adopted=0", stream_err.getvalue())
+
+    def test_adoption_refuses_custom_destination_name_from_overrides_or_mirrors(self):
+        # Case 1: overrides.<repo>.name set -> refuses adoption.
+        doc_override = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100, "overrides": {"alpha": {"name": "custom-alpha"}}}],
+            [
+                {
+                    "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+                    "mirrors": {"main": {"name": "custom-alpha", "id": 5001, "visibility": "private"}},
+                    "discovered_by": "https://github.com/Alice",
+                }
+            ],
+        )
+        raw_override = _encode(doc_override)
+        store_override = FakeStore(raw_override)
+        dst = FakeDestinationAPI(
+            existing={"custom-alpha": {"id": 5001, "name": "custom-alpha", "full_name": "dest/custom-alpha"}}
+        )
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    }
+                ]
+            },
+        )
+        stream_override = io.StringIO()
+        res_override = onboard_auto_discoveries(
+            raw_override, store_override, lambda _: src, dst, owner="dest", account_type="personal", stream=stream_override
+        )
+        self.assertEqual(store_override.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+        self.assertEqual(res_override.adopted_total, 0)
+        self.assertEqual(len(res_override.conflicts), 1)
+        self.assertIn(
+            "cannot adopt a repository with a configured destination name; entry kept, not mirrored",
+            stream_override.getvalue(),
+        )
+
+        # Case 2: mirrors.<profile>.name differs from derived <prefix>-<repo> -> refuses adoption.
+        raw_rule = {"url": "https://github.com/Alice", "id": 100}
+        rule = normalize_config(_base_doc([raw_rule]))["auto_discoveries"][0]
+        custom_mirror_child = {
+            "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+            "mirrors": {"main": {"name": "custom-mirrors-alpha", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/Alice",
+        }
+        plan = _plan_rule(1, 1, rule, raw_rule, "main", [custom_mirror_child], src, runner="github", raw_index=0)
+        self.assertEqual(plan.adoptions, ())
+        self.assertEqual(len(plan.conflicts), 1)
+        self.assertEqual(plan.conflicts[0].reason, "cannot adopt a repository with a configured destination name")
+
+    def test_adoption_retry_when_canonical_name_already_404_skips_rename(self):
+        doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [
+                {
+                    "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+                    "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"}},
+                    "discovered_by": "https://github.com/Alice",
+                }
+            ],
+        )
+        raw = _encode(doc)
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    }
+                ]
+            },
+        )
+        # First simulate CAS failure after rename + create, leaving archive in place and removing canonical name for retry.
+        dst_partial = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                }
+            }
+        )
+        failing_store = FakeStore(raw)
+        failing_store.publish = Mock(side_effect=ValueError("conflict"))
+        stamp = "20261126T090000Z"
+        with self.assertRaisesRegex(
+            PartialOnboarding, "adoption publication failed; archived destinations left in place; reconcile manually"
+        ):
+            onboard_auto_discoveries(
+                raw,
+                failing_store,
+                lambda _: src,
+                dst_partial,
+                owner="dest",
+                account_type="personal",
+                archive_timestamp=stamp,
+            )
+        expected_archive = f"mirror-Alice-alpha-wipe-{stamp}".lower()
+        self.assertIn(expected_archive, dst_partial.repos)
+
+        # Direct retry with canonical name already 404 (no existing repo at mirror-Alice-alpha) skips PATCH rename.
+        dst_retry = FakeDestinationAPI(
+            existing={expected_archive: dst_partial.repos[expected_archive]}
+        )
+        retry_store = FakeStore(raw)
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            raw,
+            retry_store,
+            lambda _: src,
+            dst_retry,
+            owner="dest",
+            account_type="personal",
+            stream=stream,
+            archive_timestamp=stamp,
+        )
+        self.assertEqual(retry_store.publish_calls, 1)
+        self.assertEqual(res.adopted_total, 1)
+        self.assertFalse(any(method == "PATCH" for method, _, _ in dst_retry.calls))
+        self.assertIn("archived previously; adopted", stream.getvalue())
+        self.assertIn("conflicts=0 adopted=1", stream.getvalue())
+        published = json.loads(res.config_bytes)
+        self.assertEqual(published["repositories"][0]["source"]["id"], 211)
+        self.assertEqual(published["repositories"][0]["mirrors"]["main"]["id"], dst_retry.repos["mirror-alice-alpha"]["id"])
+
+    def test_adoption_rename_failure_prevents_creation_and_publication_for_that_repo_only(self):
+        alpha_child = {
+            "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+            "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/Alice",
+        }
+        doc_only = _base_doc([{"url": "https://github.com/Alice", "id": 100}], [alpha_child])
+        raw_only = _encode(doc_only)
+        src_only = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    }
+                ]
+            },
+        )
+
+        # Case 1: PATCH raises HTTP 500 -> no creation, no publish, conflict reported.
+        store_http = FakeStore(raw_only)
+        dst_http = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                }
+            }
+        )
+        dst_http.fail_on_patch = "mirror-Alice-alpha"
+        stream_http = io.StringIO()
+        res_http = onboard_auto_discoveries(
+            raw_only, store_http, lambda _: src_only, dst_http, owner="dest", account_type="personal", stream=stream_http
+        )
+        self.assertEqual(store_http.publish_calls, 0)
+        self.assertFalse(any(method == "POST" for method, _, _ in dst_http.calls))
+        self.assertEqual(res_http.adopted_total, 0)
+        self.assertEqual(len(res_http.conflicts), 1)
+        self.assertIn("failed to archive existing destination; entry kept, not mirrored", stream_http.getvalue())
+        self.assertIn("conflicts=1 adopted=0", stream_http.getvalue())
+
+        # Case 2: PATCH returns mismatched repository id -> verification fails -> no creation, no publish; other repos continue.
+        doc_multi = _base_doc([{"url": "https://github.com/Alice", "id": 100}], [alpha_child])
+        raw_multi = _encode(doc_multi)
+        store_multi = FakeStore(raw_multi)
+        dst_multi = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                }
+            }
+        )
+        dst_multi.patch_response_override = lambda old_name, new_name, repo: {
+            "id": 9999,
+            "name": new_name,
+            "full_name": f"dest/{new_name}",
+        }
+        src_multi = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    },
+                    {
+                        "id": 12,
+                        "name": "beta",
+                        "full_name": "Alice/beta",
+                        "clone_url": "https://github.com/Alice/beta.git",
+                    },
+                ]
+            },
+        )
+        stream_multi = io.StringIO()
+        res_multi = onboard_auto_discoveries(
+            raw_multi,
+            store_multi,
+            lambda _: src_multi,
+            dst_multi,
+            owner="dest",
+            account_type="personal",
+            stream=stream_multi,
+        )
+        self.assertEqual(store_multi.publish_calls, 1)
+        self.assertEqual(res_multi.inducted_total, 1)
+        self.assertEqual(res_multi.adopted_total, 0)
+        self.assertEqual(len(res_multi.conflicts), 1)
+        post_names = [data["name"] for method, _, data in dst_multi.calls if method == "POST"]
+        self.assertEqual(post_names, ["mirror-Alice-beta"])
+        published = json.loads(res_multi.config_bytes)
+        by_url = {r["source"]["url"]: r for r in published["repositories"]}
+        self.assertEqual(by_url["https://github.com/Alice/alpha"]["source"]["id"], 11)
+        self.assertEqual(by_url["https://github.com/Alice/beta"]["source"]["id"], 12)
+        self.assertIn("inducted=1 excluded=0 tracked=0 conflicts=1 adopted=0", stream_multi.getvalue())
+
+    def test_adoption_long_name_uses_100_char_hash_fallback(self):
+        repo_name = "r" * 83
+        dest_name = f"mirror-Alice-{repo_name}"  # 13 + 83 = 96 chars (> 100 when -wipe-<ts> added)
+        self.assertEqual(len(dest_name), 96)
+        stamp = "20261126T090000Z"
+        expected_archive = archive_name(dest_name, stamp)
+        self.assertEqual(len(expected_archive), 100)
+
+        doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [
+                {
+                    "source": {"url": f"https://github.com/Alice/{repo_name}", "id": 11},
+                    "mirrors": {"main": {"name": dest_name, "id": 5001, "visibility": "private"}},
+                    "discovered_by": "https://github.com/Alice",
+                }
+            ],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI(
+            existing={dest_name.lower(): {"id": 5001, "name": dest_name, "full_name": f"dest/{dest_name}"}}
+        )
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": repo_name,
+                        "full_name": f"Alice/{repo_name}",
+                        "clone_url": f"https://github.com/Alice/{repo_name}.git",
+                    }
+                ]
+            },
+        )
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            raw,
+            store,
+            lambda _: src,
+            dst,
+            owner="dest",
+            account_type="personal",
+            stream=stream,
+            archive_timestamp=stamp,
+        )
+        self.assertEqual(res.adopted_total, 1)
+        self.assertEqual(store.publish_calls, 1)
+        patch_calls = [c for c in dst.calls if c[0] == "PATCH"]
+        self.assertEqual(
+            patch_calls,
+            [("PATCH", f"https://api.github.com/repos/dest/{dest_name}", {"name": expected_archive})],
+        )
+        self.assertIn(expected_archive.lower(), dst.repos)
+        self.assertEqual(dst.repos[expected_archive.lower()]["id"], 5001)
+        self.assertIn(dest_name.lower(), dst.repos)
+        self.assertNotEqual(dst.repos[dest_name.lower()]["id"], 5001)
+        self.assertIn("adopted=1", stream.getvalue())
+
+    def test_plain_pinned_entry_without_discovered_by_never_adopts(self):
+        doc = _base_doc(
+            [{"url": "https://github.com/Alice", "id": 100}],
+            [
+                {
+                    "source": {"url": "https://github.com/Alice/alpha", "id": 11},
+                    "mirrors": {"main": {"name": "mirror-Alice-alpha", "id": 5001}},
+                }
+            ],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI(
+            existing={
+                "mirror-alice-alpha": {
+                    "id": 5001,
+                    "name": "mirror-Alice-alpha",
+                    "full_name": "dest/mirror-Alice-alpha",
+                }
+            }
+        )
+        src = FakeSourceAPI(
+            routes={"https://api.github.com/users/Alice": {"id": 100, "login": "Alice", "type": "User"}},
+            pages_routes={
+                "https://api.github.com/users/Alice/repos?type=owner": [
+                    {
+                        "id": 211,
+                        "name": "alpha",
+                        "full_name": "Alice/alpha",
+                        "clone_url": "https://github.com/Alice/alpha.git",
+                    }
+                ]
+            },
+        )
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            raw, store, lambda _: src, dst, owner="dest", account_type="personal", stream=stream
+        )
+        self.assertEqual(store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+        self.assertEqual(res.adopted_total, 0)
+        self.assertEqual(len(res.conflicts), 1)
+        self.assertFalse(any("/repositories/" in url for _, url in src.requests))
+        self.assertIn("conflicts=1 adopted=0", stream.getvalue())
+
+    def test_gitlab_rule_child_keeps_conflict_behaviour(self):
+        doc = _base_doc(
+            [{"url": "https://gitlab.com/team/sub", "type": "gitlab", "id": 7}],
+            [
+                {
+                    "source": {"url": "https://gitlab.com/team/sub/proj", "id": 701},
+                    "mirrors": {"main": {"name": "mirror-team-sub-proj", "id": 5001, "visibility": "private"}},
+                    "discovered_by": "https://gitlab.com/team/sub",
+                }
+            ],
+        )
+        raw = _encode(doc)
+        store = FakeStore(raw)
+        dst = FakeDestinationAPI(
+            existing={
+                "mirror-team-sub-proj": {
+                    "id": 5001,
+                    "name": "mirror-team-sub-proj",
+                    "full_name": "dest/mirror-team-sub-proj",
+                }
+            }
+        )
+        src = FakeSourceAPI(
+            routes={"https://gitlab.com/api/v4/groups/team%2Fsub": {"id": 7, "visibility": "public", "full_path": "team/sub"}},
+            pages_routes={
+                "https://gitlab.com/api/v4/groups/team%2Fsub/projects?include_subgroups=false&with_shared=false": [
+                    {
+                        "id": 799,
+                        "path": "proj",
+                        "visibility": "public",
+                        "path_with_namespace": "team/sub/proj",
+                        "http_url_to_repo": "https://gitlab.com/team/sub/proj.git",
+                    }
+                ]
+            },
+        )
+        stream = io.StringIO()
+        res = onboard_auto_discoveries(
+            raw, store, lambda _: src, dst, owner="dest", account_type="personal", stream=stream
+        )
+        self.assertEqual(store.publish_calls, 0)
+        self.assertEqual(dst.calls, [])
+        self.assertEqual(res.adopted_total, 0)
+        self.assertEqual(len(res.conflicts), 1)
+        self.assertIn("conflicts=1 adopted=0", stream.getvalue())
 
 
 if __name__ == "__main__":
