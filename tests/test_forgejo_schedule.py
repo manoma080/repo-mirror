@@ -605,3 +605,145 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
             'https://github.com/mirror-owner/mirror-fixture-org-b-skipped-repo',
         }
         self.assertTrue(skipped.isdisjoint(actual))
+
+    def test_scheduler_error_detail_safelisted_and_unsafelisted_outer_handler(self):
+        import io
+        from contextlib import redirect_stderr
+        from unittest.mock import patch
+        from repo_mirror import forgejo_schedule
+
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            base_args = [
+                'run', '--manifest', str(manifest), '--token-file', 'unused',
+                '--timestamp-secret-file', str(secret), '--journal-dir', str(journals),
+                '--owner', 'alice', '--lock', str(tmp / 'lock'),
+            ]
+
+            # Safelisted ValueError (not one of the three fixed messages)
+            manifest.write_text(json.dumps({
+                'destinations': {'local': {}},
+                'auto_discoveries': [{'url': 'https://github.com/mirror-owner', 'destination_name_prefix': 'mirror'}],
+                'repositories': [],
+            }))
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                rc = forgejo_schedule.main(base_args)
+            self.assertEqual(rc, 2)
+            self.assertEqual(
+                stderr.getvalue().strip(),
+                'Batch configuration or lock error: auto-discovery onboarding requires authoritative management configuration',
+            )
+
+            # Unsafelisted ValueError raised naturally (short recovery secret)
+            manifest.write_text(json.dumps(['https://localhost/a/b']))
+            secret.write_text('x' * 31)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                rc = forgejo_schedule.main(base_args)
+            self.assertEqual(rc, 2)
+            self.assertEqual(stderr.getvalue().strip(), 'Batch configuration or lock error: ValueError')
+            self.assertNotIn('recovery secret too short', stderr.getvalue())
+
+            # Unsafelisted ValueError with sensitive text never leaks message
+            secret.write_text('x' * 32)
+            stderr = io.StringIO()
+            with (
+                patch('repo_mirror.forgejo_schedule.validate_sources',
+                      side_effect=ValueError('secret https://private.example/token')),
+                redirect_stderr(stderr),
+            ):
+                rc = forgejo_schedule.main(base_args)
+            self.assertEqual(rc, 2)
+            self.assertEqual(stderr.getvalue().strip(), 'Batch configuration or lock error: ValueError')
+            self.assertNotIn('secret', stderr.getvalue())
+            self.assertNotIn('private.example', stderr.getvalue())
+
+    def test_scheduler_fixed_messages_print_verbatim_alone(self):
+        import io
+        from contextlib import redirect_stderr
+        from unittest.mock import patch
+        from repo_mirror import forgejo_schedule
+        from repo_mirror.forgejo_sync import (
+            HELPER_PATH_REQUIRED,
+            INSTALLATION_ID_REQUIRED,
+            SOURCE_APP_OWNER_REQUIRED,
+        )
+
+        clean_env = {k: v for k, v in os.environ.items() if k not in ('MIRROR_APP_OWNER', 'MIRROR_APP_INSTALLATION')}
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            key = tmp / 'app.pem'
+            key.write_text('fake-key')
+            key.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
+            base_args = [
+                'run', '--manifest', str(manifest), '--token-file', 'unused',
+                '--timestamp-secret-file', str(secret), '--journal-dir', str(journals),
+                '--owner', 'alice', '--lock', str(tmp / 'lock'),
+            ]
+
+            cases = [
+                (SOURCE_APP_OWNER_REQUIRED, base_args + ['--app-id', '123', '--private-key-file', str(key)]),
+                (INSTALLATION_ID_REQUIRED, base_args),
+                (HELPER_PATH_REQUIRED, base_args + ['--installation', '123456']),
+            ]
+            for expected_message, args in cases:
+                with self.subTest(expected=expected_message):
+                    stderr = io.StringIO()
+                    with patch.dict(os.environ, clean_env, clear=True), redirect_stderr(stderr):
+                        rc = forgejo_schedule.main(args)
+                    self.assertEqual(rc, 2)
+                    self.assertEqual(stderr.getvalue().strip(), expected_message)
+                    self.assertNotIn('Batch configuration or lock error', stderr.getvalue())
+
+    def test_scheduler_error_detail_inner_handler(self):
+        import io
+        from contextlib import redirect_stderr
+        from unittest.mock import patch
+        from repo_mirror import forgejo_schedule
+
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            secret = tmp / 'secret'
+            secret.write_text('x' * 32)
+            secret.chmod(0o600)
+            journals = tmp / 'journals'
+            journals.mkdir(mode=0o700)
+            manifest = tmp / 'sources.json'
+            manifest.write_text(json.dumps(['https://localhost/a/b']))
+            args = [
+                'run', '--manifest', str(manifest), '--token-file', 'unused',
+                '--timestamp-secret-file', str(secret), '--journal-dir', str(journals),
+                '--owner', 'alice', '--lock', str(tmp / 'lock'),
+            ]
+
+            cases = [
+                (ValueError('invalid migration attestation'), 'Batch configuration or lock error: invalid migration attestation', None),
+                (ValueError('sensitive inner detail'), 'Batch configuration or lock error: ValueError', 'sensitive inner detail'),
+                (OSError('private/filesystem/path'), 'Batch configuration or lock error: OSError', 'private/filesystem/path'),
+            ]
+            for exc, expected_line, forbidden in cases:
+                with self.subTest(exc=type(exc).__name__, expected=expected_line):
+                    stderr = io.StringIO()
+                    with (
+                        patch('repo_mirror.forgejo_schedule.MigrationsStore.pending', side_effect=exc),
+                        redirect_stderr(stderr),
+                    ):
+                        rc = forgejo_schedule.main(args)
+                    self.assertEqual(rc, 2)
+                    self.assertEqual(stderr.getvalue().strip(), expected_line)
+                    if forbidden:
+                        self.assertNotIn(forbidden, stderr.getvalue())
