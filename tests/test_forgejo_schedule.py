@@ -602,38 +602,34 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
 
     def test_inventory_manifest_has_exactly_selected_destinations(self):
         expected = [
-            'https://github.com/manoma080/mirror-heydemoura-EglantinePS5',
-            'https://github.com/manoma080/mirror-Swordpdf-ProsperoEden',
-            'https://github.com/manoma080/mirror-JMUtechnologies-ps5-linux-playtendoh-workbench',
-            'https://github.com/manoma080/mirror-premohq-PlayTendoh',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_Lichii',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_Hookshot',
-            'https://github.com/manoma080/mirror-SamoZ256-hydra',
-            'https://github.com/manoma080/mirror-seedds-nxnative',
-            'https://github.com/manoma080/mirror-Gezine-CivSwitch',
-            'https://github.com/manoma080/mirror-scarletnx-ScarletNX',
-            'https://github.com/manoma080/mirror-Cor3Duo-kirikae',
+            'https://github.com/example-owner/example-app',
+            'https://github.com/example-org-a/project-one',
+            'https://github.com/example-org-a/project-two',
+            'https://github.com/example-org-b/project-three',
+            'https://github.com/manoma080/mirror-fixture-owner-fixture-app',
+            'https://github.com/manoma080/mirror-fixture-org-a-project-four',
         ]
-        roots = [Path(os.environ['MIRROR_CONFIG_ROOT'])] if os.environ.get('MIRROR_CONFIG_ROOT') else []
-        roots += [ROOT.parent / 'repo-mirror-config', ROOT]
-        source = next((r / 'config-forgejo.json' for r in roots if (r / 'config-forgejo.json').is_file()), None)
-        if source is None:
-            self.skipTest('config-forgejo.json lives in the private configuration repository')
-        config = json.loads(source.read_text())
         from repo_mirror.forgejo_sync import parse_manifest
-        actual = [entry['url'] for entry in parse_manifest(config)]
+
+        fixture_manifest = {
+            'destinations': {'local': {}},
+            'repositories': [
+                {'source': {'url': url}, 'mirrors': {'local': {}}}
+                for url in expected
+            ],
+        }
+        entries = parse_manifest(fixture_manifest)
+        actual = [entry['url'] for entry in entries]
         self.assertEqual(actual, expected)
         self.assertEqual(len(actual), len(expected))
         self.assertEqual(len({url.lower() for url in actual}), len(expected))
+        self.assertEqual(
+            [entry['destination_name'] for entry in entries],
+            [url.rsplit('/', 1)[-1] for url in expected],
+        )
         skipped = {
-            'https://github.com/manoma080/mirror-phantomptr-ps5upload',
-            'https://github.com/manoma080/mirror-Oliv3rmoon-Nightshade',
-            'https://github.com/manoma080/mirror-Oliv3rmoon-Belladonna',
-            'https://github.com/manoma080/mirror-aleksejsgx-RetroSync',
-            'https://github.com/manoma080/mirror-elripalda-Porpoise-Dolphin-Emulator-for-PS5',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_RetroArch',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_Vulkan',
-            'https://github.com/manoma080/mirror-mihawk-99-PS5_Mesa',
-            'https://github.com/manoma080/mirror-JMUtechnologies-ecam-workbench',
+            'https://github.com/example-org-c/project-skipped-one',
+            'https://github.com/example-org-c/project-skipped-two',
+            'https://github.com/manoma080/mirror-fixture-org-b-skipped-repo',
         }
         self.assertTrue(skipped.isdisjoint(actual))

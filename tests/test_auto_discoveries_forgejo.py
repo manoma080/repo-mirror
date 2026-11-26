@@ -876,17 +876,17 @@ class ForgejoScheduleIntegrationTests(unittest.TestCase):
 
     def test_scheduler_skips_conflicted_repository_and_continues(self):
         conflicted_child = {
-            'source': {'url': 'https://github.com/BlackBearRevived/ps5-native-app-boilerplate', 'id': 1470348900},
-            'mirrors': {'forgejo-home': {'name': 'mirror-BlackBearRevived-ps5-native-app-boilerplate', 'id': 7001}},
-            'discovered_by': 'https://github.com/BlackBearRevived',
+            'source': {'url': 'https://github.com/example-owner/example-app', 'id': 1470348900},
+            'mirrors': {'forgejo-home': {'name': 'mirror-example-owner-example-app', 'id': 7001}},
+            'discovered_by': 'https://github.com/example-owner',
         }
         healthy_child = {
-            'source': {'url': 'https://github.com/BlackBearRevived/good-repo', 'id': 2001},
-            'mirrors': {'forgejo-home': {'name': 'mirror-BlackBearRevived-good-repo', 'id': 7002}},
-            'discovered_by': 'https://github.com/BlackBearRevived',
+            'source': {'url': 'https://github.com/example-owner/good-repo', 'id': 2001},
+            'mirrors': {'forgejo-home': {'name': 'mirror-example-owner-good-repo', 'id': 7002}},
+            'discovered_by': 'https://github.com/example-owner',
         }
         doc = _base_doc(
-            [{'url': 'https://github.com/BlackBearRevived', 'id': 42}],
+            [{'url': 'https://github.com/example-owner', 'id': 42}],
             [conflicted_child, healthy_child],
         )
         raw = _encode(doc)
@@ -900,21 +900,21 @@ class ForgejoScheduleIntegrationTests(unittest.TestCase):
             },
         )
         src = FakeSourceAPI(
-            routes={'https://api.github.com/users/BlackBearRevived': {'id': 42, 'login': 'BlackBearRevived', 'type': 'User'}},
+            routes={'https://api.github.com/users/example-owner': {'id': 42, 'login': 'example-owner', 'type': 'User'}},
             pages_routes={
-                'https://api.github.com/users/BlackBearRevived/repos?type=owner': [
+                'https://api.github.com/users/example-owner/repos?type=owner': [
                     {
                         'id': 1472677129,
-                        'name': 'ps5-native-app-boilerplate',
-                        'full_name': 'BlackBearRevived/ps5-native-app-boilerplate',
-                        'clone_url': 'https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git',
+                        'name': 'example-app',
+                        'full_name': 'example-owner/example-app',
+                        'clone_url': 'https://github.com/example-owner/example-app.git',
                         'private': False,
                     },
                     {
                         'id': 2001,
                         'name': 'good-repo',
-                        'full_name': 'BlackBearRevived/good-repo',
-                        'clone_url': 'https://github.com/BlackBearRevived/good-repo.git',
+                        'full_name': 'example-owner/good-repo',
+                        'clone_url': 'https://github.com/example-owner/good-repo.git',
                         'private': False,
                     },
                 ]
@@ -966,17 +966,17 @@ class ForgejoScheduleIntegrationTests(unittest.TestCase):
                 )
 
             self.assertEqual(status, 0, stdout.getvalue())
-            self.assertEqual(launched, ['https://github.com/BlackBearRevived/good-repo'])
+            self.assertEqual(launched, ['https://github.com/example-owner/good-repo'])
             self.assertEqual(api.replace_puts, 0)
             out = stdout.getvalue()
             self.assertIn(
-                'auto_discovery 1/1 (BlackBearRevived): repository ps5-native-app-boilerplate: '
+                'auto_discovery 1/1 (example-owner): repository example-app: '
                 'upstream identity changed (pinned id 1470348900, now 1472677129); '
                 'entry kept, not mirrored; remove the entry and re-add it to adopt',
                 out,
             )
             self.assertIn(
-                'auto_discovery 1/1 (BlackBearRevived): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1',
+                'auto_discovery 1/1 (example-owner): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1',
                 out,
             )
 

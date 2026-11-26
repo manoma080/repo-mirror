@@ -276,7 +276,7 @@ class AddAndRemoveConfigOwnerUrlTests(unittest.TestCase):
         cfg = _base_config()
         changed = add_to_config(
             cfg,
-            "https://github.com/BlackBearRevived",
+            "https://github.com/example-owner",
             visibility="public",
             ignore_releases=True,
         )
@@ -286,10 +286,10 @@ class AddAndRemoveConfigOwnerUrlTests(unittest.TestCase):
             cfg["auto_discoveries"],
             [
                 {
-                    "url": "https://github.com/BlackBearRevived",
+                    "url": "https://github.com/example-owner",
                     "visibility": "public",
                     "ignore_releases": True,
-                    "destination_name_prefix": "mirror-BlackBearRevived",
+                    "destination_name_prefix": "mirror-example-owner",
                 }
             ],
         )
@@ -297,7 +297,7 @@ class AddAndRemoveConfigOwnerUrlTests(unittest.TestCase):
         # Duplicate rule rejected without mutation.
         before = copy.deepcopy(cfg)
         with self.assertRaisesRegex(ValueError, "duplicate auto-discovery rule"):
-            add_to_config(cfg, "https://GitHub.com/blackbearrevived")
+            add_to_config(cfg, "https://GitHub.com/Example-Owner")
         self.assertEqual(cfg, before)
 
         # destination_name rejected for discovery rule.

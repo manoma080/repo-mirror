@@ -27,8 +27,8 @@ def _base_config(**extra):
 class ParseOwnerUrlTests(unittest.TestCase):
     def test_valid_owner_urls(self):
         self.assertEqual(
-            parse_owner_url("https://GitHub.com/BlackBearRevived"),
-            ("github", "https://github.com", ("BlackBearRevived",)),
+            parse_owner_url("https://GitHub.com/example-owner"),
+            ("github", "https://github.com", ("example-owner",)),
         )
         self.assertEqual(
             parse_owner_url("https://forge.example/Alice"),
@@ -131,19 +131,19 @@ class ParseOwnerUrlTests(unittest.TestCase):
 
 class AutoDiscoveriesValidConfigTests(unittest.TestCase):
     def test_valid_minimal_github_rule_defaults(self):
-        cfg = _base_config(auto_discoveries=[{"url": "https://GitHub.com/BlackBearRevived"}])
+        cfg = _base_config(auto_discoveries=[{"url": "https://GitHub.com/example-owner"}])
         normalized = normalize_config(cfg)
         self.assertEqual(
             normalized["auto_discoveries"],
             [
                 {
-                    "url": "https://github.com/BlackBearRevived",
+                    "url": "https://github.com/example-owner",
                     "type": "github",
                     "base_url": "https://github.com",
-                    "owner": "BlackBearRevived",
+                    "owner": "example-owner",
                     "visibility": "private",
                     "ignore_releases": False,
-                    "destination_name_prefix": "mirror-BlackBearRevived",
+                    "destination_name_prefix": "mirror-example-owner",
                     "exclude": [],
                     "overrides": {},
                 }
@@ -166,7 +166,7 @@ class AutoDiscoveriesValidConfigTests(unittest.TestCase):
         cfg = _base_config(
             auto_discoveries=[
                 {
-                    "url": "https://github.com/BlackBearRevived",
+                    "url": "https://github.com/example-owner",
                     "type": "github",
                     "id": 123456,
                     "visibility": "public",
@@ -187,10 +187,10 @@ class AutoDiscoveriesValidConfigTests(unittest.TestCase):
         self.assertEqual(
             normalized["auto_discoveries"][0],
             {
-                "url": "https://github.com/BlackBearRevived",
+                "url": "https://github.com/example-owner",
                 "type": "github",
                 "base_url": "https://github.com",
-                "owner": "BlackBearRevived",
+                "owner": "example-owner",
                 "id": 123456,
                 "visibility": "public",
                 "ignore_releases": True,
@@ -734,7 +734,7 @@ class RoundTripAndRuntimeGuardTests(unittest.TestCase):
         normalize_config(parsed3)
 
     def test_cli_requires_authoritative_store_for_non_empty_auto_discoveries(self):
-        cfg = _base_config(auto_discoveries=[{"url": "https://github.com/BlackBearRevived"}])
+        cfg = _base_config(auto_discoveries=[{"url": "https://github.com/example-owner"}])
         env = {
             "MIRROR_TIMESTAMP_SECRET": "test-secret",
             "GH_TOKEN": "token",

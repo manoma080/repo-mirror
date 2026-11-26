@@ -830,17 +830,17 @@ class OnboardingBehaviorTests(unittest.TestCase):
 
     def test_deleted_and_recreated_upstream_reports_conflict_and_continues_rule(self):
         existing_conflict = {
-            "source": {"url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate", "id": 1470348900},
-            "mirrors": {"main": {"name": "mirror-BlackBearRevived-ps5-native-app-boilerplate", "id": 5001, "visibility": "private"}},
-            "discovered_by": "https://github.com/BlackBearRevived",
+            "source": {"url": "https://github.com/example-owner/example-app", "id": 1470348900},
+            "mirrors": {"main": {"name": "mirror-example-owner-example-app", "id": 5001, "visibility": "private"}},
+            "discovered_by": "https://github.com/example-owner",
         }
         existing_tracked = {
-            "source": {"url": "https://github.com/BlackBearRevived/tracked-repo", "id": 1001},
-            "mirrors": {"main": {"name": "mirror-BlackBearRevived-tracked-repo", "id": 5002, "visibility": "private"}},
-            "discovered_by": "https://github.com/BlackBearRevived",
+            "source": {"url": "https://github.com/example-owner/tracked-repo", "id": 1001},
+            "mirrors": {"main": {"name": "mirror-example-owner-tracked-repo", "id": 5002, "visibility": "private"}},
+            "discovered_by": "https://github.com/example-owner",
         }
         doc = _base_doc(
-            [{"url": "https://github.com/BlackBearRevived", "id": 42}],
+            [{"url": "https://github.com/example-owner", "id": 42}],
             [existing_conflict, existing_tracked],
         )
         raw = _encode(doc)
@@ -848,31 +848,31 @@ class OnboardingBehaviorTests(unittest.TestCase):
         dst = FakeDestinationAPI()
         src = FakeSourceAPI(
             routes={
-                "https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"},
+                "https://api.github.com/users/example-owner": {"id": 42, "login": "example-owner", "type": "User"},
                 "https://api.github.com/repositories/1470348900": {
                     "id": 1470348900,
-                    "full_name": "BlackBearRevived/moved-elsewhere",
+                    "full_name": "example-owner/moved-elsewhere",
                 },
             },
             pages_routes={
-                "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
+                "https://api.github.com/users/example-owner/repos?type=owner": [
                     {
                         "id": 1472677129,
-                        "name": "ps5-native-app-boilerplate",
-                        "full_name": "BlackBearRevived/ps5-native-app-boilerplate",
-                        "clone_url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git",
+                        "name": "example-app",
+                        "full_name": "example-owner/example-app",
+                        "clone_url": "https://github.com/example-owner/example-app.git",
                     },
                     {
                         "id": 1001,
                         "name": "tracked-repo",
-                        "full_name": "BlackBearRevived/tracked-repo",
-                        "clone_url": "https://github.com/BlackBearRevived/tracked-repo.git",
+                        "full_name": "example-owner/tracked-repo",
+                        "clone_url": "https://github.com/example-owner/tracked-repo.git",
                     },
                     {
                         "id": 1002,
                         "name": "new-repo",
-                        "full_name": "BlackBearRevived/new-repo",
-                        "clone_url": "https://github.com/BlackBearRevived/new-repo.git",
+                        "full_name": "example-owner/new-repo",
+                        "clone_url": "https://github.com/example-owner/new-repo.git",
                     },
                 ]
             },
@@ -889,19 +889,19 @@ class OnboardingBehaviorTests(unittest.TestCase):
         self.assertEqual(len(published["repositories"]), 3)
         by_url = {r["source"]["url"]: r for r in published["repositories"]}
         self.assertEqual(
-            by_url["https://github.com/BlackBearRevived/ps5-native-app-boilerplate"]["source"]["id"],
+            by_url["https://github.com/example-owner/example-app"]["source"]["id"],
             1470348900,
         )
-        self.assertIn("https://github.com/BlackBearRevived/new-repo", by_url)
+        self.assertIn("https://github.com/example-owner/new-repo", by_url)
         expected_conflict_line = (
-            "auto_discovery 1/1 (BlackBearRevived): repository ps5-native-app-boilerplate: "
+            "auto_discovery 1/1 (example-owner): repository example-app: "
             "upstream identity changed (pinned id 1470348900, now 1472677129); "
             "entry kept, not mirrored; remove the entry and re-add it to adopt"
         )
         log = stream.getvalue()
         self.assertEqual(log.count(expected_conflict_line), 1)
         self.assertIn(
-            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=1 excluded=0 tracked=1 conflicts=1 adopted=0",
+            "auto_discovery 1/1 (example-owner): OK discovered=3 inducted=1 excluded=0 tracked=1 conflicts=1 adopted=0",
             log,
         )
         self.assertNotIn("https://", log)
@@ -920,7 +920,7 @@ class OnboardingBehaviorTests(unittest.TestCase):
         log2 = stream2.getvalue()
         self.assertEqual(log2.count(expected_conflict_line), 1)
         self.assertIn(
-            "auto_discovery 1/1 (BlackBearRevived): OK discovered=3 inducted=0 excluded=0 tracked=2 conflicts=1 adopted=0",
+            "auto_discovery 1/1 (example-owner): OK discovered=3 inducted=0 excluded=0 tracked=2 conflicts=1 adopted=0",
             log2,
         )
 
@@ -1084,17 +1084,17 @@ class CliIntegrationTests(unittest.TestCase):
         from contextlib import redirect_stderr
 
         doc = _base_doc(
-            [{"url": "https://github.com/BlackBearRevived", "id": 42}],
+            [{"url": "https://github.com/example-owner", "id": 42}],
             [
                 {
-                    "source": {"url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate", "id": 1470348900},
-                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-ps5-native-app-boilerplate", "id": 5001}},
-                    "discovered_by": "https://github.com/BlackBearRevived",
+                    "source": {"url": "https://github.com/example-owner/example-app", "id": 1470348900},
+                    "mirrors": {"main": {"name": "mirror-example-owner-example-app", "id": 5001}},
+                    "discovered_by": "https://github.com/example-owner",
                 },
                 {
-                    "source": {"url": "https://github.com/BlackBearRevived/good-repo", "id": 2001},
-                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-good-repo", "id": 5002}},
-                    "discovered_by": "https://github.com/BlackBearRevived",
+                    "source": {"url": "https://github.com/example-owner/good-repo", "id": 2001},
+                    "mirrors": {"main": {"name": "mirror-example-owner-good-repo", "id": 5002}},
+                    "discovered_by": "https://github.com/example-owner",
                 },
                 {
                     "source": {"url": "https://github.com/Other/manual-repo", "id": 3001},
@@ -1107,25 +1107,25 @@ class CliIntegrationTests(unittest.TestCase):
         dst = FakeDestinationAPI()
         src = FakeSourceAPI(
             routes={
-                "https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"},
+                "https://api.github.com/users/example-owner": {"id": 42, "login": "example-owner", "type": "User"},
                 "https://api.github.com/repositories/1470348900": {
                     "id": 1470348900,
-                    "full_name": "BlackBearRevived/moved-elsewhere",
+                    "full_name": "example-owner/moved-elsewhere",
                 },
             },
             pages_routes={
-                "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
+                "https://api.github.com/users/example-owner/repos?type=owner": [
                     {
                         "id": 1472677129,
-                        "name": "ps5-native-app-boilerplate",
-                        "full_name": "BlackBearRevived/ps5-native-app-boilerplate",
-                        "clone_url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git",
+                        "name": "example-app",
+                        "full_name": "example-owner/example-app",
+                        "clone_url": "https://github.com/example-owner/example-app.git",
                     },
                     {
                         "id": 2001,
                         "name": "good-repo",
-                        "full_name": "BlackBearRevived/good-repo",
-                        "clone_url": "https://github.com/BlackBearRevived/good-repo.git",
+                        "full_name": "example-owner/good-repo",
+                        "clone_url": "https://github.com/example-owner/good-repo.git",
                     },
                 ]
             },
@@ -1155,17 +1155,17 @@ class CliIntegrationTests(unittest.TestCase):
         self.assertEqual(store.publish_calls, 0)
         self.assertEqual(
             sorted(mirrored),
-            [("BlackBearRevived", "good-repo", 2001), ("Other", "manual-repo", 3001)],
+            [("Other", "manual-repo", 3001), ("example-owner", "good-repo", 2001)],
         )
         stderr_out = stderr_buf.getvalue()
         self.assertIn(
-            "auto_discovery 1/1 (BlackBearRevived): repository ps5-native-app-boilerplate: "
+            "auto_discovery 1/1 (example-owner): repository example-app: "
             "upstream identity changed (pinned id 1470348900, now 1472677129); "
             "entry kept, not mirrored; remove the entry and re-add it to adopt",
             stderr_out,
         )
         self.assertIn(
-            "auto_discovery 1/1 (BlackBearRevived): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1 adopted=0",
+            "auto_discovery 1/1 (example-owner): OK discovered=2 inducted=0 excluded=0 tracked=1 conflicts=1 adopted=0",
             stderr_out,
         )
         self.assertIn("summary sources=3 discovery_failed=0 repositories=2 succeeded=2 failed=0", stderr_out)
@@ -1174,17 +1174,17 @@ class CliIntegrationTests(unittest.TestCase):
         from contextlib import redirect_stderr
 
         doc = _base_doc(
-            [{"url": "https://github.com/BlackBearRevived", "id": 42}],
+            [{"url": "https://github.com/example-owner", "id": 42}],
             [
                 {
-                    "source": {"url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate", "id": 1470348900},
-                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-ps5-native-app-boilerplate", "id": 5001}},
-                    "discovered_by": "https://github.com/BlackBearRevived",
+                    "source": {"url": "https://github.com/example-owner/example-app", "id": 1470348900},
+                    "mirrors": {"main": {"name": "mirror-example-owner-example-app", "id": 5001}},
+                    "discovered_by": "https://github.com/example-owner",
                 },
                 {
-                    "source": {"url": "https://github.com/BlackBearRevived/good-repo", "id": 2001},
-                    "mirrors": {"main": {"name": "mirror-BlackBearRevived-good-repo", "id": 5002}},
-                    "discovered_by": "https://github.com/BlackBearRevived",
+                    "source": {"url": "https://github.com/example-owner/good-repo", "id": 2001},
+                    "mirrors": {"main": {"name": "mirror-example-owner-good-repo", "id": 5002}},
+                    "discovered_by": "https://github.com/example-owner",
                 },
                 {
                     "source": {"url": "https://github.com/Other/manual-repo", "id": 3001},
@@ -1197,25 +1197,25 @@ class CliIntegrationTests(unittest.TestCase):
         dst = FakeDestinationAPI()
         src = FakeSourceAPI(
             routes={
-                "https://api.github.com/users/BlackBearRevived": {"id": 42, "login": "BlackBearRevived", "type": "User"},
+                "https://api.github.com/users/example-owner": {"id": 42, "login": "example-owner", "type": "User"},
                 "https://api.github.com/repositories/1470348900": {
                     "id": 1470348900,
-                    "full_name": "BlackBearRevived/moved-elsewhere",
+                    "full_name": "example-owner/moved-elsewhere",
                 },
             },
             pages_routes={
-                "https://api.github.com/users/BlackBearRevived/repos?type=owner": [
+                "https://api.github.com/users/example-owner/repos?type=owner": [
                     {
                         "id": 1472677129,
-                        "name": "ps5-native-app-boilerplate",
-                        "full_name": "BlackBearRevived/ps5-native-app-boilerplate",
-                        "clone_url": "https://github.com/BlackBearRevived/ps5-native-app-boilerplate.git",
+                        "name": "example-app",
+                        "full_name": "example-owner/example-app",
+                        "clone_url": "https://github.com/example-owner/example-app.git",
                     },
                     {
                         "id": 2001,
                         "name": "good-repo",
-                        "full_name": "BlackBearRevived/good-repo",
-                        "clone_url": "https://github.com/BlackBearRevived/good-repo.git",
+                        "full_name": "example-owner/good-repo",
+                        "clone_url": "https://github.com/example-owner/good-repo.git",
                     },
                 ]
             },

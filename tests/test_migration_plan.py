@@ -96,37 +96,37 @@ class RepeatedRelocationPlanTests(unittest.TestCase):
             'destinations': {'github-manoma080': {'type': 'github', 'url': 'https://github.com',
                                                   'owner': 'manoma080', 'auth': 'mirrorbot'}},
             'repositories': [
-                {'source': {'url': 'https://github.com/Anonymous941/QuestEnhancer',
+                {'source': {'url': 'https://github.com/upstream-owner/legacy-project',
                             'id': 1395104116},
                  'mirrors': {'github-manoma080': {'id': 42,
-                                                  'name': 'mirror-Anonymous941-QuestEnhancer'}}},
+                                                  'name': 'mirror-upstream-owner-legacy-project'}}},
             ],
         }
         entry1 = plan_migration(
-            _relocation_step('Anonymous941', 'QuestEnhancer',
-                             'Anonymous941', 'QuestEnhancer-Bubbagum88',
-                             'mirror-Anonymous941-QuestEnhancer'),
+            _relocation_step('upstream-owner', 'legacy-project',
+                             'upstream-owner', 'legacy-project-extended',
+                             'mirror-upstream-owner-legacy-project'),
             {'document': doc1, 'path': 'config.json', 'base_sha': 'a' * 40},
             secret=SECRET,
         )
         legacy1 = _legacy_from_entry(entry1)
 
         entry2 = plan_migration(
-            _relocation_step('Anonymous941', 'QuestEnhancer-Bubbagum88',
-                             'Anonymous941', 'QuestEnhancer',
-                             'mirror-Anonymous941-QuestEnhancer-Bubbagum88'),
-            {'document': _config_with_legacy('Anonymous941', 'QuestEnhancer-Bubbagum88',
-                                             'mirror-Anonymous941-QuestEnhancer-Bubbagum88',
+            _relocation_step('upstream-owner', 'legacy-project-extended',
+                             'upstream-owner', 'legacy-project',
+                             'mirror-upstream-owner-legacy-project-extended'),
+            {'document': _config_with_legacy('upstream-owner', 'legacy-project-extended',
+                                             'mirror-upstream-owner-legacy-project-extended',
                                              legacy1),
              'path': 'config.json', 'base_sha': 'b' * 40},
             secret=SECRET,
         )
-        self.assertEqual(entry2['recovery']['source_owner'], 'Anonymous941')
-        self.assertEqual(entry2['recovery']['source_name'], 'QuestEnhancer')
+        self.assertEqual(entry2['recovery']['source_owner'], 'upstream-owner')
+        self.assertEqual(entry2['recovery']['source_name'], 'legacy-project')
         self.assertEqual(entry2['recovery']['destination_name'],
-                         'mirror-Anonymous941-QuestEnhancer')
+                         'mirror-upstream-owner-legacy-project')
         self.assertEqual(entry2['destination']['name'],
-                         'mirror-Anonymous941-QuestEnhancer')
+                         'mirror-upstream-owner-legacy-project')
         self.assertNotEqual(entry2['recovery']['signature'], legacy1['signature'])
         self.assertEqual(entry2['recovery']['signature'], sign(claim(entry2), SECRET))
         verify_recovery(entry2, SECRET)
