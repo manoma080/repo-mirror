@@ -641,15 +641,17 @@ sys.exit(forgejo_schedule.main(sys.argv[1:]))
                 'Batch configuration or lock error: auto-discovery onboarding requires authoritative management configuration',
             )
 
-            # Unsafelisted ValueError raised naturally (short recovery secret)
+            # Safelisted scheduler configuration error raised naturally (short recovery secret)
             manifest.write_text(json.dumps(['https://localhost/a/b']))
             secret.write_text('x' * 31)
             stderr = io.StringIO()
             with redirect_stderr(stderr):
                 rc = forgejo_schedule.main(base_args)
             self.assertEqual(rc, 2)
-            self.assertEqual(stderr.getvalue().strip(), 'Batch configuration or lock error: ValueError')
-            self.assertNotIn('recovery secret too short', stderr.getvalue())
+            self.assertEqual(
+                stderr.getvalue().strip(),
+                'Batch configuration or lock error: recovery secret too short',
+            )
 
             # Unsafelisted ValueError with sensitive text never leaks message
             secret.write_text('x' * 32)
