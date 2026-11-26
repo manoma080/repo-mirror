@@ -18,6 +18,9 @@ from repo_mirror.constants import LOG_SECRETS, REPOSITORY_TIME
 from repo_mirror.journal import ReleaseRecoveryError
 
 
+_ARCHIVE_SUFFIX = re.compile(r"(?:-[0-9a-f]{16})?-wipe-\d{8}T\d{6}Z\Z")
+
+
 def safe_label(value):
     # Logs are public: conservative allowlist, never emit URLs or suspicious values.
     """Turn a value into a log-safe label (secrets and odd characters removed)."""
@@ -42,9 +45,12 @@ def safe_label(value):
         or re.search(r"(?i)[0-9a-f]{24,}", value)
     ):
         return "[redacted]"
+    entropy_target = _ARCHIVE_SUFFIX.sub("", value)
+    if not entropy_target:
+        return "[redacted]"
     # Catch long, opaque hyphenated runs without treating every long project
     # name as a credential. This bounded heuristic cannot recognize all secrets.
-    for run in re.findall(r"[A-Za-z0-9_-]{32,}", value):
+    for run in re.findall(r"[A-Za-z0-9_-]{32,}", entropy_target):
         chars = run.replace("-", "").replace("_", "")
         if len(chars) >= 32:
             counts = Counter(chars)
