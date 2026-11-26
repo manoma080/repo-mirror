@@ -25,7 +25,7 @@ class WorkerAutomaticTransitionTests(unittest.TestCase):
         source.pages.return_value = []
         dest = Mock(run_pin=(22, 'marker'))
         dest.begin_initialization.return_value = False
-        adapter = Mock(target='http://127.0.0.1:3300/api/v1/repos/dest/copy')
+        adapter = Mock(target='http://127.0.0.1:3000/api/v1/repos/dest/copy')
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -41,7 +41,7 @@ class WorkerAutomaticTransitionTests(unittest.TestCase):
             journal.mkdir(mode=0o700)
             argv = ['--config', str(path), '--source', config['repositories'][0]['source']['url'],
                     '--token-file', str(token), '--timestamp-secret-file', str(key),
-                    '--journal-dir', str(journal), '--owner', 'dest']
+                    '--journal-dir', str(journal), '--owner', 'dest', '--port', '3000']
             with patch('repo_mirror.forgejo_sync.PublicForgejoSourceAdapter', return_value=source), \
                  patch('repo_mirror.forgejo_sync.ForgejoDestination', return_value=dest), \
                  patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter', return_value=adapter), \
@@ -73,7 +73,7 @@ class WorkerAutomaticTransitionTests(unittest.TestCase):
         self.assertTrue(all(call.args[2] == OLD for call in sync.snapshots.call_args_list))
         dest.begin_initialization.assert_called_once_with('copy', OLD, expected_id=22)
         self.assertEqual(releases.call_args.kwargs['journal_identity'],
-                         ('https://git.example', 11, 'http://127.0.0.1:3300', 22))
+                         ('https://git.example', 11, 'http://127.0.0.1:3000', 22))
 
     def test_verified_move_mirrors_into_existing_destination_and_reports_it(self):
         config = manifest({'url': OLD, 'id': 11}, {'name': 'copy', 'id': 22})
@@ -89,11 +89,11 @@ class WorkerAutomaticTransitionTests(unittest.TestCase):
         self.assertEqual(sync.call_args.kwargs['recovery_identity'], OLD)
         call = releases.call_args
         self.assertEqual(call.args[7], '[repo-mirror: forgejo:https://git.example/old/repo]')
-        self.assertEqual(call.kwargs['recovery_target'], 'http://127.0.0.1:3300/api/v1/repos/dest/copy')
+        self.assertEqual(call.kwargs['recovery_target'], 'http://127.0.0.1:3000/api/v1/repos/dest/copy')
         self.assertEqual(call.kwargs['journal_source']['owner'], 'old')
         self.assertEqual(call.kwargs['journal_name'], 'repo')
         self.assertEqual(call.kwargs['journal_identity'],
-                         ('https://git.example', 11, 'http://127.0.0.1:3300', 22))
+                         ('https://git.example', 11, 'http://127.0.0.1:3000', 22))
         self.assertEqual(self.relocation(stderr),
                          {'url': OLD, 'canonical': NEW, 'source_id': 11, 'destination_id': 22})
 

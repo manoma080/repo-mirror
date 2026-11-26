@@ -55,7 +55,7 @@ class Scenario:
             'private': True, 'has_actions': False,
             'description': 'repo-mirror-source: github.com/source/project [repo-mirror:initialized:v1]'}}
 
-    base_url = 'http://127.0.0.1:3300'
+    base_url = 'http://127.0.0.1:3000'
 
     def token(self):
         return 'local-test-token'

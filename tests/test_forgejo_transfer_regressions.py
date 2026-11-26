@@ -40,7 +40,7 @@ class TransferRegressionTests(unittest.TestCase):
             opened.assert_not_called()
 
     def test_slash_tag_asset_is_bound_to_listed_release(self):
-        client = ForgejoReleases('owner/repo', 'secret')
+        client = ForgejoReleases('owner/repo', 'secret', port=3000)
         asset = {'id': 9, 'name': 'a.txt', 'size': 3,
                  'browser_download_url': 'https://public.example/owner/repo/releases/download/team%2Fv1/a.txt'}
         def get(method, path, value=None):
@@ -54,7 +54,7 @@ class TransferRegressionTests(unittest.TestCase):
             client.download(listed, output)
         self.assertEqual(output.getvalue(), b'abc')
         self.assertEqual(opened.call_args.args[0].full_url,
-                         'http://127.0.0.1:3300/owner/repo/releases/download/team%2Fv1/a.txt')
+                         'http://127.0.0.1:3000/owner/repo/releases/download/team%2Fv1/a.txt')
 
     def test_wrong_slash_tag_and_ambiguous_encodings_are_rejected(self):
         client = ForgejoReleases('owner/repo', 'secret')
@@ -92,7 +92,7 @@ class TransferRegressionTests(unittest.TestCase):
         self.assertIs(caught.exception, error)
 
     def test_public_url_is_rebound_to_loopback(self):
-        client = ForgejoReleases('owner/repo', 'secret')
+        client = ForgejoReleases('owner/repo', 'secret', port=3000)
         class Opener:
             def open(self, request, timeout):
                 self.url = request.full_url
@@ -105,7 +105,7 @@ class TransferRegressionTests(unittest.TestCase):
         client._json = lambda method, path, value=None: {'id': 7, 'tag_name': 'v1'}
         client.download(asset, output)
         self.assertEqual(output.getvalue(), b'abc')
-        self.assertEqual(client.opener.url, 'http://127.0.0.1:3300/owner/repo/releases/download/v1/a.txt')
+        self.assertEqual(client.opener.url, 'http://127.0.0.1:3000/owner/repo/releases/download/v1/a.txt')
 
     def test_upload_ambiguous_error_reconciles_existing_asset(self):
         client = ForgejoReleases('owner/repo', 'secret')

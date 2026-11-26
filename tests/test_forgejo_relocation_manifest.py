@@ -3,7 +3,7 @@ from repo_mirror.forgejo_sync import parse_manifest
 from repo_mirror.migration_attestation import forgejo_claim, sign
 
 def signed(item):
-    item['signature'] = sign(forgejo_claim(item, 3300, 'dest'), 'fixture-signing-secret-0123456789abcdef')
+    item['signature'] = sign(forgejo_claim(item, 3000, 'dest'), 'fixture-signing-secret-0123456789abcdef')
     return item
 
 
@@ -37,7 +37,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
         src = Mock()
         src.request.return_value = {'id': 11, 'full_name': 'new/repo', 'clone_url': identity + '.git'}
         src.pages.return_value = []
-        adapter = Mock(target='http://127.0.0.1:3300/api/v1/repos/dest/new-repo')
+        adapter = Mock(target='http://127.0.0.1:3000/api/v1/repos/dest/new-repo')
         with patch('repo_mirror.forgejo_sync.PublicForgejoSourceAdapter', return_value=src), \
              patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter', return_value=adapter), \
              patch('repo_mirror.forgejo_sync.validate_source_release_listing'), \
@@ -46,7 +46,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
              patch('repo_mirror.forgejo_sync.sync_refs') as sync, \
              patch('repo_mirror.forgejo_sync.snapshot_refs', return_value=(None, {}, {})) as snapshot, \
              patch('repo_mirror.forgejo_sync.mirror_releases'):
-            result = _sync_requested(SimpleNamespace(port=3300, owner='dest'), [identity], dest,
+            result = _sync_requested(SimpleNamespace(port=3000, owner='dest'), [identity], dest,
                                      None, 'token', 'fixture-signing-secret-0123456789abcdef', '/tmp', mappings={identity: entry})
         self.assertEqual(result, 0)
         # Git operations use the current forge origin; provenance remains legacy.
@@ -72,8 +72,8 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
         dest.begin_initialization.return_value = False
         dest.run_pin = (22, 'marker')
         adapter = Mock()
-        adapter.target = 'http://127.0.0.1:3300/api/v1/repos/dest/new-repo'
-        args = SimpleNamespace(port=3300, owner='dest')
+        adapter.target = 'http://127.0.0.1:3000/api/v1/repos/dest/new-repo'
+        args = SimpleNamespace(port=3000, owner='dest')
         with patch('repo_mirror.forgejo_sync.PublicForgejoSourceAdapter', return_value=src), \
              patch('repo_mirror.forgejo_sync.ForgejoDestinationAdapter', return_value=adapter), \
              patch('repo_mirror.forgejo_sync.validate_source_release_listing'), \
@@ -88,7 +88,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
         dest.begin_initialization.assert_called_once_with('new-repo', entry['legacy_identity'], expected_id=22)
         call = releases.call_args
         self.assertEqual(call.args[7], '[repo-mirror: forgejo:https://git.example/old/repo]')
-        self.assertEqual(call.kwargs['recovery_target'], 'http://127.0.0.1:3300/api/v1/repos/dest/old-repo')
+        self.assertEqual(call.kwargs['recovery_target'], 'http://127.0.0.1:3000/api/v1/repos/dest/old-repo')
         self.assertEqual(call.kwargs['journal_source']['owner'], 'old')
         self.assertEqual(call.kwargs['journal_name'], 'repo')
 
@@ -104,7 +104,7 @@ class ForgejoRelocationManifestTests(unittest.TestCase):
         source.request.return_value = {'id': 99, 'full_name': 'new/repo', 'clone_url': identity + '.git'}
         destination = Mock()
         with patch('repo_mirror.forgejo_sync.PublicForgejoSourceAdapter', return_value=source):
-            result = _sync_requested(SimpleNamespace(port=3300, owner='dest'), [identity], destination,
+            result = _sync_requested(SimpleNamespace(port=3000, owner='dest'), [identity], destination,
                                      None, 'token', 'fixture-signing-secret-0123456789abcdef', '/tmp', mappings={identity: entry})
         self.assertEqual(result, 1)
         destination.begin_initialization.assert_not_called()

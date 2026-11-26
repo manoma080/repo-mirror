@@ -24,7 +24,7 @@ from repo_mirror.host_limits import (
 class SourceHostTests(unittest.TestCase):
     def test_host_and_port(self):
         self.assertEqual(source_host("https://github.com/alice/demo"), "github.com")
-        self.assertEqual(source_host("https://git.etawen.dev:8443/earthonion/x"), "git.etawen.dev:8443")
+        self.assertEqual(source_host("https://git.example:8443/example-owner/x"), "git.example:8443")
         self.assertEqual(source_host("https://GitHub.com"), "github.com")
 
     def test_rejects_unsafe_or_incomplete_urls(self):
@@ -37,14 +37,14 @@ class HostLimitsTests(unittest.TestCase):
     def test_absent_config_keeps_the_default(self):
         limits = HostLimits.from_config(None, default=16)
         self.assertEqual(limits.cap("github.com"), 16)
-        self.assertEqual(limits.cap("git.etawen.dev"), 16)
+        self.assertEqual(limits.cap("git.example"), 16)
 
     def test_per_host_and_default_entries(self):
         limits = HostLimits.from_config(
-            {"github.com": 16, "git.etawen.dev": 4, "default": 8}, default=16
+            {"github.com": 16, "git.example": 4, "default": 8}, default=16
         )
         self.assertEqual(limits.cap("github.com"), 16)
-        self.assertEqual(limits.cap("git.etawen.dev"), 4)
+        self.assertEqual(limits.cap("git.example"), 4)
         self.assertEqual(limits.cap("gitlab.com"), 8)
 
     def test_invalid_configs_are_rejected(self):
@@ -101,22 +101,22 @@ class HostLimitsTests(unittest.TestCase):
 class ConfigPassthroughTests(unittest.TestCase):
     def test_named_github_config_keeps_the_limits(self):
         config = {
-            "host_concurrency_limits": {"github.com": 16, "git.etawen.dev": 4},
-            "destinations": {"github-manoma080": {"type": "github", "url": "https://github.com",
+            "host_concurrency_limits": {"github.com": 16, "git.example": 4},
+            "destinations": {"github-mirror-owner": {"type": "github", "url": "https://github.com",
                                                   "owner": "dest", "auth": "mirrorbot"}},
             "repositories": [{"source": {"url": "https://github.com/alice/demo"},
-                              "mirrors": {"github-manoma080": {"name": "mirror-demo"}}}],
+                              "mirrors": {"github-mirror-owner": {"name": "mirror-demo"}}}],
         }
         normalized = normalize_config(config)
-        self.assertEqual(normalized["host_concurrency_limits"], {"github.com": 16, "git.etawen.dev": 4})
+        self.assertEqual(normalized["host_concurrency_limits"], {"github.com": 16, "git.example": 4})
 
     def test_named_config_rejects_invalid_limits(self):
         config = {
             "host_concurrency_limits": {"github.com": 0},
-            "destinations": {"github-manoma080": {"type": "github", "url": "https://github.com",
+            "destinations": {"github-mirror-owner": {"type": "github", "url": "https://github.com",
                                                   "owner": "dest", "auth": "mirrorbot"}},
             "repositories": [{"source": {"url": "https://github.com/alice/demo"},
-                              "mirrors": {"github-manoma080": {"name": "mirror-demo"}}}],
+                              "mirrors": {"github-mirror-owner": {"name": "mirror-demo"}}}],
         }
         with self.assertRaises(ValueError):
             normalize_config(config)
@@ -124,8 +124,8 @@ class ConfigPassthroughTests(unittest.TestCase):
     def test_forgejo_manifest_accepts_the_limits(self):
         manifest = {
             "host_concurrency_limits": {"github.com": 3},
-            "destinations": {"forgejo-home": {"type": "forgejo", "url": "http://127.0.0.1:3300",
-                                              "owner": "labadmin", "auth": "token"}},
+            "destinations": {"forgejo-home": {"type": "forgejo", "url": "http://127.0.0.1:3000",
+                                              "owner": "forgejo-owner", "auth": "token"}},
             "repositories": [{"source": {"url": "https://github.com/alice/demo"},
                               "mirrors": {"forgejo-home": {"name": "mirror-demo"}}}],
         }

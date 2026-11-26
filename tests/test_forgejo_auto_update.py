@@ -31,7 +31,7 @@ def fixture(tmp_path):
         'p = pathlib.Path(sys.argv[sys.argv.index("--manifest") + 1])\n'
         'pathlib.Path(os.environ["RESULT"]).write_text(json.dumps([p.read_text(), pathlib.Path(__file__).read_text()]))\n'
     )
-    (repo / 'config-forgejo.json').write_text(json.dumps(['https://github.com/manoma080/mirror-one']))
+    (repo / 'config-forgejo.json').write_text(json.dumps(['https://github.com/mirror-owner/mirror-one']))
     git(repo, 'add', '.')
     git(repo, 'commit', '-m', 'initial')
     helper = tmp_path / 'helper.py'
@@ -51,7 +51,7 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
         tmp = self.tmp_path
         repo, helper = fixture(tmp)
         config = {'destinations': {'local': {}}, 'repositories': [
-            {'source': {'url': 'https://github.com/manoma080/mirror-one', 'id': 11},
+            {'source': {'url': 'https://github.com/mirror-owner/mirror-one', 'id': 11},
              'mirrors': {'local': {'name': 'mirror-one', 'id': 22}}}]}
         (repo / 'config-forgejo.json').write_text(json.dumps(config))
         git(repo, 'add', '.'); git(repo, 'commit', '-m', 'named config')
@@ -90,7 +90,7 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
     def test_forgejo_url_passes_unmodified_to_fetched_scheduler(self):
         tmp = self.tmp_path
         repo, helper = fixture(tmp)
-        sources = ['https://github.com/manoma080/mirror-one', 'https://Forge.Example:443/Owner/Repo']
+        sources = ['https://github.com/mirror-owner/mirror-one', 'https://Forge.Example:443/Owner/Repo']
         (repo / 'config-forgejo.json').write_text(json.dumps(sources))
         git(repo, 'add', '.'); git(repo, 'commit', '-m', 'mixed sources')
         result = launch(tmp, repo, helper)
@@ -141,14 +141,14 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
         repo, helper = fixture(tmp)
         # The code snapshot carries one manifest; the configuration repository
         # carries another and must win.
-        (repo / 'config-forgejo.json').write_text(json.dumps(['https://github.com/manoma080/code-copy']))
+        (repo / 'config-forgejo.json').write_text(json.dumps(['https://github.com/mirror-owner/code-copy']))
         git(repo, 'add', '.'); git(repo, 'commit', '-m', 'code copy')
         config = tmp / 'config-remote'
         config.mkdir()
         git(config, 'init', '-b', 'main')
         git(config, 'config', 'user.email', 'test@example.com')
         git(config, 'config', 'user.name', 'Test')
-        authoritative = ['https://github.com/manoma080/mirror-from-config-repository']
+        authoritative = ['https://github.com/mirror-owner/mirror-from-config-repository']
         (config / 'config-forgejo.json').write_text(json.dumps(authoritative))
         git(config, 'add', '.'); git(config, 'commit', '-m', 'authoritative')
         helper.write_text(
@@ -161,7 +161,7 @@ class AutoUpdateIntegrationTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(LAUNCHER), '--remote', str(repo), '--state-dir', str(tmp / 'state'),
              '--job-lock', str(tmp / 'job.lock'), '--helper', str(helper), '--',
-             '--config-repo', 'manoma080/repo-mirror-config', '--lock', str(tmp / 'scheduler.lock')],
+             '--config-repo', 'mirror-owner/repo-mirror-config', '--lock', str(tmp / 'scheduler.lock')],
             env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(json.loads((tmp / 'result').read_text())[0]), authoritative)
@@ -259,7 +259,7 @@ sys.exit(0 if status == 143 else 1)
         first = json.loads((tmp_path / 'result').read_text())
         self.assertIn('Updater fetched commit: ' + git(repo, 'rev-parse', 'HEAD'), result.stderr)
         assert 'mirror-one' in first[0]
-        (repo / 'config-forgejo.json').write_text(json.dumps(['https://github.com/manoma080/mirror-two']))
+        (repo / 'config-forgejo.json').write_text(json.dumps(['https://github.com/mirror-owner/mirror-two']))
         (repo / 'repo_mirror' / 'forgejo_schedule.py').write_text((repo / 'repo_mirror' / 'forgejo_schedule.py').read_text() + '\n# second revision\n')
         git(repo, 'add', '.')
         git(repo, 'commit', '-m', 'second')

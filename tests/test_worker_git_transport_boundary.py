@@ -16,7 +16,7 @@ from repo_mirror.forgejo_sync import main
 class WorkerGitTransportBoundaryTests(unittest.TestCase):
     def run_case(self, configured, canonical, github=False):
         source_url = canonical + '.git'
-        destination_url = 'http://127.0.0.1:3300/dest/copy.git'
+        destination_url = 'http://127.0.0.1:3000/dest/copy.git'
         github_token, local_token = 'github-secret', 'local-secret'
         original_marker = configured.removeprefix('https://')
         repository = {'id': 22, 'full_name': 'dest/copy', 'private': True,
@@ -59,7 +59,7 @@ class WorkerGitTransportBoundaryTests(unittest.TestCase):
             journal = root / 'journal'
             journal.mkdir(mode=0o700)
             argv = ['--config', str(manifest), '--source', configured, '--token-file', str(token),
-                    '--timestamp-secret-file', str(secret), '--journal-dir', str(journal), '--owner', 'dest']
+                    '--timestamp-secret-file', str(secret), '--journal-dir', str(journal), '--owner', 'dest', '--port', '3000']
             if github:
                 argv.append('--use-github-token')
             stderr = io.StringIO()

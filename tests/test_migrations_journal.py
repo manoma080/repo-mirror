@@ -20,7 +20,7 @@ def entry(phase='prepared', source_id=1234, source_name='repo',
     return {
         'source': {'origin': 'https://github.com', 'id': source_id,
                    'owner': 'newowner', 'name': source_name},
-        'destination': {'profile': 'github-manoma080', 'owner': 'manoma080',
+        'destination': {'profile': 'github-mirror-owner', 'owner': 'mirror-owner',
                         'name': destination_name, 'id': 5678},
         'recovery': {'source_origin': 'https://github.com', 'source_owner': 'oldowner',
                      'source_name': 'repo', 'destination_name': 'mirror-owner-repo',
@@ -161,7 +161,7 @@ class FakeContentsAPI:
 class GitHubBackendTests(unittest.TestCase):
     def setUp(self):
         self.api = FakeContentsAPI()
-        self.store = MigrationsStore(GitHubMigrations(self.api, 'manoma080', 'repo-mirror'), SECRET)
+        self.store = MigrationsStore(GitHubMigrations(self.api, 'mirror-owner', 'repo-mirror'), SECRET)
 
     def test_first_record_creates_file_without_sha(self):
         self.store.record(build_entry(entry()))
@@ -187,7 +187,7 @@ class GitHubBackendTests(unittest.TestCase):
         stale = self.api.content
         self.store.record(build_entry(entry(source_id=9999, source_name='other')))
         with self.assertRaises(ValueError):
-            GitHubMigrations(self.api, 'manoma080', 'repo-mirror').publish(
+            GitHubMigrations(self.api, 'mirror-owner', 'repo-mirror').publish(
                 stale, stale + b'x')
         self.assertEqual(parse(self.api.content, SECRET).pending()[
             journal_key('https://github.com', 9999)]['source']['name'], 'other')

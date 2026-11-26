@@ -4,7 +4,7 @@ import unittest
 from repo_mirror.github_migration import transaction_from_environment
 
 ENV = {
-    'MIRROR_MANAGEMENT_REPOSITORY': 'manoma080/repo-mirror',
+    'MIRROR_MANAGEMENT_REPOSITORY': 'mirror-owner/repo-mirror',
     'MIRROR_MANAGEMENT_TOKEN': 'management-token',
     'MIRROR_TIMESTAMP_SECRET': 'k' * 40,
 }

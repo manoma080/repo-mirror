@@ -11,7 +11,7 @@ B = 'https://code.example:8443/Owner/Beta'
 
 def config():
     return {
-        'destinations': {'home': {'type': 'forgejo', 'url': 'http://127.0.0.1:3300',
+        'destinations': {'home': {'type': 'forgejo', 'url': 'http://127.0.0.1:3000',
                                   'owner': 'local', 'auth': 'forgejo-home'}},
         'repositories': [
             {'source': {'url': A, 'id': 10},
@@ -25,7 +25,7 @@ class ForgejoDispatchTests(unittest.TestCase):
     def plan(self, document=None, **inputs):
         if document is None:
             document = config()
-        return forgejo_dispatch.plan_dispatch(document, inputs, owner='local', port=3300)
+        return forgejo_dispatch.plan_dispatch(document, inputs, owner='local', port=3000)
 
     def test_selected_alias_preserves_spelling_pins_and_unrelated_settings(self):
         document = config()
@@ -80,7 +80,7 @@ class ForgejoDispatchTests(unittest.TestCase):
         source, dest = Mock(), Mock()
         with self.assertRaisesRegex(ValueError, 'duplicate requested source'):
             forgejo_dispatch.plan_dispatch(config(), {'source_urls': A + ',https://api.github.com/owner/ALPHA',
-                                                       'add_to_config': True}, owner='local', port=3300,
+                                                       'add_to_config': True}, owner='local', port=3000,
                                             source_lookup=source, prepare_destination=dest)
         source.assert_not_called()
         dest.assert_not_called()
@@ -155,7 +155,7 @@ class ForgejoDispatchTests(unittest.TestCase):
 
         published, runtime, selected = forgejo_dispatch.plan_dispatch(
             document, {'source_urls': f'{B},{A}', 'add_to_config': True, 'ignore_releases': 'false'},
-            owner='local', port=3300, source_lookup=source, prepare_destination=dest)
+            owner='local', port=3000, source_lookup=source, prepare_destination=dest)
         self.assertEqual(calls[:4], [('source', B, 'forgejo'), ('dest', B, False),
                                      ('source', A, 'github'), ('dest', A, False)])
         self.assertEqual(published, runtime)
@@ -170,7 +170,7 @@ class ForgejoDispatchTests(unittest.TestCase):
         dest = Mock(side_effect=[None, 99])
         with self.assertRaisesRegex(ValueError, 'destination repository ID mismatch'):
             forgejo_dispatch.plan_dispatch(config(), {'source_urls': f'{B},{A}', 'add_to_config': True},
-                                            owner='local', port=3300, source_lookup=source,
+                                            owner='local', port=3000, source_lookup=source,
                                             prepare_destination=dest)
         self.assertEqual([call.kwargs['create'] for call in dest.call_args_list], [False, False])
 
@@ -178,14 +178,14 @@ class ForgejoDispatchTests(unittest.TestCase):
         dest = Mock(return_value=40)
         with self.assertRaisesRegex(ValueError, 'unpinned existing destination'):
             forgejo_dispatch.plan_dispatch(config(), {'source_urls': B, 'add_to_config': True},
-                                            owner='local', port=3300, source_lookup=Mock(return_value=30),
+                                            owner='local', port=3000, source_lookup=Mock(return_value=30),
                                             prepare_destination=dest)
         self.assertEqual([call.kwargs['create'] for call in dest.call_args_list], [False])
 
     def test_pinned_add_noop_does_not_propose_publication(self):
         document = config()
         result = forgejo_dispatch.plan_dispatch(document, {'source_urls': A, 'add_to_config': 'true'},
-                                                owner='local', port=3300, source_lookup=Mock(return_value=10),
+                                                owner='local', port=3000, source_lookup=Mock(return_value=10),
                                                 prepare_destination=Mock(return_value=20))
         self.assertEqual(result, (None, document, [A]))
 
@@ -193,7 +193,7 @@ class ForgejoDispatchTests(unittest.TestCase):
         document = config()
         with self.assertRaisesRegex(ValueError, 'destination repository ID changed'):
             forgejo_dispatch.plan_dispatch(document, {'source_urls': B, 'add_to_config': True},
-                                            owner='local', port=3300, source_lookup=Mock(return_value=30),
+                                            owner='local', port=3000, source_lookup=Mock(return_value=30),
                                             prepare_destination=Mock(side_effect=[None, 40, 41]))
         self.assertEqual(document, config())
 
@@ -201,7 +201,7 @@ class ForgejoDispatchTests(unittest.TestCase):
         for ids, dest_ids in (([True], []), ([30], [False]), ([30, 30, 31], [None, 40])):
             with self.subTest(ids=ids, dest_ids=dest_ids), self.assertRaisesRegex(ValueError, 'ID'):
                 forgejo_dispatch.plan_dispatch(config(), {'source_urls': B, 'add_to_config': True},
-                                                owner='local', port=3300, source_lookup=Mock(side_effect=ids),
+                                                owner='local', port=3000, source_lookup=Mock(side_effect=ids),
                                                 prepare_destination=Mock(side_effect=dest_ids))
 
     def test_gitlab_one_time_lookup_provides_runtime_only_source_id(self):
@@ -209,7 +209,7 @@ class ForgejoDispatchTests(unittest.TestCase):
         source = Mock(return_value=50)
         dest = Mock()
         published, runtime, selected = forgejo_dispatch.plan_dispatch(
-            config(), {'source_urls': url}, owner='local', port=3300,
+            config(), {'source_urls': url}, owner='local', port=3000,
             source_lookup=source, prepare_destination=dest)
         self.assertIsNone(published)
         self.assertEqual(selected, [url])

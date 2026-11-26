@@ -55,7 +55,7 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 
 ### Where the configuration lives
 
-`config.json`, `config-forgejo.json`, `failures.json` and `migrations.json` are not in this repository. They live in the private repository [`manoma080/repo-mirror-config`](https://github.com/manoma080/repo-mirror-config) on `main`, which both runners read and write. The workflow checks it out into `config-repo/` and passes `--config`/`--failures` paths there, keeps the failure-journal fence on that repository, and targets it for migration journal and configuration writes (`MIRROR_MANAGEMENT_REPOSITORY`). Keeping the code public and the operational state private is deliberate: public Actions minutes stay free while the source URLs, destination names and repository IDs are not world-readable.
+`config.json`, `config-forgejo.json`, `failures.json` and `migrations.json` are not in this repository. They live in a separate private configuration repository (configured via `MIRROR_CONFIG_REPOSITORY`, e.g. `<owner>/repo-mirror-config`) on `main`, which both runners read and write. The workflow checks it out into `config-repo/` and passes `--config`/`--failures` paths there, keeps the failure-journal fence on that repository, and targets it for migration journal and configuration writes (`MIRROR_MANAGEMENT_REPOSITORY`). Keeping the code public and the operational state private is deliberate: public Actions minutes stay free while the source URLs, destination names and repository IDs are not world-readable.
 
 ### Destination and removal options
 
@@ -66,11 +66,11 @@ Enter exact repository URLs in the **source_urls** box, separated by commas. Lea
 
 ## Configure sources
 
-Edit [`config.json`](https://github.com/manoma080/repo-mirror-config/blob/main/config.json) in the configuration repository. Named configuration lists each source repository and its mirror explicitly:
+Edit `config.json` in the configuration repository. Named configuration lists each source repository and its mirror explicitly:
 
 ```json
 {
-  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "manoma080", "auth": "mirrorbot"}},
+  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "mirror-owner", "auth": "mirrorbot"}},
   "repositories": [
     {"source": {"url": "https://github.com/alice/project", "id": 123},
      "mirrors": {"github": {"name": "mirror-alice-project", "id": 456, "visibility": "private"}}}
@@ -81,7 +81,7 @@ Edit [`config.json`](https://github.com/manoma080/repo-mirror-config/blob/main/c
 A top-level `host_concurrency_limits` map caps how many repositories are mirrored at once from each source host; `default` applies to hosts without an entry, and omitting the map keeps one shared pool of sixteen:
 
 ```json
-{"host_concurrency_limits": {"default": 16, "git.etawen.dev": 4}}
+{"host_concurrency_limits": {"default": 16, "git.example": 4}}
 ```
 
 Hosts are lower-case names, optionally with a non-default port; limits count repositories in flight per source host, not per provider, and never exceed the runner's worker pool. Capping a host trades throughput there for predictable request rates — a host that answers HTTP 429 when several repositories are fetched at once mirrors its repositories in several waves instead of failing.
@@ -104,7 +104,7 @@ See [docs/auto-discoveries.md](docs/auto-discoveries.md) for the full discovery 
 
 ```json
 {
-  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "manoma080", "auth": "mirrorbot"}},
+  "destinations": {"github": {"type": "github", "url": "https://github.com", "owner": "mirror-owner", "auth": "mirrorbot"}},
   "repositories": [],
   "auto_discoveries": [
     {"url": "https://github.com/example-owner", "visibility": "private"}

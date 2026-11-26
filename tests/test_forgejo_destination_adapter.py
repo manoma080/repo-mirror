@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 
 class FakeClient:
-    origin = 'http://127.0.0.1:3300'
+    origin = 'http://127.0.0.1:3000'
     base = '/api/v1/repos/team/project'
 
     def __init__(self):
@@ -57,11 +57,11 @@ class ForgejoDestinationAdapterTests(unittest.TestCase):
         from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
 
         class Client:
-            origin = 'http://127.0.0.1:3300'
+            origin = 'http://127.0.0.1:3000'
             base = '/api/v1/repos/team/project'
             def list_assets(client_self, release):
                 self.assertEqual(release, {'id': 7})
-                return [{'id': 9, 'name': 'a', 'size': 3, 'browser_download_url': 'http://127.0.0.1:3300/a'}]
+                return [{'id': 9, 'name': 'a', 'size': 3, 'browser_download_url': 'http://127.0.0.1:3000/a'}]
 
         adapter = ForgejoDestinationAdapter('team/project', 'token', client=Client())
         asset = adapter.pages(adapter.target + '/releases/7/assets')[0]

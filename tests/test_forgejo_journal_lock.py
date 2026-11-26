@@ -53,7 +53,7 @@ class JournalLockTests(unittest.TestCase):
             ctx = multiprocessing.get_context('fork')
             first_ready, second_ready = ctx.Queue(), ctx.Queue()
             first_release, release = ctx.Event(), ctx.Event()
-            first = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', first_ready, first_release))
+            first = ctx.Process(target=_hold_destination, args=(home, 'mirror-owner/mirror-test', first_ready, first_release))
             second = ctx.Process(target=_hold_destination, args=(home, 'MANOMA080/MIRROR-TEST', second_ready, release))
             first.start()
             try:
@@ -78,8 +78,8 @@ class JournalLockTests(unittest.TestCase):
             ctx = multiprocessing.get_context('fork')
             first_ready, second_ready = ctx.Queue(), ctx.Queue()
             release = ctx.Event()
-            first = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', first_ready, release))
-            second = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', second_ready, release))
+            first = ctx.Process(target=_hold_destination, args=(home, 'mirror-owner/mirror-test', first_ready, release))
+            second = ctx.Process(target=_hold_destination, args=(home, 'mirror-owner/mirror-test', second_ready, release))
             first.start()
             try:
                 self.assertEqual(first_ready.get(timeout=5), 'entered')
@@ -106,18 +106,18 @@ class JournalLockTests(unittest.TestCase):
             getpwuid.return_value.pw_dir = home
             lockdir = os.path.join(home, '.repo-mirror-forgejo-locks')
             os.symlink(home, lockdir)
-            with forgejo_sync.destination_locks(3300, 'local', ['manoma080/mirror-test']):
+            with forgejo_sync.destination_locks(3300, 'local', ['mirror-owner/mirror-test']):
                 self.assertTrue(os.path.islink(lockdir))
 
     def test_forked_child_does_not_extend_parent_lock(self):
         ctx = multiprocessing.get_context('fork')
         release = ctx.Event()
         with tempfile.TemporaryDirectory() as home:
-            with forgejo_sync.destination_locks(3300, 'local', ['manoma080/mirror-test']):
+            with forgejo_sync.destination_locks(3300, 'local', ['mirror-owner/mirror-test']):
                 child = ctx.Process(target=release.wait, args=(10,))
                 child.start()
             ready = ctx.Queue()
-            contender = ctx.Process(target=_hold_destination, args=(home, 'manoma080/mirror-test', ready, release))
+            contender = ctx.Process(target=_hold_destination, args=(home, 'mirror-owner/mirror-test', ready, release))
             contender.start()
             try:
                 self.assertEqual(ready.get(timeout=3), 'entered')
@@ -132,7 +132,7 @@ class JournalLockTests(unittest.TestCase):
 
     def test_same_destination_different_journals_serialize(self):
         with tempfile.TemporaryDirectory() as directory:
-            url = 'https://github.com/manoma080/mirror-test'
+            url = 'https://github.com/mirror-owner/mirror-test'
             for name, contents in [('config', json.dumps([url])), ('token', 'token'), ('secret', 'synthetic-recovery-fixture-value-32-bytes')]:
                 path = os.path.join(directory, name)
                 with open(path, 'w') as stream:
@@ -171,7 +171,7 @@ class JournalLockTests(unittest.TestCase):
                             second.join()
     def test_distinct_destinations_share_journal_directory_concurrently(self):
         with tempfile.TemporaryDirectory() as directory:
-            urls = ['https://github.com/manoma080/mirror-one', 'https://github.com/manoma080/mirror-two']
+            urls = ['https://github.com/mirror-owner/mirror-one', 'https://github.com/mirror-owner/mirror-two']
             for name, contents in [('config', json.dumps(urls)), ('token', 'token'), ('secret', 'synthetic-recovery-fixture-value-32-bytes')]:
                 path = os.path.join(directory, name)
                 with open(path, 'w') as stream:
@@ -202,7 +202,7 @@ class JournalLockTests(unittest.TestCase):
 
     def test_main_waits_for_existing_lock(self):
         with tempfile.TemporaryDirectory() as directory:
-            url = 'https://github.com/manoma080/mirror-test'
+            url = 'https://github.com/mirror-owner/mirror-test'
             for name, contents in [('config', json.dumps([url])), ('token', 'token'), ('secret', 'synthetic-recovery-fixture-value-32-bytes')]:
                 path = os.path.join(directory, name)
                 with open(path, 'w') as stream:

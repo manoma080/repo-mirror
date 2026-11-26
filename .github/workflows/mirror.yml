@@ -49,7 +49,7 @@ permissions:
 
 env:
   # Configuration and operational state live in a separate private repository.
-  MIRROR_CONFIG_REPOSITORY: manoma080/repo-mirror-config
+  MIRROR_CONFIG_REPOSITORY: ${{ github.repository_owner }}/repo-mirror-config
   MIRROR_CONFIG_DIR: config-repo
 
 concurrency:

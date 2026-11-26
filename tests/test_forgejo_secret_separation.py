@@ -11,7 +11,7 @@ from pathlib import Path
 
 from repo_mirror import forgejo_sync
 
-URL = 'https://github.com/manoma080/mirror-fixture-org-d-fixture-repo'
+URL = 'https://github.com/mirror-owner/mirror-fixture-org-d-fixture-repo'
 SECRET = 'sensitive-synthetic-credential-value'
 
 

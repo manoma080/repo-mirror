@@ -13,7 +13,7 @@ from repo_mirror.forgejo_git import APIError, ForgejoDestination, sync_refs, sna
 from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
 from test_forgejo_destination_adapter import FakeClient
 
-URL = 'https://github.com/manoma080/mirror-test'
+URL = 'https://github.com/mirror-owner/mirror-test'
 
 class TestForgejoRunPin(unittest.TestCase):
     def test_runner_rejects_same_provenance_replacement(self):
@@ -114,10 +114,10 @@ class TestForgejoRunPin(unittest.TestCase):
                     self._check_pinned_operations_never_adopt_or_recreate(change, operation)
 
     def _check_pinned_operations_never_adopt_or_recreate(self, change, operation):
-        marker = 'repo-mirror-source: github.com/manoma080/mirror-test'
+        marker = 'repo-mirror-source: github.com/mirror-owner/mirror-test'
         initial = marker + ' [repo-mirror:initializing:v1]'
         class API:
-            base_url = 'http://127.0.0.1:3300'
+            base_url = 'http://127.0.0.1:3000'
             calls = []
             def request(self, method, path, payload=None):
                 self.calls.append(method)
@@ -128,7 +128,7 @@ class TestForgejoRunPin(unittest.TestCase):
                         'description': marker + ' [repo-mirror:initialized:v1]' if change == 'state' else initial}
         api = API()
         dest = ForgejoDestination(api, 'local')
-        args = (dest, 'mirror-test', 'manoma080/mirror-test')
+        args = (dest, 'mirror-test', 'mirror-owner/mirror-test')
         with self.assertRaises((RuntimeError, APIError)):
             if operation == 'sync':
                 sync_refs(*args, source_token='source', expected=(1, initial))

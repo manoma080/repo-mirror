@@ -27,7 +27,7 @@ def run_mirror(bodies):
             if url.endswith('/latest'): return releases[0]
             return next(item.copy() for item in releases if str(item['id']) == url.rsplit('/', 1)[-1])
     class Client:
-        origin = 'http://127.0.0.1:3300'
+        origin = 'http://127.0.0.1:3000'
         base = '/api/v1/repos/team/project'
     adapter = ForgejoDestinationAdapter('team/project', 'token', client=Client())
     # Exercise legacy diagnostic classification independently of current policy.
@@ -66,7 +66,7 @@ class EmptyBodyDiagnosticTests(unittest.TestCase):
             (tmp / 'secret').write_text('recovery-key-' * 4)
             (tmp / 'secret').chmod(0o600)
             (tmp / 'journals').mkdir(mode=0o700)
-            (tmp / 'manifest').write_text(json.dumps(['https://github.com/manoma080/mirror-a']))
+            (tmp / 'manifest').write_text(json.dumps(['https://github.com/mirror-owner/mirror-a']))
             helper = tmp / 'helper.py'
             helper.write_text('import sys\nfrom tests.test_forgejo_empty_body_diagnostic import run_mirror\nfrom repo_mirror.forgejo_sync import safe_reason\ntry:\n run_mirror(["", None])\nexcept Exception as e:\n print("FORGEJO_FAILURE: " + safe_reason(e), file=sys.stderr)\n sys.exit(1)\n')
             env = dict(os.environ, PYTHONPATH=str(ROOT))

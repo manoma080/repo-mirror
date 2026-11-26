@@ -11,7 +11,7 @@ from repo_mirror import forgejo_sync
 
 class DirectCollisionTests(unittest.TestCase):
     def test_full_config_collision_rejected_before_any_source_or_destination_access(self):
-        github = 'https://github.com/manoma080/mirror-demo'
+        github = 'https://github.com/mirror-owner/mirror-demo'
         cases = [
             [github, 'https://codeberg.org/alice/MIRROR-DEMO'],
             [github, 'https://codeberg.org/alice/project', 'https://forge.example/bob/PROJECT'],

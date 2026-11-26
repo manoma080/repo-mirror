@@ -19,9 +19,9 @@ class DestinationAPI:
 class PinnedForgejoDestinationTests(unittest.TestCase):
     def test_missing_or_replaced_pinned_target_is_not_created_or_modified(self):
         for repo in (None, {'id': 44, 'full_name': 'mirror/project', 'private': True,
-                             'has_actions': True, 'description': 'repo-mirror-source: github.com/manoma080/project'}):
+                             'has_actions': True, 'description': 'repo-mirror-source: github.com/mirror-owner/project'}):
             with self.subTest(repo=repo):
                 api = DestinationAPI(repo)
                 with self.assertRaises(RuntimeError):
-                    ForgejoDestination(api, 'mirror').begin_initialization('project', 'manoma080/project', expected_id=42)
+                    ForgejoDestination(api, 'mirror').begin_initialization('project', 'mirror-owner/project', expected_id=42)
                 self.assertEqual(api.methods, ['GET'])

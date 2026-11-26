@@ -43,7 +43,7 @@ def exercise_rewrites_and_deletes_using_shared_snapshot(tmp_path, wipe, archive_
     archives = {}
     state = {'gets': 0, 'raced': False, 'writes': []}
     class API:
-        base_url = 'http://127.0.0.1:3300'
+        base_url = 'http://127.0.0.1:3000'
         def token(self): return 'local'
         def request(self, method, path, payload=None):
             if path == '/api/v1/user': return {'login': 'mirror'}
@@ -85,9 +85,9 @@ def exercise_rewrites_and_deletes_using_shared_snapshot(tmp_path, wipe, archive_
         if 'push' in args:
             state['writes'].append('push')
         for archive_name, archive in archives.items():
-            args = [str(archive) if x == 'http://127.0.0.1:3300/mirror/' + archive_name + '.git' else x for x in args]
+            args = [str(archive) if x == 'http://127.0.0.1:3000/mirror/' + archive_name + '.git' else x for x in args]
         args = [str(source) if x == 'https://github.com/source/project.git' else
-                str(dest) if x == 'http://127.0.0.1:3300/mirror/project.git' else x for x in args]
+                str(dest) if x == 'http://127.0.0.1:3000/mirror/project.git' else x for x in args]
         args = ['protocol.file.allow=always' if x == 'protocol.file.allow=never' else x for x in args]
         return real_run(args, **kwargs)
     before = git('--git-dir', dest, 'show-ref')

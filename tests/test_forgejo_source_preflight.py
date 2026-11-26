@@ -25,7 +25,7 @@ class SourcePreflightTests(unittest.TestCase):
                 src = SimpleNamespace(pages=lambda url: [release], request=lambda *a: valid)
                 with patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=src):
                     self.assertEqual(forgejo_sync._sync_requested(SimpleNamespace(port=3300, owner='local'),
-                        ['manoma080/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
+                        ['mirror-owner/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
                 dest.begin_initialization.assert_not_called()
 
     def test_latest_failures_never_initialize_destination(self):
@@ -44,7 +44,7 @@ class SourcePreflightTests(unittest.TestCase):
                 src = SimpleNamespace(pages=lambda url: [valid], request=request)
                 with patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=src):
                     self.assertEqual(forgejo_sync._sync_requested(SimpleNamespace(port=3300, owner='local'),
-                        ['manoma080/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
+                        ['mirror-owner/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
                 dest.begin_initialization.assert_not_called()
 
     def test_latest_must_be_eligible_in_listing(self):
@@ -57,7 +57,7 @@ class SourcePreflightTests(unittest.TestCase):
                                       request=lambda *args: latest)
                 with patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=src):
                     self.assertEqual(forgejo_sync._sync_requested(SimpleNamespace(port=3300, owner='local'),
-                        ['manoma080/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
+                        ['mirror-owner/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
                 dest.begin_initialization.assert_not_called()
 
     def test_missing_listing_fields_block_initialization(self):
@@ -70,7 +70,7 @@ class SourcePreflightTests(unittest.TestCase):
                 src = SimpleNamespace(pages=lambda url: [release], request=lambda *a: valid)
                 with patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=src):
                     self.assertEqual(forgejo_sync._sync_requested(SimpleNamespace(port=3300, owner='local'),
-                        ['manoma080/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
+                        ['mirror-owner/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
                 dest.begin_initialization.assert_not_called()
 
     def test_unsafe_source_never_mutates_real_destination(self):
@@ -79,7 +79,7 @@ class SourcePreflightTests(unittest.TestCase):
                 self.calls = []
                 self.repo = ({'id': 1, 'full_name': 'local/mirror-test', 'private': True,
                               'has_actions': False,
-                              'description': 'repo-mirror-source: github.com/manoma080/mirror-test'}
+                              'description': 'repo-mirror-source: github.com/mirror-owner/mirror-test'}
                              if exists else None)
 
             def request(self, method, path, payload=None):
@@ -111,7 +111,7 @@ class SourcePreflightTests(unittest.TestCase):
                     with patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=SimpleNamespace(pages=pages, request=no_latest)), \
                          patch.object(forgejo_sync, 'sync_refs') as git:
                         status = forgejo_sync._sync_requested(SimpleNamespace(port=3300, owner='local'),
-                            ['manoma080/mirror-test'], dest, 'source', 'local', 'secret', tmp)
+                            ['mirror-owner/mirror-test'], dest, 'source', 'local', 'secret', tmp)
                     self.assertEqual(status, 1)
                     self.assertEqual([call for call in api.calls if call[0] in ('POST', 'PATCH', 'PUT', 'DELETE')], [])
                     git.assert_not_called()
@@ -133,7 +133,7 @@ class SourcePreflightTests(unittest.TestCase):
                 with patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=src), \
                      patch.object(forgejo_sync, 'sync_refs') as git, \
                      patch.object(forgejo_sync, 'mirror_releases') as releases:
-                    self.assertEqual(forgejo_sync._sync_requested(args, ['manoma080/mirror-test'], dest, 'github', 'local', 'secret', tmp), 1)
+                    self.assertEqual(forgejo_sync._sync_requested(args, ['mirror-owner/mirror-test'], dest, 'github', 'local', 'secret', tmp), 1)
                     git.assert_not_called()
                     releases.assert_not_called()
 
@@ -151,12 +151,12 @@ class SourcePreflightTests(unittest.TestCase):
              patch.object(forgejo_sync, 'ForgejoDestinationAdapter') as adapter, \
              patch.object(forgejo_sync, 'mirror_releases') as mirror:
             adapter.return_value.target = 'target'
-            self.assertEqual(forgejo_sync._sync_requested(args, ['manoma080/mirror-test'], dest, 'github-token', 'local', 'secret', tmp), 0)
-            self.assertEqual(urls, ['https://api.github.com/repos/manoma080/mirror-test/releases'])
-            self.assertEqual(factory.call_args.args[:2], ('manoma080/mirror-test', 'github-token'))
-            self.assertEqual(git.call_args.args[2], 'manoma080/mirror-test')
+            self.assertEqual(forgejo_sync._sync_requested(args, ['mirror-owner/mirror-test'], dest, 'github-token', 'local', 'secret', tmp), 0)
+            self.assertEqual(urls, ['https://api.github.com/repos/mirror-owner/mirror-test/releases'])
+            self.assertEqual(factory.call_args.args[:2], ('mirror-owner/mirror-test', 'github-token'))
+            self.assertEqual(git.call_args.args[2], 'mirror-owner/mirror-test')
             self.assertEqual(len(snapshot.call_args_list), 2)
-            self.assertTrue(all(c.args[2] == 'manoma080/mirror-test' for c in snapshot.call_args_list))
+            self.assertTrue(all(c.args[2] == 'mirror-owner/mirror-test' for c in snapshot.call_args_list))
             self.assertEqual(git.call_args.kwargs, {'source_token': 'github-token', 'expected': (1, 'marker')})
             self.assertTrue(checks)
             self.assertIs(mirror.call_args.args[3], src)
@@ -174,7 +174,7 @@ class SourcePreflightTests(unittest.TestCase):
              patch.object(forgejo_sync, 'snapshot_refs', return_value=(None, {}, {})), \
              patch.object(forgejo_sync, 'ForgejoDestinationAdapter'), \
              patch.object(forgejo_sync, 'mirror_releases') as releases:
-            self.assertEqual(forgejo_sync._sync_requested(args, ['manoma080/mirror-test'], dest,
+            self.assertEqual(forgejo_sync._sync_requested(args, ['mirror-owner/mirror-test'], dest,
                                                           'token', 'local', 'secret', tmp), 0)
             git.assert_called_once()
             releases.assert_called_once()
@@ -191,7 +191,7 @@ class SourcePreflightTests(unittest.TestCase):
         src = SimpleNamespace(pages=Mock(side_effect=[[release], []]), request=Mock(return_value=release))
         adapter = Mock(target='target')
         with tempfile.TemporaryDirectory() as tmp:
-            journal_id = hashlib.sha256(b'3300:local:manoma080/mirror-test').hexdigest()
+            journal_id = hashlib.sha256(b'3300:local:mirror-owner/mirror-test').hexdigest()
             path = os.path.join(tmp, journal_id + '.json')
             journal = FailureJournal(path)
             key = 'a' * 64 + ':' + 'b' * 64
@@ -200,7 +200,7 @@ class SourcePreflightTests(unittest.TestCase):
                  patch.object(forgejo_sync, 'sync_refs', return_value=1) as refs, \
                  patch.object(forgejo_sync, 'snapshot_refs', return_value=(None, {}, {})), \
                  patch.object(forgejo_sync, 'ForgejoDestinationAdapter', return_value=adapter):
-                status = forgejo_sync._sync_requested(args, ['manoma080/mirror-test'], dest,
+                status = forgejo_sync._sync_requested(args, ['mirror-owner/mirror-test'], dest,
                                                      'token', 'local', 'secret', tmp)
             self.assertEqual(status, 1)
             refs.assert_called_once()  # Refs may already have changed after preflight.
@@ -224,6 +224,6 @@ class SourcePreflightTests(unittest.TestCase):
                 with patch.object(forgejo_sync, 'ForgejoSourceAdapter', return_value=SimpleNamespace(pages=pages, request=no_latest)), \
                      patch.object(forgejo_sync, 'sync_refs') as git, \
                      patch.object(forgejo_sync, 'mirror_releases') as releases:
-                    self.assertEqual(forgejo_sync._sync_requested(args, ['manoma080/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
+                    self.assertEqual(forgejo_sync._sync_requested(args, ['mirror-owner/mirror-test'], dest, 'token', 'local', 'secret', tmp), 1)
                     git.assert_not_called()
                     releases.assert_not_called()

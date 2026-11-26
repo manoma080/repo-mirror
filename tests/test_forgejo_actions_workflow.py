@@ -26,13 +26,15 @@ class ForgejoActionsWorkflowTests(unittest.TestCase):
         variables = ['SOURCE_URLS', 'ADD', 'DESTINATION', 'VISIBILITY', 'REMOVE', 'IGNORE_RELEASES']
         for (key, _), env in zip(actual, variables, strict=True):
             self.assertIn(f'{env}: ${{{{ inputs.{key} }}}}', text)
-        self.assertIn('config.json in repo-mirror-control-config', text)
+        self.assertIn('config.json in @CONFIG_REPOSITORY@', text)
 
     def test_shell_only_forwards_manual_options_as_data(self):
         body = WORKFLOW.read_text().split('        run: |\n', 1)[1]
         shell = '\n'.join(line[10:] for line in body.splitlines())
+        self.assertIn('exec @LAUNCHER_WRAPPER@ mirror', shell)
+        shell = shell.replace('@LAUNCHER_WRAPPER@', 'mirror-wrapper')
         with tempfile.TemporaryDirectory() as tmp:
-            launcher = Path(tmp) / 'run-mirror'
+            launcher = Path(tmp) / 'mirror-wrapper'
             launcher.write_text('#!/bin/sh\nprintf "%s\\n%s\\n" "$1" "${FORGEJO_MANUAL_INPUTS:-}"\n')
             launcher.chmod(0o700)
             env = {**os.environ, 'PATH': tmp + ':' + os.environ['PATH'], 'EVENT': 'workflow_dispatch',

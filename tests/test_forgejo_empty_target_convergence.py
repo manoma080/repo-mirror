@@ -44,7 +44,7 @@ class ForgejoEmptyTargetConvergenceTests(unittest.TestCase):
         api.pages.return_value = [release]
         api.request.side_effect = lambda method, url, *a, **kw: [] if url.endswith('/assets') else copy.deepcopy(release)
         src = PublicForgejoSourceAdapter('https://source/alice/repo', api=api)
-        client = Mock(origin='http://127.0.0.1:3300', base='/api/v1/repos/team/repo')
+        client = Mock(origin='http://127.0.0.1:3000', base='/api/v1/repos/team/repo')
         client.list_releases.return_value = [destination]
         client.list_assets.return_value = []
         client._json.return_value = destination

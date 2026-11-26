@@ -145,7 +145,7 @@ class AutomaticMigrationTests(unittest.TestCase):
                    '--token-file', 'unused', '--timestamp-secret-file', str(self.secret),
                    '--journal-dir', str(self.journals), '--owner', 'dest', '--port', '3300',
                    '--lock', str(self.tmp / 'lock'), '--sync-python', str(self.wrapper),
-                   '--config-repo', 'manoma080/repo-mirror']
+                   '--config-repo', 'mirror-owner/repo-mirror']
         environment = {**os.environ, 'WORLD': str(self.world), 'PYTHONPATH': str(ROOT),
                        'MOVES': json.dumps(moves or {OLD: NEW}), **env}
         return subprocess.run(command, env=environment, capture_output=True, text=True, timeout=120)

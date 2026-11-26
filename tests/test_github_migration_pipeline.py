@@ -27,7 +27,7 @@ from repo_mirror.migrations import (
 )
 from repo_mirror.migrations_journal import parse
 
-MANAGEMENT = 'manoma080/repo-mirror'
+MANAGEMENT = 'mirror-owner/repo-mirror'
 SECRET = 'fixture-signing-secret-0123456789abcdef'
 API = 'https://api.github.com'
 REPO_URL = API + '/repos/dest/'
