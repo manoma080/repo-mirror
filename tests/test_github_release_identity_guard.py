@@ -1,12 +1,14 @@
 import io
 import os
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 from repo_mirror import repository
-from repo_mirror.repository import mirror_repository, _IdentityGuardedDestination
+from repo_mirror.journal import FailureJournal
+from repo_mirror.repository import ReleaseAggregateError, mirror_repository, _IdentityGuardedDestination
 from repo_mirror.sources import source_marker
 
 
@@ -37,7 +39,16 @@ class _AllOpsGuardedDestination:
         return self._destination.upload(*args, **kwargs)
 
 
-def _make_release_fixture():
+def _make_release_fixture(*, source_releases=None, asset_payloads=None, initializing=True, ids=None,
+                          on_source_list=None, on_release_patch=None, replacement_releases=None):
+    """Build a GitHub-to-GitHub fixture.
+
+    ``ids`` holds the live repository IDs (``source``/``destination``); a test
+    may change them mid-run to simulate a replaced repository. While the
+    destination ID differs from the pinned 202, release reads answer from the
+    replacement repository (``replacement_releases``).
+    """
+    ids = ids if ids is not None else {'source': 101, 'destination': 202}
     source = {
         'type': 'github',
         'base_url': 'https://github.com',
@@ -46,13 +57,14 @@ def _make_release_fixture():
         'mirror': {'name': 'demo', 'source_id': 101, 'destination_id': 202},
     }
     marker = source_marker(source, 'demo')
-    asset_payloads = {
+    default_payloads = {
         'https://github.com/alice/demo/releases/download/v2/app-v2.tar.gz': b'v2-archive-bytes',
         'https://github.com/alice/demo/releases/download/v2/app-v2.sha256': b'v2-checksum-bytes',
         'https://github.com/alice/demo/releases/download/v1/app-v1.tar.gz': b'v1-archive-bytes',
         'https://github.com/alice/demo/releases/download/v1/app-v1.sha256': b'v1-checksum-bytes',
     }
-    source_releases = [
+    asset_payloads = default_payloads if asset_payloads is None else asset_payloads
+    default_releases = [
         {
             'id': 20,
             'tag_name': 'v2',
@@ -66,14 +78,14 @@ def _make_release_fixture():
                 {
                     'id': 201,
                     'name': 'app-v2.tar.gz',
-                    'size': len(asset_payloads['https://github.com/alice/demo/releases/download/v2/app-v2.tar.gz']),
+                    'size': len(default_payloads['https://github.com/alice/demo/releases/download/v2/app-v2.tar.gz']),
                     'browser_download_url': 'https://github.com/alice/demo/releases/download/v2/app-v2.tar.gz',
                     'content_type': 'application/gzip',
                 },
                 {
                     'id': 202,
                     'name': 'app-v2.sha256',
-                    'size': len(asset_payloads['https://github.com/alice/demo/releases/download/v2/app-v2.sha256']),
+                    'size': len(default_payloads['https://github.com/alice/demo/releases/download/v2/app-v2.sha256']),
                     'browser_download_url': 'https://github.com/alice/demo/releases/download/v2/app-v2.sha256',
                     'content_type': 'text/plain',
                 },
@@ -92,31 +104,35 @@ def _make_release_fixture():
                 {
                     'id': 101,
                     'name': 'app-v1.tar.gz',
-                    'size': len(asset_payloads['https://github.com/alice/demo/releases/download/v1/app-v1.tar.gz']),
+                    'size': len(default_payloads['https://github.com/alice/demo/releases/download/v1/app-v1.tar.gz']),
                     'browser_download_url': 'https://github.com/alice/demo/releases/download/v1/app-v1.tar.gz',
                     'content_type': 'application/gzip',
                 },
                 {
                     'id': 102,
                     'name': 'app-v1.sha256',
-                    'size': len(asset_payloads['https://github.com/alice/demo/releases/download/v1/app-v1.sha256']),
+                    'size': len(default_payloads['https://github.com/alice/demo/releases/download/v1/app-v1.sha256']),
                     'browser_download_url': 'https://github.com/alice/demo/releases/download/v1/app-v1.sha256',
                     'content_type': 'text/plain',
                 },
             ],
         },
     ]
+    source_releases = default_releases if source_releases is None else source_releases
 
     class FakeSource:
         def request(self, method, url, data=None, **kwargs):
             if url.endswith('/repos/alice/demo'):
                 return {
-                    'id': 101,
+                    'id': ids['source'],
                     'clone_url': 'https://github.com/alice/demo.git',
                     'default_branch': 'main',
                 }
             if url.endswith('/releases/latest'):
-                return dict(source_releases[0])
+                published = [r for r in source_releases if not r['draft'] and not r['prerelease']]
+                if not published:
+                    raise HTTPError(url, 404, 'not found', {}, None)
+                return dict(published[0])
             if '/releases/' in url:
                 rel_id = int(url.rsplit('/', 1)[1])
                 for item in source_releases:
@@ -126,6 +142,8 @@ def _make_release_fixture():
 
         def pages(self, url):
             if url.endswith('/releases'):
+                if on_source_list is not None:
+                    on_source_list()
                 return [dict(item) for item in source_releases]
             for item in source_releases:
                 if url.endswith(f"/releases/{item['id']}/assets"):
@@ -137,7 +155,7 @@ def _make_release_fixture():
 
     class FakeDestination:
         def __init__(self):
-            self.description = marker + ' [repo-mirror:initializing:v1]'
+            self.description = marker + (' [repo-mirror:initializing:v1]' if initializing else '')
             self.releases = {}
             self.assets = {}
             self.next_release_id = 500
@@ -150,7 +168,7 @@ def _make_release_fixture():
                 self.mutations.append((method, url, data))
             if method == 'GET' and url.endswith('/repos/dest/demo'):
                 return {
-                    'id': 202,
+                    'id': ids['destination'],
                     'description': self.description,
                     'default_branch': 'main',
                 }
@@ -165,6 +183,8 @@ def _make_release_fixture():
                     raise HTTPError(url, 404, 'not found', {}, None)
                 return dict(self.releases[self.latest_id])
             if method == 'GET' and '/releases/tags/' in url:
+                if ids['destination'] != 202:
+                    raise HTTPError(url, 404, 'not found', {}, None)
                 tag = url.rsplit('/releases/tags/', 1)[1]
                 for rel in self.releases.values():
                     if rel.get('tag_name') == tag:
@@ -198,6 +218,8 @@ def _make_release_fixture():
                     self.latest_id = rel_id
                 elif not rel['draft'] and not rel['prerelease'] and self.latest_id is None:
                     self.latest_id = rel_id
+                if on_release_patch is not None:
+                    on_release_patch(data)
                 return dict(rel)
             if method == 'GET' and '/releases/' in url:
                 rel_id = int(url.rsplit('/releases/', 1)[1])
@@ -208,6 +230,8 @@ def _make_release_fixture():
 
         def pages(self, url):
             if url.endswith('/releases'):
+                if ids['destination'] != 202:
+                    return [dict(rel) for rel in (replacement_releases or [])]
                 return [dict(rel) for rel in self.releases.values()]
             if '/releases/' in url and url.endswith('/assets'):
                 rel_id = int(url.rsplit('/releases/', 1)[1].split('/', 1)[0])
@@ -273,6 +297,56 @@ class ReleaseIdentityGuardTests(unittest.TestCase):
                 getattr(guarded, method)(*args)
                 check.assert_not_called()
                 getattr(dst, method).assert_called_once_with(*args)
+
+    def test_unrecognised_request_methods_fail_closed(self):
+        # Only a GET string skips the guard; everything else must be checked.
+        cases = [
+            ('HEAD', ('HEAD', '/releases'), {}),
+            ('empty string', ('', '/releases'), {}),
+            ('None positional', (None, '/releases'), {}),
+            ('None keyword', (), {'method': None, 'url': '/releases'}),
+            ('missing method', (), {'url': '/releases'}),
+            ('no arguments', (), {}),
+            ('int', (123, '/releases'), {}),
+            ('bytes GET', (b'GET', '/releases'), {}),
+            ('padded GET', (' GET', '/releases'), {}),
+            ('unknown verb', ('UNKNOWN', '/releases'), {}),
+            ('lowercase post', ('post', '/releases', {}), {}),
+            ('mixed-case Patch', ('Patch', '/releases/1', {}), {}),
+            ('mixed-case dElEtE', ('dElEtE', '/releases/assets/1'), {}),
+            ('lowercase head', ('head', '/releases'), {}),
+        ]
+        for label, args, kwargs in cases:
+            with self.subTest(method=label):
+                dst = Mock()
+                check = Mock(side_effect=ValueError('changed'))
+                guarded = _IdentityGuardedDestination(dst, check)
+                with self.assertRaisesRegex(ValueError, 'changed'):
+                    guarded.request(*args, **kwargs)
+                check.assert_called_once_with()
+                dst.request.assert_not_called()
+
+    def test_concluding_read_verifies_pins_after_the_read(self):
+        from repo_mirror.repository import _concluding_read, _verify_transition_pins
+
+        events = []
+        dst = Mock()
+        dst.request.side_effect = lambda *args: events.append('read') or {'id': 1}
+        guarded = _IdentityGuardedDestination(dst, lambda: events.append('check'))
+        self.assertEqual(_concluding_read(guarded, lambda: guarded.request('GET', '/releases/1')), {'id': 1})
+        self.assertEqual(events, ['read', 'check'])
+
+        # A pin mismatch wins over the read's own failure.
+        failing = Mock()
+        failing.request.side_effect = HTTPError('/releases/1', 404, 'not found', {}, None)
+        guarded = _IdentityGuardedDestination(failing, Mock(side_effect=ValueError('pin changed')))
+        with self.assertRaisesRegex(ValueError, 'pin changed'):
+            _concluding_read(guarded, lambda: guarded.request('GET', '/releases/1'))
+
+        # Unwrapped destinations (self-guarding adapters, mocks) are not touched.
+        plain = Mock()
+        _verify_transition_pins(plain)
+        self.assertEqual(plain.mock_calls, [])
 
     def test_write_only_guard_call_accounting_on_reads_and_writes(self):
         dst = Mock()
@@ -378,10 +452,84 @@ class ReleaseIdentityGuardTests(unittest.TestCase):
         self.assertTrue(any(c.args[0] == 'GET' and c.args[1].endswith('/releases/2') for c in dst.request.call_args_list))
         self.assertFalse(any(c.args[0] == 'PATCH' and c.args[1].endswith('/releases/2') for c in dst.request.call_args_list))
 
+    def test_source_replaced_after_final_patch_blocks_journal_clearing(self):
+        # Reviewer A reproduction (a): a published prerelease with a null body
+        # (so latest_id stays None) on a non-initializing destination. The
+        # source is replaced right after the final clearing PATCH; the
+        # verification GET that authorises journal clearing must detect it.
+        tag = 'v3-rc'
+        asset_url = 'https://github.com/alice/demo/releases/download/v3-rc/app.tar.gz'
+        payloads = {asset_url: b'rc-archive-bytes'}
+        releases = [{
+            'id': 30, 'tag_name': tag, 'name': 'Release candidate', 'body': None,
+            'draft': False, 'prerelease': True, 'target_commitish': 'main',
+            'published_at': '2026-03-01T00:00:00Z',
+            'assets': [{'id': 301, 'name': 'app.tar.gz', 'size': len(payloads[asset_url]),
+                        'browser_download_url': asset_url, 'content_type': 'application/gzip'}],
+        }]
+        ids = {'source': 101, 'destination': 202}
+        final_patches = []
+
+        def on_release_patch(data):
+            if data.get('body') == '' and 'name' in data:
+                final_patches.append(data)
+                ids['source'] = 999
+
+        source, _, src, dst = _make_release_fixture(
+            source_releases=releases, asset_payloads=payloads, initializing=False, ids=ids,
+            on_release_patch=on_release_patch)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = FailureJournal(os.path.join(tmp, 'failures.json'))
+            key = FailureJournal.id_key('https://github.com', 101, 'https://api.github.com', 202, tag, 'app.tar.gz')
+            journal.set(key, True)
+            with (
+                patch.dict(os.environ, {'MIRROR_TIMESTAMP_SECRET': 'fixture-secret'}),
+                patch('repo_mirror.repository.mirror_git'),
+            ):
+                with self.assertRaisesRegex(ValueError, '^source repository id mismatch$'):
+                    mirror_repository(source, 'demo', 'dest', src, dst, 'token', journal=journal)
+            self.assertEqual(len(final_patches), 1)
+            self.assertIn(key, journal.failures)
+
+    def test_destination_replaced_after_last_recheck_reports_pin_mismatch(self):
+        # Reviewer A reproduction (b): the destination is replaced right after
+        # recheck_pins() #3 (at source release discovery) by a repository that
+        # holds an unauthenticated untagged draft. The guarded concluding reads
+        # must report the pin mismatch, as origin/main does, instead of
+        # "ambiguous untagged destination draft".
+        foreign = [{'id': 777, 'tag_name': 'untagged-0123abcd', 'name': 'foreign', 'body': 'foreign draft',
+                    'draft': True, 'prerelease': False}]
+        for initializing in (False, True):
+            with self.subTest(initializing=initializing):
+                ids = {'source': 101, 'destination': 202}
+                source, _, src, dst = _make_release_fixture(
+                    initializing=initializing, ids=ids, replacement_releases=foreign,
+                    on_source_list=lambda: ids.update(destination=999))
+                with (
+                    patch.dict(os.environ, {'MIRROR_TIMESTAMP_SECRET': 'fixture-secret'}),
+                    patch('repo_mirror.repository.mirror_git'),
+                ):
+                    with self.assertRaises(Exception) as raised:
+                        mirror_repository(source, 'demo', 'dest', src, dst, 'token')
+                exc = raised.exception
+                if initializing:
+                    # Per-release tag lookups (concluding reads) fail in each
+                    # release's isolation boundary, as on origin/main.
+                    self.assertIsInstance(exc, ReleaseAggregateError)
+                    errors = exc.release_errors
+                    self.assertEqual(len(errors), 2)
+                else:
+                    # The release snapshot (concluding read) fails before selection.
+                    errors = (exc,)
+                for error in errors:
+                    self.assertIs(type(error), ValueError)
+                    self.assertEqual(str(error), 'destination repository id mismatch or missing')
+                self.assertFalse([m for m in dst.mutations if '/releases' in m[1]])
+
     def test_release_fixture_guard_accounting_equivalence_and_reduction(self):
         def run_with_guard(guard_cls):
             source, _, src, dst = _make_release_fixture()
-            counts = {'guard_calls': 0, 'reads': 0, 'writes': 0}
+            counts = {'guard_calls': 0, 'reads': 0, 'writes': 0, 'transition_checks': 0}
 
             class CountingGuard(guard_cls):
                 def __init__(self, destination, check):
@@ -434,6 +582,18 @@ class ReleaseIdentityGuardTests(unittest.TestCase):
                         counts['writes'] += 1
                         assert delta == 1, f'expected 1 guard call for upload, got {delta}'
 
+                def verify_pins(self):
+                    before = counts['guard_calls']
+                    try:
+                        return super().verify_pins()
+                    finally:
+                        counts['transition_checks'] += 1
+                        delta = counts['guard_calls'] - before
+                        assert delta == 1, f'expected 1 guard call for verify_pins, got {delta}'
+
+                if not hasattr(guard_cls, 'verify_pins'):
+                    del verify_pins
+
             with (
                 patch.dict(os.environ, {'MIRROR_TIMESTAMP_SECRET': 'fixture-secret'}),
                 patch('repo_mirror.repository.mirror_git'),
@@ -455,5 +615,9 @@ class ReleaseIdentityGuardTests(unittest.TestCase):
         self.assertGreater(new_counts['reads'], 0)
         self.assertGreater(new_counts['writes'], 0)
         self.assertEqual(baseline_counts['guard_calls'], baseline_counts['reads'] + baseline_counts['writes'])
-        self.assertEqual(new_counts['guard_calls'], new_counts['writes'])
+        # Concluding reads on this fixture: one tag lookup per release (2)
+        # and one destination release snapshot (1).
+        self.assertEqual(baseline_counts['transition_checks'], 0)
+        self.assertEqual(new_counts['transition_checks'], 3)
+        self.assertEqual(new_counts['guard_calls'], new_counts['writes'] + new_counts['transition_checks'])
         self.assertLess(new_counts['guard_calls'], baseline_counts['guard_calls'])
