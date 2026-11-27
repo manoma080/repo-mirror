@@ -29,6 +29,12 @@ _cooldowns = {}
 _MAX_RATE_WAIT = 60
 _UPLOAD_ATTEMPT_CALLBACK = contextvars.ContextVar("_UPLOAD_ATTEMPT_CALLBACK", default=None)
 
+
+def _notify_upload_attempt():
+    callback = _UPLOAD_ATTEMPT_CALLBACK.get()
+    if callback is not None:
+        callback()
+
 _KNOWN_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
 
 
@@ -524,15 +530,6 @@ class API:
         self.opener = build_opener(SafeRedirect(), UploadErrorProcessor())
 
     @property
-    def emits_attempt_callback(self):
-        return (
-            "upload" not in vars(self)
-            and "_request" not in vars(self)
-            and type(self).upload is API.upload
-            and type(self)._request is API._request
-        )
-
-    @property
     def token(self):
         return self._token() if callable(self._token) else self._token
 
@@ -573,9 +570,7 @@ class API:
                     if attempt > 0:
                         print(f"request retry {attempt}/3", file=sys.stderr, flush=True)
                     if upload:
-                        on_upload_attempt = _UPLOAD_ATTEMPT_CALLBACK.get()
-                        if on_upload_attempt is not None:
-                            on_upload_attempt()
+                        _notify_upload_attempt()
                     setattr(request, "_mirror_metrics", (self.role, "API"))
                     setattr(request, "_mirror_metrics_counted", True)
                     record_api_call(parsed.hostname, self.role, "API", method)

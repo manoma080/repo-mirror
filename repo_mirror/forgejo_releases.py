@@ -1,5 +1,6 @@
 """GitHub and local Forgejo release transport clients."""
 
+import contextvars
 import http.client
 import json
 import re
@@ -13,6 +14,13 @@ from repo_mirror.github_api import SourceAPI
 
 MAX_BYTES = 8 * 1024 * 1024  # maximum JSON response, not asset size
 CHUNK_SIZE = 1024 * 1024
+_DOWNLOAD_ATTEMPT_CALLBACK = contextvars.ContextVar("_DOWNLOAD_ATTEMPT_CALLBACK", default=None)
+_UPLOAD_CONTENT_TYPE_RE = re.compile(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")
+
+
+def _validate_upload_content_type(content_type):
+    if not isinstance(content_type, str) or not _UPLOAD_CONTENT_TYPE_RE.fullmatch(content_type):
+        raise ValueError('invalid asset content type')
 
 
 class SyncConflict(RuntimeError):
@@ -76,7 +84,11 @@ class GitHubReleases:
         headers = {'Accept': 'application/octet-stream', 'User-Agent': 'repo-mirror'}
         if token:
             headers['Authorization'] = 'Bearer ' + token
-        with self.api.opener.open(Request(url, headers=headers), timeout=60) as response:
+        request = Request(url, headers=headers)
+        on_download_attempt = _DOWNLOAD_ATTEMPT_CALLBACK.get()
+        if on_download_attempt is not None:
+            on_download_attempt()
+        with self.api.opener.open(request, timeout=60) as response:
             _download(response, asset, output, retry_truncated=retry_truncated)
 
 
@@ -191,8 +203,7 @@ class ForgejoReleases:
             raise SyncConflict('destination asset download failed') from None
 
     def upload(self, release, name, data, size, content_type='application/octet-stream'):
-        if not isinstance(content_type, str) or not re.fullmatch(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+", content_type):
-            raise ValueError('invalid asset content type')
+        _validate_upload_content_type(content_type)
         boundary = 'mirror' + secrets.token_hex(16)
         prefix = f'--{boundary}\r\nContent-Disposition: form-data; name="attachment"; filename="asset"\r\nContent-Type: {content_type}\r\n\r\n'.encode()
         suffix = f'\r\n--{boundary}--\r\n'.encode()

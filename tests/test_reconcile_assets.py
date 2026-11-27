@@ -6,6 +6,7 @@ from unittest.mock import patch
 from mirror_test_support import patch_everywhere
 
 import mirror
+from repo_mirror.github_api import _notify_upload_attempt
 
 SOURCE = {"type": "github", "base_url": "https://github.com", "owner": "alice"}
 
@@ -67,6 +68,7 @@ class Destination:
         out.write(self.assets[url.rsplit("/", 1)[-1]])
 
     def upload(self, url, data, content_type):
+        _notify_upload_attempt()
         if self.fail:
             raise RuntimeError("interrupted")
         self.assets[url.split("name=")[1]] = data.read()

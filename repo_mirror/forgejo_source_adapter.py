@@ -7,7 +7,7 @@ from urllib.parse import unquote, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from repo_mirror.forgejo_local import source_identity
-from repo_mirror.forgejo_releases import GitHubReleases, _download, _id
+from repo_mirror.forgejo_releases import GitHubReleases, _DOWNLOAD_ATTEMPT_CALLBACK, _download, _id
 from repo_mirror.github_api import SafeRedirect, SourceAPI, https_origin, transient_transfer_error, transfer_retry_delay
 
 
@@ -77,12 +77,26 @@ class ForgejoSourceAdapter:
         for attempt in range(4):
             output.seek(position)
             output.truncate()
+            notified = False
+
+            def notify_attempt(current_attempt=attempt):
+                nonlocal notified
+                if not notified:
+                    notified = True
+                    if current_attempt > 0:
+                        print(f'asset download retry {current_attempt}/3 target=source', file=sys.stderr, flush=True)
+
             try:
                 if self.anonymous:
                     req = Request(url, headers={'User-Agent': 'repo-mirror'})
+                    notify_attempt()
                     with self.client.api.opener.open(req, timeout=60) as response:
                         return _download(response, self._assets[url], output, retry_truncated=True)
-                return self.client._download_once(self._assets[url], output, retry_truncated=True)
+                callback_token = _DOWNLOAD_ATTEMPT_CALLBACK.set(notify_attempt)
+                try:
+                    return self.client._download_once(self._assets[url], output, retry_truncated=True)
+                finally:
+                    _DOWNLOAD_ATTEMPT_CALLBACK.reset(callback_token)
             except Exception as exc:
                 output.seek(position)
                 output.truncate()
@@ -93,7 +107,6 @@ class ForgejoSourceAdapter:
                     raise
                 if isinstance(exc, HTTPError):
                     exc.close()
-                print(f'asset download retry {attempt + 1}/3 target=source', file=sys.stderr, flush=True)
                 time.sleep(delay)
 
 
