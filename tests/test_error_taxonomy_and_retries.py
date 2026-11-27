@@ -664,7 +664,7 @@ class RetryAccountingTests(unittest.TestCase):
 
         def check_pins():
             check_calls[0] += 1
-            if check_calls[0] >= 3:
+            if check_calls[0] >= 2:
                 raise RuntimeError(
                     "already rate limited by the source or destination host; the 60 s wait limit is exhausted"
                 )

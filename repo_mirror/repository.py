@@ -31,7 +31,19 @@ IDENTITY_SENTINEL = "[repo-mirror:draft-identity:v1]"
 
 
 class _IdentityGuardedDestination:
-    """Check repository pins before each destination operation."""
+    """Check repository pins before destination writes, not reads.
+
+    Guard scope: ``upload()`` and any ``request()`` with a non-``GET`` method
+    (``POST``, ``PATCH``, ``PUT``, ``DELETE``, or any unknown method) run the
+    pin check before delegating. Read-only operations (``GET`` requests,
+    ``pages()``, and ``download()``) skip the pin check because a read cannot
+    corrupt destination state.
+
+    Residual TOCTOU risk: this narrows, and does not close, the window between
+    checks. A destination repository recreated between a read and the next
+    write is still caught at that write, whereas a recreation after the last
+    write of the phase is not detected until the next run.
+    """
 
     def __init__(self, destination, check):
         self._destination = destination
@@ -41,19 +53,15 @@ class _IdentityGuardedDestination:
         return getattr(self._destination, name)
 
     def request(self, *args, **kwargs):
-        self._check()
+        method = args[0] if args else kwargs.get("method")
+        if not (isinstance(method, str) and method.upper() == "GET"):
+            self._check()
         return self._destination.request(*args, **kwargs)
 
     def pages(self, url):
-        # Route the standard GitHub paginator through the guarded request so
-        # each page is checked, rather than only the first page.
-        if getattr(type(self._destination), "pages", None) is GitHubAPI.pages:
-            return GitHubAPI.pages(self, url)
-        self._check()
         return self._destination.pages(url)
 
     def download(self, *args, **kwargs):
-        self._check()
         return self._destination.download(*args, **kwargs)
 
     def upload(self, *args, **kwargs):
