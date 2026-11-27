@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urljoin, urlparse, urlsplit
+from urllib.parse import parse_qsl, quote, urljoin, urlparse, urlsplit
 from urllib.request import HTTPErrorProcessor, HTTPRedirectHandler, Request, build_opener
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, MAX_ASSET_SIZE, NAME
@@ -521,6 +521,166 @@ class AppTokenProvider:
         return result["token"], expiry.timestamp()
 
 
+def _extract_link_header(response):
+    """Extract and combine any HTTP ``Link`` headers from a response object."""
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = get_all("Link")
+        if isinstance(values, (list, tuple)):
+            joined = ", ".join(v for v in values if isinstance(v, str) and v)
+            return joined or None
+        return values if isinstance(values, str) and values else None
+    if isinstance(headers, dict):
+        values = [v for k, v in headers.items() if isinstance(k, str) and k.lower() == "link" and isinstance(v, str) and v]
+        return ", ".join(values) if values else None
+    get = getattr(headers, "get", None)
+    if callable(get):
+        value = get("Link")
+        return value if isinstance(value, str) and value else None
+    return None
+
+
+def _parse_link_header(header_value):
+    """Parse an RFC 8288 ``Link`` header, returning ``(next_url, all_rels)``."""
+    if not isinstance(header_value, str) or not header_value.strip():
+        return None, frozenset()
+    n = len(header_value)
+    i = 0
+    next_url = None
+    all_rels = set()
+
+    def skip_to_next_entry(pos):
+        in_quotes = False
+        while pos < n:
+            ch = header_value[pos]
+            if in_quotes:
+                if ch == "\\" and pos + 1 < n:
+                    pos += 2
+                    continue
+                if ch == '"':
+                    in_quotes = False
+            else:
+                if ch == '"':
+                    in_quotes = True
+                elif ch == ",":
+                    return pos + 1
+            pos += 1
+        return pos
+
+    while i < n:
+        while i < n and (header_value[i].isspace() or header_value[i] == ","):
+            i += 1
+        if i >= n:
+            break
+        if header_value[i] != "<":
+            i = skip_to_next_entry(i)
+            continue
+        gt = header_value.find(">", i + 1)
+        if gt == -1:
+            break
+        target = header_value[i + 1 : gt].strip()
+        i = gt + 1
+        entry_rels = set()
+        while i < n:
+            while i < n and header_value[i].isspace():
+                i += 1
+            if i >= n:
+                break
+            if header_value[i] == ",":
+                i += 1
+                break
+            if header_value[i] != ";":
+                i = skip_to_next_entry(i)
+                break
+            i += 1
+            param_start = i
+            while i < n and header_value[i] not in "=;,":
+                i += 1
+            if i >= n or header_value[i] != "=":
+                continue
+            name = header_value[param_start:i].strip().lower()
+            i += 1
+            while i < n and header_value[i].isspace():
+                i += 1
+            if i < n and header_value[i] == '"':
+                i += 1
+                chars = []
+                while i < n:
+                    ch = header_value[i]
+                    if ch == "\\" and i + 1 < n:
+                        chars.append(header_value[i + 1])
+                        i += 2
+                    elif ch == '"':
+                        i += 1
+                        break
+                    else:
+                        chars.append(ch)
+                        i += 1
+                value = "".join(chars)
+            else:
+                val_start = i
+                while i < n and header_value[i] not in ";,":
+                    i += 1
+                value = header_value[val_start:i].strip()
+            if name == "rel":
+                for token in value.split():
+                    if token:
+                        entry_rels.add(token.lower())
+        if target and entry_rels:
+            all_rels.update(entry_rels)
+            if "next" in entry_rels and next_url is None:
+                next_url = target
+    return next_url, frozenset(all_rels)
+
+
+_PAGINATION_COMPAT_PARAMS = frozenset(("per_page", "limit"))
+_PAGINATION_PARAMS = frozenset(("page", "per_page", "limit"))
+
+
+def _query_param_map(query):
+    grouped = {}
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        grouped.setdefault(key, []).append(value)
+    return {key: sorted(values) for key, values in grouped.items()}
+
+
+def _validate_pagination_link(base_url, resolved_url):
+    """Ensure a resolved rel="next" URL stays on the same origin, exact path, and query scope."""
+    if https_origin(resolved_url) != https_origin(base_url):
+        raise ValueError("pagination link outside configured origin")
+    base_parts = urlsplit(base_url)
+    resolved_parts = urlsplit(resolved_url)
+    if resolved_parts.path != base_parts.path:
+        raise ValueError("pagination link outside configured origin")
+
+    base_params = _query_param_map(base_parts.query)
+    resolved_params = _query_param_map(resolved_parts.query)
+
+    base_non_pagination = {k: v for k, v in base_params.items() if k not in _PAGINATION_PARAMS}
+    resolved_non_pagination = {k: v for k, v in resolved_params.items() if k not in _PAGINATION_PARAMS}
+    if resolved_non_pagination != base_non_pagination:
+        raise ValueError("pagination link outside configured origin")
+
+    for param in _PAGINATION_COMPAT_PARAMS:
+        if param in resolved_params:
+            expected = base_params.get(param, ["100"])
+            if resolved_params[param] != expected:
+                raise ValueError("pagination link outside configured origin")
+
+    page_values = resolved_params.get("page")
+    if (
+        not page_values
+        or len(page_values) != 1
+        or not page_values[0].isascii()
+        or not page_values[0].isdigit()
+        or int(page_values[0]) < 1
+    ):
+        raise ValueError("pagination link outside configured origin")
+
+
 class API:
     """Small HTTP client for one GitHub or Forgejo API (JSON requests, retries, safe logging)."""
 
@@ -528,6 +688,7 @@ class API:
         self._token = token
         self.role = "destination" if token else "source"
         self.opener = build_opener(SafeRedirect(), UploadErrorProcessor())
+        self._response_state = threading.local()
 
     @property
     def token(self):
@@ -576,6 +737,9 @@ class API:
                     record_api_call(parsed.hostname, self.role, "API", method)
                     with self.opener.open(request, timeout=60) as response:
                         _publish_exhausted_response(parsed.hostname, response)
+                        state = getattr(self, "_response_state", None)
+                        if state is not None:
+                            state.link = _extract_link_header(response)
                         return response.read()
                 except HTTPError as e:
                     setattr(
@@ -648,14 +812,35 @@ class API:
 
     def pages(self, url):
         result = []
+        separator = "&" if "?" in url else "?"
+        next_url = None
+        following_links = False
+        seen_urls = set()
+        state = getattr(self, "_response_state", None)
         for page in range(1, 10001):
-            separator = "&" if "?" in url else "?"
-            items = self.request("GET", f"{url}{separator}per_page=100&limit=100&page={page}")
+            request_url = next_url if next_url is not None else f"{url}{separator}per_page=100&limit=100&page={page}"
+            if request_url in seen_urls:
+                raise RuntimeError("pagination cycle detected")
+            seen_urls.add(request_url)
+            if state is not None:
+                state.link = None
+            items = self.request("GET", request_url)
             if not isinstance(items, list):
                 raise ValueError("pagination response is not an array")
             result.extend(items)
             if not items:
                 return result
+            link_header = getattr(state, "link", None) if state is not None else None
+            next_link, rels = _parse_link_header(link_header)
+            if next_link is not None:
+                resolved = urljoin(request_url, next_link)
+                _validate_pagination_link(url, resolved)
+                next_url = resolved
+                following_links = True
+            else:
+                if following_links or "last" in rels:
+                    return result
+                next_url = None
         raise RuntimeError("pagination exceeded safety limit")
 
     @timed_call(lambda self, url, output: f"network target={self.role} operation=asset method=GET")
