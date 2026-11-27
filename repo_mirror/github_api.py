@@ -9,6 +9,7 @@ import json
 import math
 import os
 import random
+import re
 import socket
 import ssl
 import subprocess
@@ -666,6 +667,35 @@ def _parse_link_header(header_value):
 
 _PAGINATION_COMPAT_PARAMS = frozenset(("per_page", "limit"))
 _PAGINATION_PARAMS = frozenset(("page", "per_page", "limit"))
+_GITHUB_CANONICAL_PAGINATION_PATTERNS = (
+    (re.compile(r"^/repos/[^/]+/[^/]+(/.*)$"), re.compile(r"^/repositories/[1-9][0-9]*(/.*)$")),
+    (re.compile(r"^/orgs/[^/]+(/.*)$"), re.compile(r"^/organizations/[1-9][0-9]*(/.*)$")),
+    (re.compile(r"^/users/[^/]+(/.*)$"), re.compile(r"^/user/[1-9][0-9]*(/.*)$")),
+)
+
+
+def _github_canonical_pagination_path_matches(base_path, resolved_path):
+    """Allow GitHub REST rel='next' canonical numeric-ID paths with an identical subpath.
+
+    GitHub rewrites a listing's next link from a human path to the repository's
+    canonical numeric-ID path (``/repos/o/r/releases`` -> ``/repositories/<id>/releases``),
+    which is why an exact-path rule broke pagination for repositories with more than
+    one page of releases.
+
+    Trust assumption, stated so it is not mistaken for validation: these headers are
+    only honoured for ``https_origin(GITHUB)``, i.e. api.github.com, and the numeric id
+    itself is **not** checked against the repository being mirrored. The pinned path
+    prevents an id switch between pages, but the first rewrite can name any canonical
+    id with a matching tail. That is acceptable only because the generator is GitHub
+    itself; do not reuse this helper for a provider whose headers a repository owner
+    can influence.
+    """
+    for base_re, resolved_re in _GITHUB_CANONICAL_PAGINATION_PATTERNS:
+        base_match = base_re.fullmatch(base_path)
+        if base_match is not None:
+            resolved_match = resolved_re.fullmatch(resolved_path)
+            return resolved_match is not None and resolved_match.group(1) == base_match.group(1)
+    return False
 
 
 def _query_param_map(query):
@@ -675,14 +705,22 @@ def _query_param_map(query):
     return {key: sorted(values) for key, values in grouped.items()}
 
 
-def _validate_pagination_link(base_url, resolved_url):
+def _validate_pagination_link(base_url, resolved_url, *, pinned_path=None):
     """Ensure a resolved rel="next" URL stays on the same origin, exact path, and query scope."""
-    if https_origin(resolved_url) != https_origin(base_url):
+    base_origin = https_origin(base_url)
+    if https_origin(resolved_url) != base_origin:
         raise ValueError("pagination link outside configured origin")
     base_parts = urlsplit(base_url)
     resolved_parts = urlsplit(resolved_url)
-    if resolved_parts.path != base_parts.path:
-        raise ValueError("pagination link outside configured origin")
+    if pinned_path is not None:
+        if resolved_parts.path != pinned_path:
+            raise ValueError("pagination link outside configured origin")
+    elif resolved_parts.path != base_parts.path:
+        if not (
+            base_origin == https_origin(GITHUB)
+            and _github_canonical_pagination_path_matches(base_parts.path, resolved_parts.path)
+        ):
+            raise ValueError("pagination link outside configured origin")
 
     base_params = _query_param_map(base_parts.query)
     resolved_params = _query_param_map(resolved_parts.query)
@@ -707,6 +745,7 @@ def _validate_pagination_link(base_url, resolved_url):
         or int(page_values[0]) < 1
     ):
         raise ValueError("pagination link outside configured origin")
+    return resolved_parts.path
 
 
 class API:
@@ -844,6 +883,7 @@ class API:
         result = []
         separator = "&" if "?" in url else "?"
         next_url = None
+        pinned_path = None
         following_links = False
         seen_urls = set()
         state = getattr(self, "_response_state", None)
@@ -864,7 +904,7 @@ class API:
             next_link, rels = _parse_link_header(link_header)
             if next_link is not None:
                 resolved = urljoin(request_url, next_link)
-                _validate_pagination_link(url, resolved)
+                pinned_path = _validate_pagination_link(url, resolved, pinned_path=pinned_path)
                 next_url = resolved
                 following_links = True
             else:

@@ -1829,16 +1829,43 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             {"body": marked_body(body, state)},
                         )
                 assets = dst.pages(target + "/releases/" + str(existing["id"]) + "/assets")
-                if any(asset.get("state") == "starter" for asset in assets):
-                    raise StarterAssetError()
                 by_name = {asset["name"]: asset for asset in assets}
+                source_by_name = {a["name"]: a for a in source_assets}
+                oversized_link_names = (
+                    {link["name"] for link, size, _ in link_assets if size is None} if tag_identity else set()
+                )
+                starter_assets = [asset for asset in assets if asset.get("state") == "starter"]
+                if starter_assets:
+                    # Auto-heal only provable placeholders: zero-byte ``starter`` assets whose
+                    # name matches a source asset this release is about to re-upload, with a
+                    # usable upload_url, no pending marker, and no name collisions. Such an
+                    # asset is an empty leftover from an interrupted upload, so delete-then-
+                    # upload converges to the same end state as a fresh upload. Anything else
+                    # still refuses and asks for manual reconciliation.
+                    can_heal_starters = (
+                        not pending
+                        and len(by_name) == len(assets)
+                        and len(source_by_name) == len(source_assets)
+                        and isinstance(existing.get("upload_url"), str)
+                        and bool(existing["upload_url"])
+                        and all(
+                            type(starter.get("id")) is int
+                            and starter["id"] > 0
+                            and type(starter.get("size")) is int
+                            and starter["size"] == 0
+                            and isinstance(starter.get("name"), str)
+                            and starter["name"] in source_by_name
+                            and starter["name"] not in oversized_link_names
+                            for starter in starter_assets
+                        )
+                    )
+                    if not can_heal_starters:
+                        raise StarterAssetError()
                 if tag_identity and any(link["name"] in by_name for link, size, _ in link_assets if size is None):
                     # A same-name file could be destination-owned; oversized links
                     # cannot establish byte identity or authorize its deletion.
                     raise ReleaseRecoveryError("mismatch")
-                if len(by_name) != len(assets) or len({a["name"] for a in source_assets}) != len(
-                    source_assets
-                ):
+                if len(by_name) != len(assets) or len(source_by_name) != len(source_assets):
                     raise ReleaseRecoveryError("mismatch")
                 # Source-owned current cache names disable cache management.
                 new_name = "REPO-MIRROR-MANIFEST.json"
@@ -1919,6 +1946,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         key = keys[asset["name"]] if journal else None
                         was_journaled = journal is not None and key in journal.failures
                         previous = by_name.get(asset["name"])
+                        is_starter = previous is not None and previous.get("state") == "starter"
                         auth_source_digest = _authenticated_source_digest(asset)
                         source_hash = auth_source_digest
                         if source_hash is None:
@@ -1941,6 +1969,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             and type(asset.get("size")) is int
                             and asset["size"] >= 0
                             and previous is not None
+                            and previous.get("state") == "uploaded"
                             and type(previous.get("size")) is int
                             and previous["size"] >= 0
                             and asset["size"] == previous["size"]
@@ -2041,7 +2070,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             if ident:
                                 records[asset["name"]] = dict(ident, sha256=calculated.hexdigest())
                             changed = False
-                            if previous:
+                            if previous and not is_starter:
                                 with tempfile.TemporaryFile() as existing_data:
                                     dst.download(previous["url"], existing_data)
                                     if isinstance(target_hash, str) and re.fullmatch(
@@ -2057,7 +2086,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                         changed = not same_file(data, existing_data)
                                     if changed and not may_replace:
                                         raise ReleaseRecoveryError("mismatch")
-                            if changed:
+                            if changed or is_starter:
                                 _, current_digest, _, _ = fetch_source_assets()
                                 if current_digest != digest:
                                     raise ReleaseRecoveryError("changed")
@@ -2068,10 +2097,16 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                     or asset_id <= 0
                                 ):
                                     raise ReleaseRecoveryError("mismatch")
+                                if is_starter:
+                                    print(
+                                        f"removing starter release asset before re-upload asset={safe_label(asset.get('name'))}",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
                                 if journal:
                                     journal.set(key, True)
                                 dst.request("DELETE", target + "/releases/assets/" + str(asset_id))
-                            if not previous or changed:
+                            if not previous or changed or is_starter:
                                 _, current_digest, _, _ = fetch_source_assets()
                                 if current_digest != digest:
                                     raise ReleaseRecoveryError("changed")

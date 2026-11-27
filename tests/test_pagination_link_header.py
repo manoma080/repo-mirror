@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from repo_mirror.github_api import API, SourceAPI
+from repo_mirror.logging_utils import error_detail
 
 
 class _FakeResponse:
@@ -299,6 +300,188 @@ class LinkHeaderPaginationTests(unittest.TestCase):
                     items = api.pages(base_url)
                 self.assertEqual(items, [{"id": 1}, {"id": 2}])
                 self.assertEqual(len(recorded), 2)
+
+    def test_allows_github_canonical_numeric_id_next_links(self):
+        cases = (
+            (
+                "repo_releases_api",
+                lambda: API("secret-dest-tok"),
+                "https://api.github.com/repos/alice/demo/releases",
+                [
+                    (
+                        [{"id": 1}],
+                        {
+                            "Link": (
+                                '<https://api.github.com/repositories/12345/releases?per_page=100&limit=100&page=2>; rel="next", '
+                                '<https://api.github.com/repositories/12345/releases?per_page=100&limit=100&page=3>; rel="last"'
+                            )
+                        },
+                    ),
+                    (
+                        [{"id": 2}],
+                        {
+                            "Link": '<https://api.github.com/repositories/12345/releases?per_page=100&limit=100&page=3>; rel="next"'
+                        },
+                    ),
+                    ([{"id": 3}], {"Link": '<https://api.github.com/repositories/12345/releases?page=2>; rel="prev"'}),
+                ],
+                3,
+            ),
+            (
+                "repo_releases_source_api",
+                lambda: SourceAPI("secret-src-tok"),
+                "https://api.github.com/repos/alice/demo/releases",
+                [
+                    (
+                        [{"id": 1}],
+                        {
+                            "Link": '<https://api.github.com/repositories/12345/releases?per_page=100&limit=100&page=2>; rel="next"'
+                        },
+                    ),
+                    ([{"id": 2}], {"Link": '<https://api.github.com/repositories/12345/releases?page=1>; rel="prev"'}),
+                ],
+                2,
+            ),
+            (
+                "release_assets",
+                lambda: API("secret-dest-tok"),
+                "https://api.github.com/repos/alice/demo/releases/7/assets",
+                [
+                    (
+                        [{"id": 1}],
+                        {
+                            "Link": '<https://api.github.com/repositories/12345/releases/7/assets?per_page=100&limit=100&page=2>; rel="next"'
+                        },
+                    ),
+                    ([{"id": 2}], {}),
+                ],
+                2,
+            ),
+            (
+                "org_repos",
+                lambda: SourceAPI("secret-src-tok"),
+                "https://api.github.com/orgs/acme/repos",
+                [
+                    (
+                        [{"id": 1}],
+                        {
+                            "Link": '<https://api.github.com/organizations/99/repos?per_page=100&limit=100&page=2>; rel="next"'
+                        },
+                    ),
+                    ([{"id": 2}], {}),
+                ],
+                2,
+            ),
+            (
+                "user_repos",
+                lambda: SourceAPI("secret-src-tok"),
+                "https://api.github.com/users/alice/repos",
+                [
+                    (
+                        [{"id": 1}],
+                        {"Link": '<https://api.github.com/user/42/repos?per_page=100&limit=100&page=2>; rel="next"'},
+                    ),
+                    ([{"id": 2}], {}),
+                ],
+                2,
+            ),
+        )
+        for label, api_factory, base_url, fixture, expected_count in cases:
+            with self.subTest(label=label):
+                recorded = []
+                api = api_factory()
+                with patch.object(api.opener, "open", side_effect=_make_opener(fixture, recorded)):
+                    items = api.pages(base_url)
+                self.assertEqual(items, [{"id": i} for i in range(1, expected_count + 1)])
+                self.assertEqual(len(recorded), expected_count)
+
+    def test_rejects_unpinned_or_mismatched_canonical_pagination_links(self):
+        cases = (
+            (
+                "switched_numeric_id_on_page_2",
+                lambda: API("secret-dest-tok"),
+                "https://api.github.com/repos/alice/demo/releases",
+                [
+                    (
+                        [{"id": 1}],
+                        {"Link": '<https://api.github.com/repositories/12345/releases?page=2>; rel="next"'},
+                    ),
+                    (
+                        [{"id": 2}],
+                        {"Link": '<https://api.github.com/repositories/67890/releases?page=3>; rel="next"'},
+                    ),
+                ],
+                2,
+            ),
+            (
+                "subpath_mismatch",
+                lambda: API("secret-dest-tok"),
+                "https://api.github.com/repos/alice/demo/releases",
+                [
+                    (
+                        [{"id": 1}],
+                        {"Link": '<https://api.github.com/repositories/12345/issues?page=2>; rel="next"'},
+                    ),
+                ],
+                1,
+            ),
+            (
+                "non_github_origin",
+                lambda: SourceAPI(None),
+                "https://forge.example/api/v1/repos/alice/demo/releases",
+                [
+                    (
+                        [{"id": 1}],
+                        {"Link": '<https://forge.example/repositories/12345/releases?page=2>; rel="next"'},
+                    ),
+                ],
+                1,
+            ),
+            (
+                "zero_numeric_id",
+                lambda: API("secret-dest-tok"),
+                "https://api.github.com/repos/alice/demo/releases",
+                [
+                    (
+                        [{"id": 1}],
+                        {"Link": '<https://api.github.com/repositories/0/releases?page=2>; rel="next"'},
+                    ),
+                ],
+                1,
+            ),
+            (
+                "non_numeric_id",
+                lambda: API("secret-dest-tok"),
+                "https://api.github.com/repos/alice/demo/releases",
+                [
+                    (
+                        [{"id": 1}],
+                        {"Link": '<https://api.github.com/repositories/abc/releases?page=2>; rel="next"'},
+                    ),
+                ],
+                1,
+            ),
+        )
+        for label, api_factory, base_url, fixture, expected_requests in cases:
+            with self.subTest(label=label):
+                recorded = []
+                api = api_factory()
+                with (
+                    patch.object(api.opener, "open", side_effect=_make_opener(fixture, recorded)),
+                    self.assertRaisesRegex(ValueError, "pagination link outside configured origin"),
+                ):
+                    api.pages(base_url)
+                self.assertEqual(len(recorded), expected_requests)
+
+    def test_pagination_errors_are_not_stripped_to_bare_class_names(self):
+        self.assertEqual(
+            error_detail(ValueError("pagination link outside configured origin")),
+            "pagination link outside configured origin",
+        )
+        self.assertEqual(
+            error_detail(RuntimeError("pagination cycle detected")),
+            "pagination cycle detected",
+        )
 
 
 if __name__ == "__main__":
