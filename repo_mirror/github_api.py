@@ -684,6 +684,8 @@ def _validate_pagination_link(base_url, resolved_url):
 class API:
     """Small HTTP client for one GitHub or Forgejo API (JSON requests, retries, safe logging)."""
 
+    supports_digest_skip = True
+
     def __init__(self, token=None):
         self._token = token
         self.role = "destination" if token else "source"
@@ -982,6 +984,8 @@ _asset_download_once = API._download_once
 
 class SourceAPI(API):
     """HTTP client for a source forge (GitHub or Forgejo), with read-only requests."""
+
+    supports_digest_skip = False
 
     def __init__(self, token):
         super().__init__()

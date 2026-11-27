@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mirror_test_support import patch_everywhere
+from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from test_reconcile_assets import SOURCE, Destination, Source
 
 import mirror
@@ -112,10 +113,29 @@ class PublishedDigestTests(unittest.TestCase):
         self.assertEqual(dst.assets["changed"], b"old")
 
     def test_matching_published_digests_skip_downloads(self):
-        src = DigestSource(digest(b"new"))
-        dst = DigestDestination(digest(b"new"))
+        class Listing(DigestSource):
+            def pages(self, url):
+                result = super().pages(url)
+                if not url.endswith("/releases"):
+                    result[0].update(id=4, browser_download_url="https://github.com/alice/demo/releases/download/v1/changed")
+                return result
+
+        class RecordingClient:
+            def __init__(self):
+                self.downloads = []
+
+            def _download_once(self, asset, out, **kwargs):
+                self.downloads.append(asset["name"])
+                out.write(b"new")
+
+        class SkippableDigestDestination(DigestDestination):
+            supports_digest_skip = True
+
+        client = RecordingClient()
+        src = ForgejoSourceAdapter("alice/demo", "token", api=Listing(digest(b"new")), client=client)
+        dst = SkippableDigestDestination(digest(b"new"))
         self.run_mirror(src, dst)
-        self.assertEqual(src.downloads, [])
+        self.assertEqual(client.downloads, [])
         self.assertEqual(dst.downloads, [])
         self.assertEqual(dst.deleted, [])
 
@@ -176,7 +196,27 @@ class PublishedDigestTests(unittest.TestCase):
                 self.assertIn("[repo-mirror:pending:v3]", dst.release["body"])
 
     def test_journal_recovery_clears_after_fast_path_finalization(self):
-        src, dst = DigestSource(digest(b"new")), DigestDestination(digest(b"new"))
+        class Listing(DigestSource):
+            def pages(self, url):
+                result = super().pages(url)
+                if not url.endswith("/releases"):
+                    result[0].update(id=4, browser_download_url="https://github.com/alice/demo/releases/download/v1/changed")
+                return result
+
+        class RecordingClient:
+            def __init__(self):
+                self.downloads = []
+
+            def _download_once(self, asset, out, **kwargs):
+                self.downloads.append(asset["name"])
+                out.write(b"new")
+
+        class SkippableDigestDestination(DigestDestination):
+            supports_digest_skip = True
+
+        client = RecordingClient()
+        src = ForgejoSourceAdapter("alice/demo", "token", api=Listing(digest(b"new")), client=client)
+        dst = SkippableDigestDestination(digest(b"new"))
         with tempfile.TemporaryDirectory() as directory:
             journal = mirror.FailureJournal(Path(directory) / "journal.json")
             key = journal.key(SOURCE, "demo", "dest", "v1", "changed")
@@ -185,7 +225,7 @@ class PublishedDigestTests(unittest.TestCase):
                 mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token", journal=journal)
             self.assertNotIn(key, mirror.FailureJournal(journal.path).failures)
             self.assertEqual(dst.deleted, [])
-            self.assertEqual(src.downloads, [])
+            self.assertEqual(client.downloads, [])
 
     def test_initial_pending_recovery_rejects_digest_only_mutation(self):
         src, dst = DigestSource(digest(b"new")), DigestDestination(None, b"new")
