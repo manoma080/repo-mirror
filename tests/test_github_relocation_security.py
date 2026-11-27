@@ -22,7 +22,7 @@ def setup_mirror():
 class RelocationSecurityTests(unittest.TestCase):
     def test_identity_changes_are_blocked_at_each_write_boundary(self):
         for side in ('source', 'destination'):
-            for change_on in (2, 3):
+            for change_on in (2, 3, 4):
                 with self.subTest(side=side, change_on=change_on):
                     source, src, dst, _ = setup_mirror()
                     source_metadata, destination_metadata = src.request.return_value, dst.request.return_value
@@ -40,8 +40,10 @@ class RelocationSecurityTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, 'repository id mismatch'):
                             mirror_repository(source, 'repo', 'dest', src, dst, 'token')
                     releases.assert_not_called()
-                    if change_on == 2:
+                    if change_on <= 3:
                         git.assert_not_called()
+                    if change_on == 2:
+                        self.assertTrue(all(c.args[0] == 'GET' for c in dst.request.call_args_list))
 
     def test_legacy_repository_retains_historical_provenance(self):
         source, src, dst, old_marker = setup_mirror()

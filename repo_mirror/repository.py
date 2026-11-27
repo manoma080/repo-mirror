@@ -432,6 +432,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 raise ValueError("destination repository id mismatch or missing")
             check_existing(current, marker)
 
+    recheck_pins()
     if repo is None:
         payload = {
             "name": dest_name,
@@ -917,9 +918,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         releases = src.list_releases() if tag_identity else src.pages(upstream + "/releases")
     observe("last_release", latest_release_time(releases))
     if validate_snapshot is not None:
-        latest = None if not releases else (
-            select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
-        )
+        latest = select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
         validate_snapshot(releases, latest)
     invalid_releases = [
         r

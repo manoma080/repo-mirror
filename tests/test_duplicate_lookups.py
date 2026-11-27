@@ -106,97 +106,35 @@ class DuplicateLookupTests(unittest.TestCase):
         self.assertEqual(repo_gets.count("https://api.github.com/repos/dest/existing-repo"), 1)
         self.assertEqual(repo_gets.count("https://api.github.com/repos/dest/new-repo"), 1)
 
-    def test_recheck_pins_brackets_git_push_not_actions_put(self):
-        source = {
-            "type": "github",
-            "base_url": "https://github.com",
-            "owner": "alice",
-            "name": "demo",
-            "mirror": {"name": "demo", "source_id": 101, "destination_id": 202},
-        }
-        marker = source_marker(source, "demo")
-        events = []
-
-        class FakeSrc:
-            def request(self, method, url, data=None, **kwargs):
-                events.append(("src", method, url))
-                return {
-                    "id": 101,
-                    "clone_url": "https://github.com/alice/demo.git",
-                    "default_branch": "main",
-                }
-
-        class FakeDst:
-            def request(self, method, url, data=None, **kwargs):
-                events.append(("dst", method, url))
-                if method == "GET" and url.endswith("/repos/dest/demo"):
-                    return {"id": 202, "description": marker, "default_branch": "main"}
-                return {}
-
-        def fake_mirror_git(*args, **kwargs):
-            events.append(("git", "PUSH", "mirror_git"))
-
-        with (
-            patch.object(repository, "mirror_git", side_effect=fake_mirror_git),
-            patch.object(repository, "mirror_releases"),
-        ):
-            repository.mirror_repository(source, "demo", "dest", FakeSrc(), FakeDst(), "test-token")
-
-        src_gets = [e for e in events if e[0] == "src" and e[1] == "GET"]
-        dst_gets = [e for e in events if e[0] == "dst" and e[1] == "GET"]
-        put_idx = events.index(("dst", "PUT", "https://api.github.com/repos/dest/demo/actions/permissions"))
-        git_idx = events.index(("git", "PUSH", "mirror_git"))
-
-        # Initial lookup (1 each) + pre-push recheck (1 each) + post-push recheck (1 each) = 3 each.
-        self.assertEqual(len(src_gets), 3)
-        self.assertEqual(len(dst_gets), 3)
-        # No extra recheck_pins() between initial lookup and PUT /actions/permissions.
-        before_put_gets = [e for e in events[:put_idx] if e[1] == "GET"]
-        self.assertEqual(len(before_put_gets), 2)
-        # Pre-push and post-push checks bracket mirror_git.
-        between_put_and_git = [e for e in events[put_idx + 1 : git_idx] if e[1] == "GET"]
-        after_git = [e for e in events[git_idx + 1 :] if e[1] == "GET"]
-        self.assertEqual(len(between_put_and_git), 2)
-        self.assertEqual(len(after_git), 2)
-
     def test_empty_release_discovery_skips_latest_lookup(self):
-        for with_validator in (False, True):
-            with self.subTest(with_validator=with_validator):
-                latest_calls = []
+        latest_calls = []
 
-                class EmptySource:
-                    def pages(self, url):
-                        return []
+        class EmptySource:
+            def pages(self, url):
+                return []
 
-                    def request(self, method, url, data=None, *, _calls=latest_calls, **kwargs):
-                        if url.endswith("/releases/latest"):
-                            _calls.append(url)
-                        raise AssertionError(f"unexpected request: {method} {url}")
+            def request(self, method, url, data=None, *, _calls=latest_calls, **kwargs):
+                if url.endswith("/releases/latest"):
+                    _calls.append(url)
+                raise AssertionError(f"unexpected request: {method} {url}")
 
-                class NoWriteDst:
-                    def request(self, *args, **kwargs):
-                        raise AssertionError("unexpected destination request")
+        class NoWriteDst:
+            def request(self, *args, **kwargs):
+                raise AssertionError("unexpected destination request")
 
-                validator_calls = []
-
-                def validate(releases, latest, *, _calls=validator_calls):
-                    _calls.append((releases, latest))
-
-                repository.mirror_releases(
-                    {"type": "github", "owner": "alice"},
-                    "demo",
-                    "dest",
-                    EmptySource(),
-                    NoWriteDst(),
-                    "https://api.github.com/repos/alice/demo",
-                    "https://api.github.com/repos/dest/demo",
-                    "marker",
-                    initializing=False,
-                    validate_snapshot=validate if with_validator else None,
-                )
-                self.assertEqual(latest_calls, [])
-                if with_validator:
-                    self.assertEqual(validator_calls, [([], None)])
+        repository.mirror_releases(
+            {"type": "github", "owner": "alice"},
+            "demo",
+            "dest",
+            EmptySource(),
+            NoWriteDst(),
+            "https://api.github.com/repos/alice/demo",
+            "https://api.github.com/repos/dest/demo",
+            "marker",
+            initializing=False,
+            validate_snapshot=None,
+        )
+        self.assertEqual(latest_calls, [])
 
         # Non-empty discovery (even draft-only) must still query /releases/latest.
         non_empty_latest_calls = []
@@ -254,6 +192,48 @@ class DuplicateLookupTests(unittest.TestCase):
             initializing=False,
         )
         self.assertEqual(len(non_empty_latest_calls), 1)
+
+    def test_empty_release_discovery_with_validator_fetches_latest_and_fails_closed(self):
+        latest_calls = []
+
+        class InconsistentSource:
+            def pages(self, url):
+                return []
+
+            def request(self, method, url, data=None, **kwargs):
+                if url.endswith("/releases/latest"):
+                    latest_calls.append(url)
+                    return {
+                        "id": 1,
+                        "tag_name": "v1",
+                        "name": None,
+                        "body": None,
+                        "draft": False,
+                        "prerelease": False,
+                    }
+                raise AssertionError(f"unexpected request: {method} {url}")
+
+        class NoWriteDst:
+            def request(self, *args, **kwargs):
+                raise AssertionError("unexpected destination request")
+
+            def pages(self, *args, **kwargs):
+                raise AssertionError("unexpected destination pages")
+
+        with self.assertRaisesRegex(ValueError, "source latest release not eligible in listing"):
+            repository.mirror_releases(
+                {"type": "github", "owner": "alice"},
+                "demo",
+                "dest",
+                InconsistentSource(),
+                NoWriteDst(),
+                "https://api.github.com/repos/alice/demo",
+                "https://api.github.com/repos/dest/demo",
+                "marker",
+                initializing=False,
+                validate_snapshot=lambda releases, latest: repository.validate_source_latest(latest, releases),
+            )
+        self.assertEqual(latest_calls, ["https://api.github.com/repos/alice/demo/releases/latest"])
 
     def test_per_release_tag_lookup_reuses_destination_release_listing(self):
         releases = [
@@ -602,10 +582,10 @@ class DuplicateLookupTests(unittest.TestCase):
         total = sum(counts.values())
         # Baseline on 3f0086f is 77 total requests:
         # - Site 1 removes 2 dst_requests (1 per repo)
-        # - Site 2 removes 4 requests (2 src_requests + 2 dst_requests, 1 pair per repo)
+        # - Site 2 is dropped (pre-PUT /actions/permissions recheck_pins() restored)
         # - Site 3 removes 1 src_request (/no-releases/releases/latest)
         # - Site 4 removes 2 dst_requests (/releases/tags/v2 and /releases/tags/v1)
         #   plus 4 pin-check requests (2 src_requests + 2 dst_requests) from the
         #   two eliminated _concluding_read tag lookups (already checked at listing).
-        # Reduced total: 77 - 13 = 64 requests.
-        self.assertEqual(total, 64, f"unexpected total={total} counts={counts}")
+        # Reduced total: 77 - 9 = 68 requests.
+        self.assertEqual(total, 68, f"unexpected total={total} counts={counts}")
