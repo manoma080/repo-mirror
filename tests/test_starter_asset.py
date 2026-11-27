@@ -97,6 +97,7 @@ class StarterAssetTests(unittest.TestCase):
         stderr = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:
             json.dump({
+                "graphql": False,
                 "destinations": {"main": {"account_type": "personal"}},
                 "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
             }, f)
@@ -120,6 +121,7 @@ class StarterAssetTests(unittest.TestCase):
         stderr = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w") as f:
             json.dump({
+                "graphql": False,
                 "destinations": {"main": {"account_type": "personal"}},
                 "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
             }, f)

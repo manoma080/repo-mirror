@@ -9,6 +9,7 @@ class WorkflowInputTests(unittest.TestCase):
         from unittest.mock import patch
         from repo_mirror import cli
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": "https://github.com/Alice/One"}, "mirrors": {"main": {}}}],
         }
@@ -65,7 +66,8 @@ class WorkflowInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = os.path.join(temp, "config.json")
             original = {
-                "destinations": {"main": {"account_type": "personal"}},
+                "graphql": False,
+            "destinations": {"main": {"account_type": "personal"}},
                 "repositories": [{"source": {"url": "https://github.com/a/x"}, "mirrors": {"main": {}}}],
             }
             with open(path, "w") as f:
@@ -95,6 +97,7 @@ class WorkflowInputTests(unittest.TestCase):
 
     def test_remove_explicit_source(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [
                 {"source": {"url": "https://github.com/Alice/one"}, "mirrors": {"main": {}}},
@@ -106,6 +109,7 @@ class WorkflowInputTests(unittest.TestCase):
 
     def test_unspecified_visibility_preserves_existing_mapping(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": "https://github.com/a/x"}, "mirrors": {"main": {"name": "copy", "visibility": "public"}}}],
         }
@@ -120,6 +124,7 @@ class WorkflowInputTests(unittest.TestCase):
 
     def test_explicit_private_changes_existing_visibility(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": "https://github.com/a/x"}, "mirrors": {"main": {"visibility": "public"}}}],
         }
@@ -131,6 +136,7 @@ class WorkflowInputTests(unittest.TestCase):
         from unittest.mock import patch
         from repo_mirror import cli
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": "https://github.com/a/x"}, "mirrors": {"main": {"visibility": "public"}}}],
         }

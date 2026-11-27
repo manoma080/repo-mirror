@@ -20,6 +20,7 @@ from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
 from repo_mirror.github_api import _UPLOAD_ATTEMPT_CALLBACK, API as GitHubAPI, SourceAPI as GitHubSourceAPI
 from repo_mirror.github_api import not_found, same_file, transient_transfer_error, transfer_retry_delay
+from repo_mirror.graphql_api import GraphQLError
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
 from repo_mirror.sources import check_existing, destination_name, get_existing, source_api_base, source_marker, validate_source
@@ -360,7 +361,7 @@ def validate_source_clone_url(source, name, metadata):
 
 @timed_repository
 def mirror_repository(source, name, owner, src, dst, token, account_type="organization", journal=None,
-                      *, existing_repo=_UNSET):
+                      *, existing_repo=_UNSET, source_repo=_UNSET):
     """Mirror one source repository to its destination: branches, tags, releases and assets."""
     print(
         f"repository started source_repo={safe_label(source.get('owner'))}/{safe_label(name)} target=destination",
@@ -404,8 +405,12 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
         upstream = src.base
         project = src.project()
         metadata = {**project, "clone_url": project.get("http_url_to_repo")}
-    else:
+    elif source_repo is _UNSET:
         metadata = src.request("GET", upstream)
+    elif source_repo is None:
+        raise GraphQLError("GraphQL resource not found")
+    else:
+        metadata = source_repo
     if "source_id" in settings and (type(metadata.get("id")) is not int or metadata["id"] != settings["source_id"]):
         raise ValueError("source repository id mismatch")
     relocation = None

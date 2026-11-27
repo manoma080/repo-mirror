@@ -154,6 +154,7 @@ def _encode(doc):
 
 def _base_doc(auto_discoveries, repositories=None, account_type="personal"):
     return {
+        "graphql": False,
         "destinations": {"main": {"account_type": account_type}},
         "auto_discoveries": auto_discoveries,
         "repositories": list(repositories or []),

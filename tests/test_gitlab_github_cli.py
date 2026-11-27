@@ -13,6 +13,7 @@ class GitLabGitHubCliTests(unittest.TestCase):
         source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group/sub'}
         destination = {'id': 9, 'description': source_marker(source, 'project'), 'default_branch': 'main'}
         config_doc = {
+            'graphql': False,
             'destinations': {'main': {'account_type': 'personal'}},
             'repositories': [{'source': {'type': 'gitlab', 'url': 'https://gitlab.com/group/sub/project', 'id': 42},
                               'mirrors': {'main': {'id': 9}}}],
@@ -44,6 +45,7 @@ class GitLabGitHubCliTests(unittest.TestCase):
         from urllib.request import OpenerDirector
 
         doc = {
+            'graphql': False,
             'destinations': {'main': {'account_type': 'personal'}},
             'repositories': [],
             'auto_discoveries': [{'type': 'gitlab', 'url': 'https://gitlab.com/group', 'id': 7}],
@@ -85,6 +87,7 @@ class GitLabGitHubCliTests(unittest.TestCase):
         from urllib.response import addinfourl
 
         doc = {
+            'graphql': False,
             'destinations': {'main': {'account_type': 'personal'}},
             'repositories': [],
             'auto_discoveries': [{'type': 'gitlab', 'url': 'https://gitlab.com/group', 'id': 7}],
@@ -122,6 +125,7 @@ class GitLabGitHubCliTests(unittest.TestCase):
     def test_destination_pin_mismatch_stops_before_git_or_writes(self):
         source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group'}
         config_doc = {
+            'graphql': False,
             'destinations': {'main': {'account_type': 'personal'}},
             'repositories': [{'source': {'type': 'gitlab', 'url': 'https://gitlab.com/group/project', 'id': 42},
                               'mirrors': {'main': {'id': 9}}}],
@@ -149,6 +153,7 @@ class GitLabGitHubCliTests(unittest.TestCase):
     def test_source_pin_mismatch_stops_before_destination_writes(self):
         source = {'type': 'gitlab', 'base_url': 'https://gitlab.com', 'owner': 'group'}
         config_doc = {
+            'graphql': False,
             'destinations': {'main': {'account_type': 'personal'}},
             'repositories': [{'source': {'type': 'gitlab', 'url': 'https://gitlab.com/group/project', 'id': 42},
                               'mirrors': {'main': {'id': 9}}}],

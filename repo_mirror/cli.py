@@ -12,7 +12,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.parse import quote
 
 from repo_mirror.adhoc import classify_source_url, one_time_sources, _matches_owner
-from repo_mirror.config_named import normalize_config
+from repo_mirror.config_named import GRAPHQL_CONFIG_KEY, normalize_config
 from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
 from repo_mirror.github_api import (
     API,
@@ -20,6 +20,7 @@ from repo_mirror.github_api import (
     SourceAPI,
     emit_api_call_summary,
 )
+from repo_mirror.graphql_api import GraphQLClient
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_main
@@ -29,6 +30,7 @@ from repo_mirror.sources import (
     check_existing,
     destination_name,
     get_existing,
+    source_api_base,
     source_marker,
     validate_source,
 )
@@ -277,6 +279,25 @@ def main(argv=None):
     # Include one-time sources before workers start; no concurrent cache writes.
     for _, source, _ in plan:
         source_client(source)
+    batched_destinations = None
+    batched_sources = None
+    use_graphql = config.get(GRAPHQL_CONFIG_KEY, True)
+    if use_graphql and plan:
+        dest_repos = [(owner, destination_name(source, name)) for _, source, name in plan]
+        batched_destinations = GraphQLClient(dst).fetch_repositories_metadata(
+            dest_repos,
+            allow_not_found=True,
+        )
+        github_source_repos = [
+            (source["owner"], name)
+            for _, source, name in plan
+            if source["type"] == "github" and source_api_base(source) == GITHUB
+        ]
+        if github_source_repos:
+            batched_sources = GraphQLClient(github_src).fetch_repositories_metadata(
+                github_source_repos,
+                allow_not_found=True,
+            )
     failures = []
     inactive = []
     ready = []
@@ -294,7 +315,10 @@ def main(argv=None):
                     verify(github_claim(source, name, owner), legacy.get("signature"), os.environ.get("MIRROR_TIMESTAMP_SECRET", ""))
                 marker = (source_marker({**source, "owner": legacy["source_owner"]}, legacy["source_name"])
                           if legacy is not None else source_marker(source, name))
-                existing = get_existing(dst, target)
+                if batched_destinations is not None:
+                    existing = batched_destinations[(owner.lower(), dest.lower())]
+                else:
+                    existing = get_existing(dst, target)
                 check_existing(existing, marker)
                 if source['type'] == 'gitlab' and not {'source_id', 'destination_id'} <= settings.keys():
                     raise ValueError('explicit GitLab source requires both durable identity pins')
@@ -330,6 +354,12 @@ def main(argv=None):
                 # The worker thread owns this collector; nothing crosses threads.
                 with observing() as activity:
                     kwargs = {"existing_repo": existing}
+                    if (
+                        batched_sources is not None
+                        and source["type"] == "github"
+                        and source_api_base(source) == GITHUB
+                    ):
+                        kwargs["source_repo"] = batched_sources[(source["owner"].lower(), name.lower())]
                     if journal is not None:
                         kwargs["journal"] = journal
                     relocation = mirror_repository(source, name, owner, src, dst, token, account_type, **kwargs)

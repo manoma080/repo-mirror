@@ -23,6 +23,7 @@ class LogSecretsTests(unittest.TestCase):
     def test_untrusted_identifiers_are_not_logged(self):
         secret = "ghp_" + "A" * 36
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": f"https://github.com/{secret}/{secret}"}, "mirrors": {"main": {}}}],
         }

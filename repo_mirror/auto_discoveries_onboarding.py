@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from repo_mirror.adhoc import parse_owner_url, parse_repo_url
 from repo_mirror.config_json import unique_pairs
-from repo_mirror.config_named import _normalize_auto_discoveries, normalize_config
+from repo_mirror.config_named import GRAPHQL_CONFIG_KEY, _normalize_auto_discoveries, normalize_config
 from repo_mirror.constants import GITHUB, NAME
 from repo_mirror.forgejo_git import APIError, ForgejoDestination, LocalForgejoAPI, _name, _source_marker
 from repo_mirror.forgejo_sync import parse_manifest, parse_source
@@ -883,7 +883,7 @@ def _validate_document(doc, runner):
         raise ValueError('invalid onboarding runner')
     if not isinstance(doc, dict):
         raise ValueError('invalid named manifest')
-    if 'groups' in doc and set(doc) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'}:
+    if 'groups' in doc and set(doc) - {CONFIG_KEY, 'auto_discoveries', GRAPHQL_CONFIG_KEY} != {'destinations', 'repositories', 'groups'}:
         raise ValueError('invalid group manifest')
     parse_manifest(doc)
     return {k: v for k, v in doc.items() if k != 'groups'} if 'groups' in doc else doc

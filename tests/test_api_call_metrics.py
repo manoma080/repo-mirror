@@ -297,6 +297,7 @@ class APICallMetricsTests(unittest.TestCase):
         dst = Destination()
         dst.fail = False
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}
@@ -620,6 +621,7 @@ class APICallMetricsTests(unittest.TestCase):
     def test_cli_emits_api_calls_once_on_early_failure(self):
         output = io.StringIO()
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}
@@ -667,6 +669,7 @@ class APICallMetricsTests(unittest.TestCase):
         dst = Destination()
         dst.fail = False
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}
@@ -713,6 +716,7 @@ class APICallMetricsTests(unittest.TestCase):
         dst = Destination()
         dst.fail = False
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}

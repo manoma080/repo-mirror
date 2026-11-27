@@ -35,6 +35,7 @@ class DuplicateLookupTests(unittest.TestCase):
         }
         existing_marker = source_marker(existing_source, "existing-repo")
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {
@@ -406,6 +407,7 @@ class DuplicateLookupTests(unittest.TestCase):
         ]
 
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {

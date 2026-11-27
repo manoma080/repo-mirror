@@ -24,6 +24,7 @@ class ObservabilityTests(unittest.TestCase):
         dst = Destination()
         dst.fail = False
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
         }

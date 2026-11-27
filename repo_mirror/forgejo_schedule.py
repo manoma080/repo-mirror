@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from repo_mirror import forgejo_migration
 from repo_mirror.config_json import LEGACY_CONFIG_ERROR, is_legacy_config, unique_pairs
+from repo_mirror.config_named import GRAPHQL_CONFIG_KEY
 from repo_mirror.forgejo_progress import ProgressReader
 from repo_mirror.forgejo_sync import (HELPER_PATH_REQUIRED, INACTIVE_FIELDS, INACTIVE_PREFIX,
                                       INSTALLATION_ID_REQUIRED, RELOCATION_FIELDS, RELOCATION_PREFIX,
@@ -229,7 +230,7 @@ def main(argv=None):
         if groups is not None:
             from repo_mirror.gitlab_onboarding_forgejo import translate_groups, validate_groups
             validate_groups(groups)
-            if set(sources) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories', 'groups'} or not has_authority or args.asset_max_bytes is None:
+            if set(sources) - {CONFIG_KEY, 'auto_discoveries', GRAPHQL_CONFIG_KEY} != {'destinations', 'repositories', 'groups'} or not has_authority or args.asset_max_bytes is None:
                 raise ValueError('group onboarding requires authoritative config and asset limit')
             validate_sources(sources)
             worker_manifest = {k: v for k, v in sources.items() if k != 'groups'}

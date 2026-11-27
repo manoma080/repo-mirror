@@ -148,6 +148,7 @@ class ReleaseTests(unittest.TestCase):
         from contextlib import redirect_stderr
 
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [
                 {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},

@@ -32,6 +32,7 @@ class FailureJournalTest(unittest.TestCase):
             config = Path(directory) / "config.json"
             path = Path(directory) / "failures.json"
             config.write_text(json.dumps({
+                "graphql": False,
                 "destinations": {"main": {"account_type": "personal"}},
                 "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
             }))

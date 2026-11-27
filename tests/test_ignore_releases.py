@@ -97,6 +97,7 @@ class CliOverrideTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             config = Path(directory) / 'config.json'
             config.write_text(json.dumps({
+                'graphql': False,
                 'destinations': {'main': {'account_type': 'personal'}},
                 'repositories': [{'source': {'url': 'https://github.com/alice/demo', 'id': 11},
                                   'mirrors': {'main': {'id': 22}}}],

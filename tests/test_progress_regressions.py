@@ -32,6 +32,7 @@ class ProgressRegressionTests(unittest.TestCase):
 
     def test_source_and_repo_ordinals_appear_in_progress(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
         }
@@ -113,6 +114,7 @@ class ProgressRegressionTests(unittest.TestCase):
 
     def test_preflight_failure_identifies_repository_ordinal(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
         }

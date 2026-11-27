@@ -139,13 +139,15 @@ def parse_source(value, source_type=None):
 
 def normalize_named(sources):
     from repo_mirror.adhoc import parse_repo_url
-    from repo_mirror.config_named import _GENERATED, _normalize_auto_discoveries
+    from repo_mirror.config_named import GRAPHQL_CONFIG_KEY, _GENERATED, _normalize_auto_discoveries
     from repo_mirror.constants import NAME
     from repo_mirror.gitlab_onboarding_forgejo import PREFIX_WITH_GENERATED_MESSAGE, group_origin_key, translate_groups
     from repo_mirror.host_limits import CONFIG_KEY
     reject_legacy_config(sources)
-    if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY, 'auto_discoveries', 'groups'} != {'destinations', 'repositories'}:
+    if not isinstance(sources, dict) or set(sources) - {CONFIG_KEY, 'auto_discoveries', 'groups', GRAPHQL_CONFIG_KEY} != {'destinations', 'repositories'}:
         raise ValueError('invalid named manifest')
+    if GRAPHQL_CONFIG_KEY in sources and type(sources[GRAPHQL_CONFIG_KEY]) is not bool:
+        raise ValueError('graphql must be a boolean')
     normalized_rules = _normalize_auto_discoveries(sources['auto_discoveries']) if 'auto_discoveries' in sources else []
     if 'groups' in sources:
         translate_groups(sources, normalized_auto_discoveries=normalized_rules)

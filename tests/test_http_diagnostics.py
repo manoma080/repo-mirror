@@ -20,6 +20,7 @@ class HTTPDiagnosticsTests(unittest.TestCase):
 
     def test_sync_http_error_reports_status_without_untrusted_url_or_reason(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [
                 {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}

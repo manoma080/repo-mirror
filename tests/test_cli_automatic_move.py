@@ -19,7 +19,7 @@ class AutomaticMoveTests(unittest.TestCase):
         env = {'MIRROR_TIMESTAMP_SECRET': 'fixture-signing-secret-0123456789abcdef', 'GH_TOKEN': 'token', 'DESTINATION_OWNER': 'dest'}
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'config.json'
-            original = {'destinations': {'main': {'account_type': 'personal'}},
+            original = {'graphql': False, 'destinations': {'main': {'account_type': 'personal'}},
                         'repositories': [{'source': {'url': 'https://github.com/old/repo', 'id': 1},
                                           'mirrors': {'main': {'name': 'copy', 'id': 2}}}]}
             config.write_text(json.dumps(original))
@@ -52,6 +52,7 @@ class AutomaticMoveTests(unittest.TestCase):
                       'legacy': {'source_owner': 'old', 'source_name': 'original', 'destination_name': 'old-copy'}}}
         signature = sign(github_claim(source, 'repo', 'dest'), secret)
         named_config = {
+            'graphql': False,
             'destinations': {'main': {'account_type': 'personal'}},
             'repositories': [{
                 'source': {'url': 'https://github.com/middle/repo', 'id': 1},
