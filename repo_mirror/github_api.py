@@ -675,7 +675,21 @@ _GITHUB_CANONICAL_PAGINATION_PATTERNS = (
 
 
 def _github_canonical_pagination_path_matches(base_path, resolved_path):
-    """Allow GitHub REST rel='next' canonical numeric-ID paths with an identical subpath."""
+    """Allow GitHub REST rel='next' canonical numeric-ID paths with an identical subpath.
+
+    GitHub rewrites a listing's next link from a human path to the repository's
+    canonical numeric-ID path (``/repos/o/r/releases`` -> ``/repositories/<id>/releases``),
+    which is why an exact-path rule broke pagination for repositories with more than
+    one page of releases.
+
+    Trust assumption, stated so it is not mistaken for validation: these headers are
+    only honoured for ``https_origin(GITHUB)``, i.e. api.github.com, and the numeric id
+    itself is **not** checked against the repository being mirrored. The pinned path
+    prevents an id switch between pages, but the first rewrite can name any canonical
+    id with a matching tail. That is acceptable only because the generator is GitHub
+    itself; do not reuse this helper for a provider whose headers a repository owner
+    can influence.
+    """
     for base_re, resolved_re in _GITHUB_CANONICAL_PAGINATION_PATTERNS:
         base_match = base_re.fullmatch(base_path)
         if base_match is not None:

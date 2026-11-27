@@ -1836,8 +1836,12 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 )
                 starter_assets = [asset for asset in assets if asset.get("state") == "starter"]
                 if starter_assets:
-                    # Only auto-heal provable zero-byte starter placeholders on
-                    # v3-authenticated releases that will be re-uploaded immediately.
+                    # Auto-heal only provable placeholders: zero-byte ``starter`` assets whose
+                    # name matches a source asset this release is about to re-upload, with a
+                    # usable upload_url, no pending marker, and no name collisions. Such an
+                    # asset is an empty leftover from an interrupted upload, so delete-then-
+                    # upload converges to the same end state as a fresh upload. Anything else
+                    # still refuses and asks for manual reconciliation.
                     can_heal_starters = (
                         not pending
                         and len(by_name) == len(assets)
