@@ -31,7 +31,32 @@ IDENTITY_SENTINEL = "[repo-mirror:draft-identity:v1]"
 
 
 class _IdentityGuardedDestination:
-    """Check repository pins before each destination operation."""
+    """Check repository pins before destination writes and concluding reads.
+
+    Guard scope: ``upload()`` and any ``request()`` whose method is not the
+    string ``GET`` (compared case-insensitively) -- ``POST``, ``PATCH``,
+    ``PUT``, ``DELETE``, ``HEAD``, or any unknown, missing or non-string
+    method -- run the pin check before delegating. Plain ``GET`` requests,
+    ``pages()`` and ``download()`` do not.
+    A read whose result concludes a transaction (journal clearing, marker or
+    draft-identity conclusions, ``latest`` selection) is instead verified
+    explicitly by the caller through ``verify_pins()`` after the read; see
+    ``_concluding_read()``.
+
+    Residual TOCTOU risk: checking only writes and concluding reads *widens*
+    the window between checks compared with checking every operation; it
+    narrows the guard's scope, not the window, and it does not close it.
+    Reads are not risk-free. Unguarded reads (destination ``GET``,
+    ``pages()`` and ``download()``, and source downloads) can ingest metadata
+    or bytes from a source or destination repository replaced mid-run; the
+    next guarded write or concluding read is where ``source_id`` and
+    ``destination_id`` are re-checked. A replacement that occurs before an
+    early read-path failure can therefore surface as a recovery or HTTP error
+    (for example ``ambiguous untagged destination draft`` or a
+    ``ReleaseAggregateError``) rather than as the precise pin-mismatch
+    message. A replacement after the last guarded operation of the phase is
+    not detected until the next run.
+    """
 
     def __init__(self, destination, check):
         self._destination = destination
@@ -40,25 +65,54 @@ class _IdentityGuardedDestination:
     def __getattr__(self, name):
         return getattr(self._destination, name)
 
-    def request(self, *args, **kwargs):
+    def verify_pins(self):
+        """Re-check pins explicitly, e.g. after a read that concludes state."""
         self._check()
+
+    def request(self, *args, **kwargs):
+        method = args[0] if args else kwargs.get("method")
+        if not (isinstance(method, str) and method.upper() == "GET"):
+            self._check()
         return self._destination.request(*args, **kwargs)
 
     def pages(self, url):
-        # Route the standard GitHub paginator through the guarded request so
-        # each page is checked, rather than only the first page.
-        if getattr(type(self._destination), "pages", None) is GitHubAPI.pages:
-            return GitHubAPI.pages(self, url)
-        self._check()
         return self._destination.pages(url)
 
     def download(self, *args, **kwargs):
-        self._check()
         return self._destination.download(*args, **kwargs)
 
     def upload(self, *args, **kwargs):
         self._check()
         return self._destination.upload(*args, **kwargs)
+
+
+def _verify_transition_pins(dst):
+    """Run the pin check of a guarded destination; other destinations self-guard."""
+    # Look the method up on the class so pass-through wrappers and mocks
+    # never fabricate one.
+    verify = getattr(type(dst), "verify_pins", None)
+    if verify is not None:
+        verify(dst)
+
+
+def _concluding_read(dst, read):
+    """Perform a read whose result concludes state, then verify the pins.
+
+    The check runs after the read completes (also when the read fails), so the
+    result is only acted upon once both repository pins are confirmed.
+    """
+    try:
+        result = read()
+    except Exception as exc:
+        try:
+            _verify_transition_pins(dst)
+        except Exception:
+            if isinstance(exc, HTTPError):
+                exc.close()
+            raise
+        raise
+    _verify_transition_pins(dst)
+    return result
 
 
 def draft_identity_signature(secret, source, tag, target, release_id):
@@ -889,7 +943,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
     def get_destination_releases():
         nonlocal destination_releases
         if destination_releases is None:
-            destination_releases = list(dst.pages(target + "/releases"))
+            # Concluding read: this snapshot decides which releases are skipped
+            # as complete and which untagged drafts are bound to a source tag.
+            destination_releases = _concluding_read(dst, lambda: list(dst.pages(target + "/releases")))
             # Signatures do not expose the tag: test each complete source tag
             # against each untagged destination draft exactly once per snapshot.
             for item in destination_releases:
@@ -1055,13 +1111,18 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             if empty_forgejo_target and verify_forgejo_empty_target_tag(
                                     src, dst, upstream, target, tag) != original_tag_object:
                                 raise ValueError("source tag changed during sync")
+                            # The read-only proof concludes this release without a write.
+                            _verify_transition_pins(dst)
                             if latest and tag == latest["tag_name"]:
                                 latest_id = converged
                                 latest_read_only = True
                             continue
                     validate_release_source(release)
                 try:
-                    existing = dst.request("GET", target + "/releases/tags/" + quote(tag, safe=""))
+                    # Concluding read: the result drives marker verification and
+                    # draft-identity conclusions for this release.
+                    existing = _concluding_read(
+                        dst, lambda: dst.request("GET", target + "/releases/tags/" + quote(tag, safe="")))
                 except HTTPError as e:
                     if not not_found(e):
                         raise
@@ -2231,7 +2292,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 # the failure journal; drafts retain a signed identity marker.
                 if tag_identity or (not getattr(dst, "supports_target_commitish", False)
                         and source_body is None and release.get("draft") is not True):
-                    verified_release = dst.request("GET", target + "/releases/" + str(existing["id"]))
+                    # Concluding read: it authorises completion and journal clearing.
+                    verified_release = _concluding_read(
+                        dst, lambda: dst.request("GET", target + "/releases/" + str(existing["id"])))
                     if (not isinstance(verified_release, dict)
                             or type(verified_release.get("id")) is not int
                             or verified_release["id"] != existing["id"]
@@ -2268,6 +2331,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 matches = isinstance(current, dict) and type(current.get("id")) is int and current["id"] == latest_id
             except Exception:
                 matches = False
+            # Concluding read: it selects ``latest`` without a write. Verify
+            # outside the try so a pin mismatch is not reported as a lookup miss.
+            _verify_transition_pins(dst)
             if not matches:
                 raise RuntimeError("destination latest release cannot be selected")
         else:
