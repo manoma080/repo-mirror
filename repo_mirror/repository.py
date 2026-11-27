@@ -28,6 +28,7 @@ from repo_mirror.staleness import observe
 # SHA256SUM, SHA256SUMS, SHA256SUM.txt, SHA256SUMS.txt.
 CHECKSUM_FILE_NAME = re.compile(r"SHA256SUMS?(?:\.txt)?", re.I)
 IDENTITY_SENTINEL = "[repo-mirror:draft-identity:v1]"
+_UNSET = object()
 
 
 class _IdentityGuardedDestination:
@@ -326,7 +327,8 @@ def validate_source_clone_url(source, name, metadata):
 
 
 @timed_repository
-def mirror_repository(source, name, owner, src, dst, token, account_type="organization", journal=None):
+def mirror_repository(source, name, owner, src, dst, token, account_type="organization", journal=None,
+                      *, existing_repo=_UNSET):
     """Mirror one source repository to its destination: branches, tags, releases and assets."""
     print(
         f"repository started source_repo={safe_label(source.get('owner'))}/{safe_label(name)} target=destination",
@@ -352,7 +354,7 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
             raise ValueError("invalid repository id pin")
     qowner, qname = quote(owner, safe=""), quote(dest_name, safe="")
     target = f"{GITHUB}/repos/{qowner}/{qname}"
-    repo = get_existing(dst, target)
+    repo = get_existing(dst, target) if existing_repo is _UNSET else existing_repo
     check_existing(repo, marker)
     initializing = repo is None or repo.get("description") == marker + " [repo-mirror:initializing:v1]"
     srcbase = source_api_base(source)
@@ -430,7 +432,6 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
                 raise ValueError("destination repository id mismatch or missing")
             check_existing(current, marker)
 
-    recheck_pins()
     if repo is None:
         payload = {
             "name": dest_name,
@@ -916,7 +917,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
         releases = src.list_releases() if tag_identity else src.pages(upstream + "/releases")
     observe("last_release", latest_release_time(releases))
     if validate_snapshot is not None:
-        latest = select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
+        latest = None if not releases else (
+            select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
+        )
         validate_snapshot(releases, latest)
     invalid_releases = [
         r
@@ -931,7 +934,9 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
             if valid_source_release_tag(r)
         ]
     if validate_snapshot is None:
-        latest = select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
+        latest = None if not releases else (
+            select_tag_source_latest(releases) if tag_identity else fetch_source_latest(src, upstream)
+        )
 
     destination_releases = None
     known_draft_tags = {}
@@ -1118,20 +1123,31 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                 latest_read_only = True
                             continue
                     validate_release_source(release)
-                try:
-                    # Concluding read: the result drives marker verification and
-                    # draft-identity conclusions for this release.
-                    existing = _concluding_read(
-                        dst, lambda: dst.request("GET", target + "/releases/tags/" + quote(tag, safe="")))
-                except HTTPError as e:
-                    if not not_found(e):
-                        raise
-                    e.close()
-                    # The tag endpoint can omit drafts, which still need to be found.
-                    matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker, recovery_target=recovery_target)
+                if destination_releases is not None:
+                    matches = find_tag_releases(
+                        dst, target, tag, release.get("name"),
+                        releases=candidates_for_tag(tag),
+                        marker=marker,
+                        recovery_target=recovery_target,
+                    )
                     if len(matches) > 1:
                         raise RuntimeError("multiple destination releases for tag")
                     existing = matches[0] if matches else None
+                else:
+                    try:
+                        # Concluding read: the result drives marker verification and
+                        # draft-identity conclusions for this release.
+                        existing = _concluding_read(
+                            dst, lambda: dst.request("GET", target + "/releases/tags/" + quote(tag, safe="")))
+                    except HTTPError as e:
+                        if not not_found(e):
+                            raise
+                        e.close()
+                        # The tag endpoint can omit drafts, which still need to be found.
+                        matches = find_tag_releases(dst, target, tag, release.get("name"), releases=candidates_for_tag(tag), marker=marker, recovery_target=recovery_target)
+                        if len(matches) > 1:
+                            raise RuntimeError("multiple destination releases for tag")
+                        existing = matches[0] if matches else None
                 if existing and release.get("draft") is True:
                     # An update can turn an exact-tag release into an untagged
                     # draft; do not trust the discovery snapshot afterwards.

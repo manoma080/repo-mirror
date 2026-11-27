@@ -186,9 +186,10 @@ class SourcePreflightTests(unittest.TestCase):
 
         release = {'id': 1, 'tag_name': 'v1', 'name': None, 'body': None,
                    'draft': False, 'prerelease': False}
+        changed = dict(release, id=2, tag_name='v2')
         args = SimpleNamespace(port=3300, owner='local')
         dest = SimpleNamespace(begin_initialization=lambda *a: False, run_pin=None)
-        src = SimpleNamespace(pages=Mock(side_effect=[[release], []]), request=Mock(return_value=release))
+        src = SimpleNamespace(pages=Mock(side_effect=[[release], [changed]]), request=Mock(return_value=release))
         adapter = Mock(target='target')
         with tempfile.TemporaryDirectory() as tmp:
             journal_id = hashlib.sha256(b'3300:local:mirror-owner/mirror-test').hexdigest()

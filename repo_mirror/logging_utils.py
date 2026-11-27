@@ -97,12 +97,12 @@ def timed_repository(fn):
     """Decorator that times one repository mirror and records its log context."""
 
     @wraps(fn)
-    def wrapped(source, name, owner, src, dst, token, account_type="organization", journal=None):
+    def wrapped(source, name, owner, src, dst, token, account_type="organization", journal=None, **kwargs):
         context = LOG_SECRETS.set((token,))
         started = time.monotonic()
         try:
             with timed(f"repository source_repo={safe_label(source.get('owner'))}/{safe_label(name)}"):
-                return fn(source, name, owner, src, dst, token, account_type, journal)
+                return fn(source, name, owner, src, dst, token, account_type, journal, **kwargs)
         finally:
             elapsed = time.monotonic() - started
             counter = REPOSITORY_TIME.get()

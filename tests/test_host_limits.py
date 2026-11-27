@@ -144,7 +144,7 @@ class CliHostLimitsTests(unittest.TestCase):
         lock = threading.Lock()
         active = {}
 
-        def fake_mirror(source, name, owner, src, dst, token, account_type="organization", journal=None):
+        def fake_mirror(source, name, owner, src, dst, token, account_type="organization", journal=None, **kwargs):
             host = source_host(source["base_url"])
             with lock:
                 active[host] = active.get(host, 0) + 1

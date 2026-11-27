@@ -300,7 +300,7 @@ def main(argv=None):
                     raise ValueError('explicit GitLab source requires both durable identity pins')
                 if source['type'] == 'gitlab' and existing is not None and 'destination_id' not in settings:
                     raise ValueError('unpinned existing destination requires manual reconciliation')
-            ready.append((repo_index, source_index, source, name))
+            ready.append((repo_index, source_index, source, name, existing))
         except Exception as exc:
             failures.append((repo_index, error_detail(exc)))
     succeeded = 0
@@ -309,7 +309,7 @@ def main(argv=None):
     stdout_router, stderr_router = _ThreadStream(original_stdout), _ThreadStream(original_stderr)
 
     def run_repository(item):
-        repo_index, source_index, source, name = item
+        repo_index, source_index, source, name, existing = item
         log = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         stdout_router.local.stream = stderr_router.local.stream = log
         src = source_client(source)
@@ -329,11 +329,10 @@ def main(argv=None):
             try:
                 # The worker thread owns this collector; nothing crosses threads.
                 with observing() as activity:
-                    if journal is None:
-                        relocation = mirror_repository(source, name, owner, src, dst, token, account_type)
-                    else:
-                        relocation = mirror_repository(source, name, owner, src, dst, token, account_type,
-                                                       journal=journal)
+                    kwargs = {"existing_repo": existing}
+                    if journal is not None:
+                        kwargs["journal"] = journal
+                    relocation = mirror_repository(source, name, owner, src, dst, token, account_type, **kwargs)
                 if isinstance(relocation, dict):
                     print(f"repository {repo_index} source relocation detected; migration deferred", file=sys.stderr, flush=True)
                 detail = None

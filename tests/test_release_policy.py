@@ -139,9 +139,9 @@ class ReleasePolicyTests(unittest.TestCase):
             def request(self, method, url, data=None):
                 if url.endswith("/repos/dest/mirror-alice-demo"):
                     return {"description": mirror.source_marker(SOURCE, "demo")}
-                if "/releases/tags/" in url:
-                    self.tags.append(url.rsplit("/", 1)[-1])
-                    return {"id": 1, "name": "old"}
+                if method == "POST" and url.endswith("/releases"):
+                    self.tags.append(data["tag_name"])
+                    return {"id": len(self.tags)}
                 return {}
 
         dst = Destination()
