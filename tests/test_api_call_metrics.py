@@ -142,7 +142,7 @@ class APICallMetricsTests(unittest.TestCase):
         self.assertNotIn("\n", summary)
         self.assertEqual(
             summary,
-            "api_calls total=4 github=2 uploads=1 other=1 graphql=0 "
+            "api_calls total=4 github=2 uploads=1 other=1 graphql=0 graphql_points=0 "
             "by_role=destination:3,source:1 "
             "by_operation=api_get:2,api_post:1,api_put:1",
         )
@@ -289,7 +289,7 @@ class APICallMetricsTests(unittest.TestCase):
         counter = APICallCounter()
         self.assertEqual(
             counter.format_summary(),
-            "api_calls total=0 github=0 uploads=0 other=0 graphql=0 by_role=none by_operation=none",
+            "api_calls total=0 github=0 uploads=0 other=0 graphql=0 graphql_points=0 by_role=none by_operation=none",
         )
 
     def test_cli_summary_emits_api_calls_line_and_preserves_existing_summary(self):
@@ -329,7 +329,7 @@ class APICallMetricsTests(unittest.TestCase):
         self.assertIn("===== Summary =====", text)
         self.assertIn("summary sources=1 discovery_failed=0 repositories=1 succeeded=1 failed=0", text)
         self.assertIn(
-            "api_calls total=0 github=0 uploads=0 other=0 graphql=0 by_role=none by_operation=none",
+            "api_calls total=0 github=0 uploads=0 other=0 graphql=0 graphql_points=0 by_role=none by_operation=none",
             text,
         )
         # Ensure the api_calls line is a single line immediately in the summary block.
@@ -417,7 +417,7 @@ class APICallMetricsTests(unittest.TestCase):
         summary = format_api_call_summary()
         self.assertEqual(
             summary,
-            "api_calls total=4 github=0 uploads=0 other=4 graphql=0 "
+            "api_calls total=4 github=0 uploads=0 other=4 graphql=0 graphql_points=0 "
             "by_role=source:4 by_operation=api_get:4",
         )
         self.assertNotIn("gitlab.example.test", summary)
@@ -500,7 +500,7 @@ class APICallMetricsTests(unittest.TestCase):
         self.assertEqual(counter.snapshot(), {})
         self.assertEqual(
             counter.format_summary(),
-            "api_calls total=0 github=0 uploads=0 other=0 graphql=0 by_role=none by_operation=none",
+            "api_calls total=0 github=0 uploads=0 other=0 graphql=0 graphql_points=0 by_role=none by_operation=none",
         )
 
         external_inputs = (
@@ -529,7 +529,7 @@ class APICallMetricsTests(unittest.TestCase):
         summary = counter.format_summary()
         self.assertEqual(
             summary,
-            "api_calls total=10000 github=0 uploads=0 other=10000 graphql=0 "
+            "api_calls total=10000 github=0 uploads=0 other=10000 graphql=0 graphql_points=0 "
             "by_role=source:10000 by_operation=asset_hop_get:10000",
         )
 
@@ -597,8 +597,24 @@ class APICallMetricsTests(unittest.TestCase):
         counter.record("api.github.com", "source", "graphql", "POST")
         self.assertEqual(
             counter.format_summary(),
-            "api_calls total=1 github=1 uploads=0 other=0 graphql=1 "
+            "api_calls total=1 github=1 uploads=0 other=0 graphql=1 graphql_points=0 "
             "by_role=source:1 by_operation=graphql_post:1",
+        )
+
+    def test_graphql_points_do_not_mix_into_total_and_preserve_invariant(self):
+        counter = APICallCounter()
+        counter.record("api.github.com", "source", "graphql", "POST")
+        counter.record("api.github.com", "destination", "API", "GET")
+        counter.record("uploads.github.com", "destination", "API", "POST")
+        counter.record("forge.example.test", "source", "API", "GET")
+        counter.record_graphql_points(7)
+        counter.record_graphql_points(3)
+        self.assertEqual(counter.graphql_points(), 10)
+        summary = counter.format_summary()
+        self.assertEqual(
+            summary,
+            "api_calls total=4 github=2 uploads=1 other=1 graphql=1 graphql_points=10 "
+            "by_role=destination:2,source:2 by_operation=api_get:2,api_post:1,graphql_post:1",
         )
 
     def test_cli_emits_api_calls_once_on_early_failure(self):
@@ -641,7 +657,7 @@ class APICallMetricsTests(unittest.TestCase):
         self.assertEqual(len(summary_lines), 1)
         self.assertEqual(
             summary_lines[0],
-            "api_calls total=2 github=1 uploads=0 other=1 graphql=0 "
+            "api_calls total=2 github=1 uploads=0 other=1 graphql=0 graphql_points=0 "
             "by_role=destination:1,source:1 by_operation=api_get:2",
         )
         self.assertIn("runtime total elapsed=", text)
@@ -687,7 +703,7 @@ class APICallMetricsTests(unittest.TestCase):
         self.assertEqual(len(summary_lines), 1)
         self.assertEqual(
             summary_lines[0],
-            "api_calls total=1 github=1 uploads=0 other=0 graphql=0 "
+            "api_calls total=1 github=1 uploads=0 other=0 graphql=0 graphql_points=0 "
             "by_role=source:1 by_operation=api_get:1",
         )
         self.assertIn("runtime total elapsed=", text)
@@ -734,7 +750,7 @@ class APICallMetricsTests(unittest.TestCase):
         self.assertIn("===== Summary =====", text)
         self.assertEqual(
             summary_lines[0],
-            "api_calls total=1 github=1 uploads=0 other=0 graphql=0 "
+            "api_calls total=1 github=1 uploads=0 other=0 graphql=0 graphql_points=0 "
             "by_role=source:1 by_operation=api_get:1",
         )
 
@@ -815,7 +831,7 @@ class APICallMetricsTests(unittest.TestCase):
                     ("github", "source", "API", "POST"): 1,
                 },
             )
-            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=source:2 ", summary)
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 graphql_points=0 by_role=source:2 ", summary)
 
             # 2. forgejo_schedule._build_auto_discovery_source_client
             sched_args = SimpleNamespace(app_id="123", private_key_file=str(key), source_app_owner="src-owner")
@@ -832,7 +848,7 @@ class APICallMetricsTests(unittest.TestCase):
                     ("github", "source", "API", "POST"): 1,
                 },
             )
-            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=source:2 ", summary)
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 graphql_points=0 by_role=source:2 ", summary)
 
             # 3. forgejo_migration.build_migration (forgejo control repo -> source role)
             mig_args = SimpleNamespace(
@@ -866,7 +882,7 @@ class APICallMetricsTests(unittest.TestCase):
                     ("github", "source", "API", "POST"): 1,
                 },
             )
-            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=source:2 ", summary)
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 graphql_points=0 by_role=source:2 ", summary)
 
             # 4. forgejo_migration.build_migration (GitHub config_repo -> destination role)
             gh_mig_args = SimpleNamespace(
@@ -893,7 +909,7 @@ class APICallMetricsTests(unittest.TestCase):
                     ("github", "destination", "API", "POST"): 1,
                 },
             )
-            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=destination:2 ", summary)
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 graphql_points=0 by_role=destination:2 ", summary)
 
     def test_gitlab_assets_ftp_download_counts_attempts_in_other(self):
         class _FakeSock:
@@ -958,7 +974,7 @@ class APICallMetricsTests(unittest.TestCase):
         summary = format_api_call_summary()
         self.assertEqual(
             summary,
-            "api_calls total=1 github=0 uploads=0 other=1 graphql=0 "
+            "api_calls total=1 github=0 uploads=0 other=1 graphql=0 graphql_points=0 "
             "by_role=source:1 by_operation=asset_get:1",
         )
         self.assertNotIn("files.example.test", summary)
