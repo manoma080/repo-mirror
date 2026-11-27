@@ -30,26 +30,75 @@ _MAX_RATE_WAIT = 60
 _KNOWN_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
 
 
+def _is_loopback_host(host):
+    # Do not count loopback traffic (127.0.0.1, ::1, localhost): the local
+    # Forgejo runner is not rate-limited and would pollute the metric.
+    if not isinstance(host, str) or not host:
+        return False
+    candidate = host.strip().lower().rstrip(".")
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    if candidate == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
+def _host_bucket(host):
+    if isinstance(host, str):
+        lowered = host.strip().lower()
+        if lowered == "api.github.com":
+            return "github"
+        if lowered == "uploads.github.com":
+            return "uploads"
+    return "other"
+
+
 class APICallCounter:
-    """Thread-safe counter for outbound HTTP request attempts keyed by (host, role, operation, method)."""
+    """Thread-safe counter for outbound HTTP request attempts.
+
+    Counts are keyed by ``(bucket, role, operation, method)`` where ``bucket``
+    is one of ``{"github", "uploads", "other"}`` (computed at record time so
+    the key space is bounded by a small constant regardless of distinct
+    hostnames). Loopback hosts (``127.0.0.1``, ``::1``, ``localhost``) are
+    excluded because the local Forgejo runner is not rate-limited.
+
+    In ``format_summary()``, ``total == github + uploads + other``. The
+    ``graphql`` field is an overlapping subset counting calls whose operation
+    is ``"graphql"`` (currently no callers; reserved for future GraphQL
+    queries), so callers must not sum ``github + uploads + other + graphql``.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._counts = {}
+        self._emitted = False
 
     def record(self, host, role, operation, method):
-        normalized_host = host.lower() if isinstance(host, str) and host else "unknown"
+        if _is_loopback_host(host):
+            return
+        bucket = _host_bucket(host)
         normalized_role = role if role in ("source", "destination") else "unknown"
         normalized_operation = operation if operation in ("API", "asset", "asset-hop", "graphql") else "API"
         upper_method = method.upper() if isinstance(method, str) else ""
         normalized_method = upper_method if upper_method in _KNOWN_METHODS else "REQUEST"
-        key = (normalized_host, normalized_role, normalized_operation, normalized_method)
+        key = (bucket, normalized_role, normalized_operation, normalized_method)
         with self._lock:
             self._counts[key] = self._counts.get(key, 0) + 1
 
     def reset(self):
         with self._lock:
             self._counts.clear()
+            self._emitted = False
+
+    def mark_emitted(self):
+        with self._lock:
+            if self._emitted:
+                return False
+            self._emitted = True
+            return True
 
     def snapshot(self):
         with self._lock:
@@ -64,10 +113,10 @@ class APICallCounter:
         graphql = 0
         by_role = {}
         by_operation = {}
-        for (host, role, operation, method), count in counts.items():
-            if host == "api.github.com":
+        for (bucket, role, operation, method), count in counts.items():
+            if bucket == "github":
                 github += count
-            elif host == "uploads.github.com":
+            elif bucket == "uploads":
                 uploads += count
             else:
                 other += count
@@ -101,6 +150,14 @@ def api_call_metrics_snapshot():
 
 def format_api_call_summary():
     return _api_call_counter.format_summary()
+
+
+def emit_api_call_summary(stream=None):
+    """Print the api_calls summary line at most once since the last reset."""
+    if not _api_call_counter.mark_emitted():
+        return False
+    print(format_api_call_summary(), file=sys.stderr if stream is None else stream, flush=True)
+    return True
 
 
 def _wait_for_cooldown(host, budget=None):
@@ -271,7 +328,7 @@ class OriginRedirect(SafeRedirect):
 class AppTokenProvider:
     """Creates and caches short-lived GitHub App installation tokens."""
 
-    def __init__(self, app_id, private_key, owner, account_type="personal"):
+    def __init__(self, app_id, private_key, owner, account_type="personal", role="destination"):
         if (
             not app_id.isdigit()
             or not private_key
@@ -286,6 +343,7 @@ class AppTokenProvider:
             owner,
             account_type,
         )
+        self.role = role if role in ("source", "destination") else "destination"
         self.token, self.expires = None, 0
         self._lock = threading.RLock()
         self._verified = None
@@ -372,9 +430,9 @@ class AppTokenProvider:
                     },
                 )
                 try:
-                    setattr(req, "_mirror_metrics", ("destination", "API"))
+                    setattr(req, "_mirror_metrics", (self.role, "API"))
                     setattr(req, "_mirror_metrics_counted", True)
-                    record_api_call(host, "destination", "API", method)
+                    record_api_call(host, self.role, "API", method)
                     with opener.open(req, timeout=60) as response:
                         _publish_exhausted_response(host, response)
                         return json.load(response)
@@ -613,6 +671,7 @@ class API:
                 trusted_origin = getattr(self, 'trusted_asset_origin', None)
                 if trusted_origin is not None and (parsed.hostname, port) != trusted_origin:
                     raise ValueError("asset redirect outside configured origin")
+                record_api_call(parsed.hostname, self.role, "asset-hop", "GET")
                 addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
                 ips = [ipaddress.ip_address(a[4][0]) for a in addresses]
                 if not ips or (trusted_origin is None and any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in ips)):
@@ -621,7 +680,6 @@ class API:
                 raw = socket.socket(family, socktype, proto)
                 raw.settimeout(60)
                 try:
-                    record_api_call(parsed.hostname, self.role, "asset-hop", "GET")
                     raw.connect(address)
                     tls = ssl.create_default_context().wrap_socket(raw, server_hostname=parsed.hostname)
                     conn = http.client.HTTPSConnection(parsed.hostname, port, timeout=60)

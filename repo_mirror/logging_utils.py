@@ -422,12 +422,16 @@ def timed_main(fn):
 
     @wraps(fn)
     def wrapped(argv=None):
+        from repo_mirror.github_api import emit_api_call_summary, reset_api_call_metrics
+
+        reset_api_call_metrics()
         started = time.monotonic()
         counter = [0.0]
         context = REPOSITORY_TIME.set(counter)
         try:
             return fn(argv)
         finally:
+            emit_api_call_summary()
             total = time.monotonic() - started
             REPOSITORY_TIME.reset(context)
             print(

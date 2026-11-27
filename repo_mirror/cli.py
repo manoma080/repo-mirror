@@ -18,8 +18,7 @@ from repo_mirror.github_api import (
     API,
     AppTokenProvider,
     SourceAPI,
-    format_api_call_summary,
-    reset_api_call_metrics,
+    emit_api_call_summary,
 )
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
@@ -65,7 +64,6 @@ def main(argv=None):
         help="warn about repositories with no commit or release activity for this many days; 0 disables",
     )
     args = parser.parse_args(argv)
-    reset_api_call_metrics()
     inactive_days = parse_inactive_days(args.inactive_after_days)
     max_workers = 16
     if not os.environ.get("MIRROR_TIMESTAMP_SECRET"):
@@ -469,7 +467,7 @@ def main(argv=None):
         file=sys.stderr,
         flush=True,
     )
-    print(format_api_call_summary(), file=sys.stderr, flush=True)
+    emit_api_call_summary()
     if inactive:
         inactive.sort()
         print(
