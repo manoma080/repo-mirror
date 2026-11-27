@@ -116,13 +116,15 @@ class APICallCounter:
 
     In ``format_summary()``, ``total == github + uploads + other``. The
     ``graphql`` field is an overlapping subset counting calls whose operation
-    is ``"graphql"`` (currently no callers; reserved for future GraphQL
-    queries), so callers must not sum ``github + uploads + other + graphql``.
+    is ``"graphql"``, so callers must not sum ``github + uploads + other +
+    graphql``. ``graphql_points`` is a dimensionless GraphQL rate-limit point
+    cost total and is not mixed into ``total``.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._counts = {}
+        self._graphql_points = 0
         self._emitted = False
 
     def record(self, host, role, operation, method):
@@ -140,7 +142,17 @@ class APICallCounter:
     def reset(self):
         with self._lock:
             self._counts.clear()
+            self._graphql_points = 0
             self._emitted = False
+
+    def record_graphql_points(self, points):
+        if type(points) is int and points > 0:
+            with self._lock:
+                self._graphql_points += points
+
+    def graphql_points(self):
+        with self._lock:
+            return self._graphql_points
 
     def mark_emitted(self):
         with self._lock:
@@ -154,7 +166,9 @@ class APICallCounter:
             return dict(self._counts)
 
     def format_summary(self):
-        counts = self.snapshot()
+        with self._lock:
+            counts = dict(self._counts)
+            graphql_points = self._graphql_points
         total = sum(counts.values())
         github = 0
         uploads = 0
@@ -178,7 +192,8 @@ class APICallCounter:
         op_part = ",".join(f"{k}:{v}" for k, v in sorted(by_operation.items())) if by_operation else "none"
         return (
             f"api_calls total={total} github={github} uploads={uploads} "
-            f"other={other} graphql={graphql} by_role={role_part} by_operation={op_part}"
+            f"other={other} graphql={graphql} graphql_points={graphql_points} "
+            f"by_role={role_part} by_operation={op_part}"
         )
 
 
@@ -187,6 +202,14 @@ _api_call_counter = APICallCounter()
 
 def record_api_call(host, role, operation, method):
     _api_call_counter.record(host, role, operation, method)
+
+
+def record_graphql_points(points):
+    _api_call_counter.record_graphql_points(points)
+
+
+def graphql_points_total():
+    return _api_call_counter.graphql_points()
 
 
 def reset_api_call_metrics():
@@ -265,10 +288,15 @@ def _is_rate_limited(exc):
     return b"secondary rate limit" in body.lower() or b"abuse detection" in body.lower()
 
 
+def _publish_cooldown_delay(host, delay):
+    if isinstance(delay, (int, float)) and not isinstance(delay, bool) and math.isfinite(delay) and delay > 0:
+        with _cooldown_lock:
+            _cooldowns[host] = max(_cooldowns.get(host, 0), time.monotonic() + delay)
+
+
 def _publish_limit(host, exc, attempt):
     delay = _rate_delay(exc, attempt)
-    with _cooldown_lock:
-        _cooldowns[host] = max(_cooldowns.get(host, 0), time.monotonic() + delay)
+    _publish_cooldown_delay(host, delay)
     return delay
 
 

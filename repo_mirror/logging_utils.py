@@ -251,6 +251,17 @@ SAFE_ERROR_MESSAGES = frozenset(
         "conflicting destination",
         "requested source not exactly configured",
         "invalid GitHub App configuration",
+        "GraphQL request rate limited",
+        "GraphQL request forbidden",
+        "GraphQL resource not found",
+        "GraphQL query node limit exceeded",
+        "GraphQL request returned errors",
+        "invalid GraphQL response",
+        "GraphQL query fan-out exceeds configured limit",
+        "invalid GraphQL query parameters",
+        "GraphQL pagination exceeded safety limit",
+        "GraphQL pagination cycle detected",
+        "invalid GraphQL pagination cursor",
     }
 )
 
@@ -271,7 +282,7 @@ def _safe_operation(exc):
             )
             or (
                 operation[0] in ("source", "destination")
-                and operation[1] in ("API", "asset")
+                and operation[1] in ("API", "asset", "graphql")
                 and operation[2] in ("GET", "POST", "PUT", "PATCH", "DELETE", "request")
             )
         )
