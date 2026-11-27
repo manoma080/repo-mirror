@@ -1,6 +1,7 @@
 """github_api: see README for an overview."""
 
 import base64
+import contextvars
 import http.client
 import ipaddress
 import io
@@ -26,6 +27,13 @@ from repo_mirror.logging_utils import timed, timed_call
 _cooldown_lock = threading.Lock()
 _cooldowns = {}
 _MAX_RATE_WAIT = 60
+_UPLOAD_ATTEMPT_CALLBACK = contextvars.ContextVar("_UPLOAD_ATTEMPT_CALLBACK", default=None)
+
+
+def _notify_upload_attempt():
+    callback = _UPLOAD_ATTEMPT_CALLBACK.get()
+    if callback is not None:
+        callback()
 
 _KNOWN_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
 
@@ -471,6 +479,8 @@ class AppTokenProvider:
                     },
                 )
                 try:
+                    if attempt > 0:
+                        print(f"app authentication retry {attempt}/3", file=sys.stderr, flush=True)
                     setattr(req, "_mirror_metrics", (self.role, "API"))
                     setattr(req, "_mirror_metrics_counted", True)
                     record_api_call(host, self.role, "API", method)
@@ -487,7 +497,6 @@ class AppTokenProvider:
                 except URLError, TimeoutError, ConnectionError:
                     if attempt == 3:
                         raise
-                print(f"app authentication retry {attempt + 1}/3", file=sys.stderr, flush=True)
                 if not limited:
                     delay = 2**attempt
                     if delay > budget[0]:
@@ -558,6 +567,10 @@ class API:
                     if upload:
                         setattr(request, "_original_upload", True)
                     _wait_for_cooldown(parsed.hostname, budget)
+                    if attempt > 0:
+                        print(f"request retry {attempt}/3", file=sys.stderr, flush=True)
+                    if upload:
+                        _notify_upload_attempt()
                     setattr(request, "_mirror_metrics", (self.role, "API"))
                     setattr(request, "_mirror_metrics_counted", True)
                     record_api_call(parsed.hostname, self.role, "API", method)
@@ -600,7 +613,6 @@ class API:
                     )
                     if method not in ("GET", "PUT", "PATCH", "DELETE") or attempt == 3:
                         raise
-            print(f"request retry {attempt + 1}/3", file=sys.stderr, flush=True)
             if not rate_limited:
                 delay = 2**attempt
                 if delay > budget[0]:
@@ -652,8 +664,17 @@ class API:
         for attempt in range(4):
             output.seek(position)
             output.truncate()
+            notified = False
+
+            def notify_attempt(current_attempt=attempt):
+                nonlocal notified
+                if not notified:
+                    notified = True
+                    if current_attempt > 0:
+                        print(f"asset download retry {current_attempt}/3 target={self.role}", file=sys.stderr, flush=True)
+
             try:
-                return _asset_download_once(self, url, output)
+                return _asset_download_once(self, url, output, on_attempt=notify_attempt)
             except Exception as exc:
                 output.seek(position)
                 output.truncate()
@@ -664,10 +685,9 @@ class API:
                     raise
                 if isinstance(exc, HTTPError):
                     exc.close()
-                print(f"asset download retry {attempt + 1}/3 target={self.role}", file=sys.stderr, flush=True)
                 time.sleep(delay)
 
-    def _download_once(self, url, output):
+    def _download_once(self, url, output, *, on_attempt=None):
         if self.token:
             parsed = urlparse(url)
             if (
@@ -686,6 +706,8 @@ class API:
                     "Authorization": "Bearer " + self.token,
                 },
             )
+            if on_attempt is not None:
+                on_attempt()
             try:
                 setattr(request, "_mirror_metrics", (self.role, "asset"))
                 setattr(request, "_mirror_metrics_counted", True)
@@ -718,6 +740,8 @@ class API:
                 if not ips or (trusted_origin is None and any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in ips)):
                     raise ValueError("asset address is not public")
                 family, socktype, proto, _, address = addresses[0]
+                if on_attempt is not None:
+                    on_attempt()
                 raw = socket.socket(family, socktype, proto)
                 raw.settimeout(60)
                 try:
