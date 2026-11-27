@@ -1,4 +1,6 @@
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -6,11 +8,21 @@ import tempfile
 import threading
 import unittest
 from email.message import Message
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError
 
-from repo_mirror import cli, github_api, repository
+from repo_mirror import (
+    auto_discoveries_onboarding,
+    cli,
+    forgejo_dispatch,
+    forgejo_schedule,
+    forgejo_sync,
+    github_api,
+    repository,
+)
 from repo_mirror.config_named import normalize_config
+from repo_mirror.forgejo_dispatch import DispatchError
 from repo_mirror.github_api import (
     API,
     SourceAPI,
@@ -20,6 +32,7 @@ from repo_mirror.github_api import (
     reset_api_call_metrics,
 )
 from repo_mirror.graphql_api import GRAPHQL_URL, GraphQLClient, GraphQLError, normalize_repository_node
+from repo_mirror.journal import FailureJournal
 from repo_mirror.sources import source_marker
 
 
@@ -598,6 +611,7 @@ class GraphQLMetadataBatchTests(unittest.TestCase):
             raise AssertionError(f"unexpected destination REST call: {req.get_method()} {req.full_url}")
 
         _bind_opener(src_api, src_open)
+        src_api.download = lambda url, out: None
         _bind_opener(dst_api, dst_open)
 
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
@@ -658,6 +672,7 @@ class GraphQLMetadataBatchTests(unittest.TestCase):
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("github source opener must not be called")),
         )
         _bind_opener(src_api, src_open)
+        src_api.download = lambda url, out: None
         _bind_opener(dst_api, dst_open)
 
         other_src_api = API()
@@ -719,6 +734,7 @@ class GraphQLMetadataBatchTests(unittest.TestCase):
             return _StubResponse({})
 
         _bind_opener(src_api, src_open)
+        src_api.download = lambda url, out: None
         _bind_opener(dst_api, dst_open)
 
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
@@ -737,6 +753,956 @@ class GraphQLMetadataBatchTests(unittest.TestCase):
         self.assertEqual(relocations[0][1]["owner"], "new")
         self.assertEqual(relocations[0][1]["name"], "renamed")
         self.assertEqual(mock_git.call_args[0][0], "https://github.com/new/renamed.git")
+
+    def test_secondary_entrypoints_accept_graphql_flag_and_reject_non_boolean(self):
+        base_forgejo = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {"name": "demo"}}}
+            ],
+        }
+        groups_forgejo = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "groups": [{"type": "gitlab", "base_url": "https://gitlab.com", "owner": "team/sub", "id": 7, "repos": "all"}],
+            "repositories": [],
+        }
+
+        # 1. forgejo_sync.parse_manifest / normalize_named
+        for flag in (False, True):
+            with self.subTest(entrypoint="forgejo_sync", graphql=flag):
+                parsed = forgejo_sync.parse_manifest({**base_forgejo, "graphql": flag})
+                self.assertEqual(len(parsed), 1)
+                parsed_groups = forgejo_sync.parse_manifest({**groups_forgejo, "graphql": flag})
+                self.assertEqual(parsed_groups, [])
+        for bad in ("false", "true", 1, 0, None):
+            with self.assertRaisesRegex(ValueError, "graphql must be a boolean"):
+                forgejo_sync.parse_manifest({**base_forgejo, "graphql": bad})
+
+        # 2. forgejo_dispatch.plan_dispatch
+        blank_inputs = {
+            "source_urls": "",
+            "add_to_config": False,
+            "destination_name": "",
+            "visibility": "unchanged",
+            "remove_from_config": False,
+            "ignore_releases": "keep",
+        }
+        for flag in (False, True):
+            with self.subTest(entrypoint="forgejo_dispatch", graphql=flag):
+                pub, runtime, sel = forgejo_dispatch.plan_dispatch(
+                    {**base_forgejo, "graphql": flag}, blank_inputs, owner="dest", port=3000
+                )
+                self.assertIsNone(pub)
+                self.assertIsNone(sel)
+                self.assertIs(runtime["graphql"], flag)
+                pub_g, runtime_g, sel_g = forgejo_dispatch.plan_dispatch(
+                    {**groups_forgejo, "graphql": flag}, blank_inputs, owner="dest", port=3000
+                )
+                self.assertIsNone(pub_g)
+                self.assertIsNone(sel_g)
+                self.assertIs(runtime_g["graphql"], flag)
+        for bad in ("false", "true", 1, 0, None):
+            with self.assertRaisesRegex(DispatchError, "graphql must be a boolean"):
+                forgejo_dispatch.plan_dispatch(
+                    {**base_forgejo, "graphql": bad}, blank_inputs, owner="dest", port=3000
+                )
+
+        # 3. auto_discoveries_onboarding._validate_document
+        for flag in (False, True):
+            with self.subTest(entrypoint="auto_discoveries_onboarding", graphql=flag):
+                validated_gh = auto_discoveries_onboarding._validate_document(
+                    {**base_forgejo, "graphql": flag}, "github"
+                )
+                self.assertIs(validated_gh["graphql"], flag)
+                validated_fj = auto_discoveries_onboarding._validate_document(
+                    {**groups_forgejo, "graphql": flag}, "forgejo"
+                )
+                self.assertNotIn("groups", validated_fj)
+                self.assertIs(validated_fj["graphql"], flag)
+        for bad in ("false", 1, None):
+            with self.assertRaisesRegex(ValueError, "graphql must be a boolean"):
+                auto_discoveries_onboarding._validate_document({**groups_forgejo, "graphql": bad}, "forgejo")
+
+        # 4. forgejo_schedule.main with groups manifest and "graphql": False / True
+        class _FakeControlAPI:
+            def __init__(self, raw):
+                self.files = {
+                    "config.json": raw,
+                    "migrations.json": b'{"version": 1, "migrations": {}, "signatures": {}}',
+                    "failures.json": b'{"version": 1, "journals": {}}\n',
+                }
+
+            def request(self, method, path, data=None):
+                if path in ("/api/v1/repositories/99", "/api/v1/repos/dest/control"):
+                    return {
+                        "id": 99,
+                        "full_name": "dest/control",
+                        "default_branch": "main",
+                        "private": True,
+                        "has_actions": False,
+                    }
+                from repo_mirror.migrations import blob_sha
+                for name in ("config.json", "migrations.json", "failures.json"):
+                    if path.startswith(f"/api/v1/repos/dest/control/contents/{name}"):
+                        if method == "PUT":
+                            self.files[name] = base64.b64decode(data["content"])
+                            return {"content": {"sha": blob_sha(self.files[name])}}
+                        content = self.files[name]
+                        return {
+                            "type": "file",
+                            "encoding": "base64",
+                            "sha": blob_sha(content),
+                            "content": base64.b64encode(content).decode("ascii"),
+                        }
+                raise AssertionError(f"unexpected ForgejoControlAPI request: {method} {path}")
+
+        class _FakeSrc:
+            def request(self, method, url, data=None):
+                if url == "https://gitlab.com/api/v4/groups/team%2Fsub":
+                    return {"id": 7, "visibility": "public", "full_path": "team/sub"}
+                raise AssertionError(f"unexpected source request: {url}")
+
+            def pages(self, url):
+                return []
+
+        for flag in (False, True):
+            with self.subTest(entrypoint="forgejo_schedule", graphql=flag), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                raw = json.dumps({**groups_forgejo, "graphql": flag}).encode("utf-8")
+                (root / "manifest").write_bytes(raw)
+                (root / "secret").write_text("x" * 32)
+                (root / "secret").chmod(0o600)
+                (root / "token").write_text("forgejo-token")
+                (root / "token").chmod(0o600)
+                (root / "journal").mkdir(mode=0o700)
+                ctrl = _FakeControlAPI(raw)
+                with (
+                    patch("repo_mirror.forgejo_control_config.ForgejoControlAPI", return_value=ctrl),
+                    patch("repo_mirror.forgejo_schedule._build_auto_discovery_source_client", return_value=lambda _: _FakeSrc()),
+                    patch("repo_mirror.forgejo_schedule.subprocess.Popen"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()) as sched_err,
+                ):
+                    rc = forgejo_schedule.main(
+                        [
+                            "run",
+                            "--manifest", str(root / "manifest"),
+                            "--token-file", str(root / "token"),
+                            "--timestamp-secret-file", str(root / "secret"),
+                            "--journal-dir", str(root / "journal"),
+                            "--owner", "dest",
+                            "--lock", str(root / "lock"),
+                            "--forgejo-config-repo", "dest/control",
+                            "--forgejo-config-id", "99",
+                            "--asset-max-bytes", "100",
+                        ]
+                    )
+                self.assertEqual(rc, 0, sched_err.getvalue())
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "manifest").write_text(json.dumps({**groups_forgejo, "graphql": "false"}))
+            (root / "secret").write_text("x" * 32)
+            (root / "secret").chmod(0o600)
+            (root / "token").write_text("forgejo-token")
+            (root / "token").chmod(0o600)
+            (root / "journal").mkdir(mode=0o700)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = forgejo_schedule.main(
+                    [
+                        "run",
+                        "--manifest", str(root / "manifest"),
+                        "--token-file", str(root / "token"),
+                        "--timestamp-secret-file", str(root / "secret"),
+                        "--journal-dir", str(root / "journal"),
+                        "--owner", "dest",
+                        "--lock", str(root / "lock"),
+                        "--forgejo-config-repo", "dest/control",
+                        "--forgejo-config-id", "99",
+                        "--asset-max-bytes", "100",
+                    ]
+                )
+            self.assertEqual(rc, 2)
+            self.assertIn("Batch configuration or lock error: ValueError", err.getvalue())
+
+        # Forgejo entrypoints never issue GraphQL calls.
+        self.assertEqual(api_call_metrics_snapshot(), {})
+
+    def test_shared_cooldown_between_graphql_and_rest_workers_under_cli_main(self):
+        config = {
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {"name": "demo"}}}
+            ],
+        }
+        marker = source_marker({"type": "github", "base_url": "https://github.com", "owner": "alice"}, "demo")
+
+        # 1. GraphQL exhausts bucket -> REST worker fails fast on shared cooldown without issuing REST requests.
+        src_api = SourceAPI("synthetic-src")
+        dst_api = API("synthetic-dst")
+        src_calls = []
+        dst_calls = []
+
+        def src_open_1(req, timeout=60):
+            src_calls.append(req.full_url)
+            if req.full_url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(11, "alice", "demo"),
+                            "rateLimit": {"cost": 1, "remaining": 0, "resetAt": "2099-01-01T00:00:00Z"},
+                        }
+                    }
+                )
+            raise AssertionError(f"unexpected source REST call during cooldown: {req.full_url}")
+
+        def dst_open_1(req, timeout=60):
+            dst_calls.append((req.get_method(), req.full_url))
+            if req.full_url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(22, "dest", "demo", description=marker),
+                            "rateLimit": {"cost": 1, "remaining": 4999, "resetAt": "2099-01-01T00:00:00Z"},
+                        }
+                    }
+                )
+            raise AssertionError(f"unexpected destination REST call during cooldown: {req.get_method()} {req.full_url}")
+
+        _bind_opener(src_api, src_open_1)
+        _bind_opener(dst_api, dst_open_1)
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+            json.dump(config, cfg)
+            cfg.flush()
+            with (
+                patch.object(cli, "SourceAPI", return_value=src_api),
+                patch.object(cli, "API", return_value=dst_api),
+                patch.object(github_api.time, "sleep") as mock_sleep,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
+                    cli.main(["--config", cfg.name])
+            self.assertIn("60 s wait limit is exhausted", stderr.getvalue())
+            mock_sleep.assert_not_called()
+        self.assertEqual(src_calls, [GRAPHQL_URL])
+        self.assertEqual(dst_calls, [("POST", GRAPHQL_URL)])
+
+        # 2. REST exhausts bucket -> GraphQL batch fails fast on shared cooldown with zero GraphQL/REST requests.
+        self._clear_cooldowns()
+        reset_api_call_metrics()
+        rest_api = API("synthetic-rest")
+        _bind_opener(
+            rest_api,
+            lambda req, timeout=60: _StubResponse(
+                {"ok": True},
+                headers={
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(int(github_api.time.time()) + 300),
+                },
+            ),
+        )
+        rest_api.request("GET", "https://api.github.com/repos/dest/demo")
+
+        src_api2 = SourceAPI("synthetic-src")
+        dst_api2 = API("synthetic-dst")
+        src_mock2 = _bind_opener(
+            src_api2,
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("source opener must not be called")),
+        )
+        dst_mock2 = _bind_opener(
+            dst_api2,
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("destination opener must not be called")),
+        )
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+            json.dump(config, cfg)
+            cfg.flush()
+            with (
+                patch.object(cli, "SourceAPI", return_value=src_api2),
+                patch.object(cli, "API", return_value=dst_api2),
+                patch.object(github_api.time, "sleep") as mock_sleep2,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "60 s wait limit is exhausted"):
+                    cli.main(["--config", cfg.name])
+            mock_sleep2.assert_not_called()
+        src_mock2.assert_not_called()
+        dst_mock2.assert_not_called()
+
+    def test_retry_accounting_under_cli_main_on_batched_path(self):
+        config = {
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {"name": "demo"}}}
+            ],
+        }
+        marker = source_marker({"type": "github", "base_url": "https://github.com", "owner": "alice"}, "demo")
+
+        # 1. Issued retry on destination GraphQL POST is counted once (2 destination + 1 source = 3 graphql).
+        src_api = SourceAPI("synthetic-src")
+        dst_api = API("synthetic-dst")
+        dst_attempts = 0
+
+        def dst_open_retry(req, timeout=60):
+            nonlocal dst_attempts
+            if req.full_url == GRAPHQL_URL:
+                dst_attempts += 1
+                if dst_attempts == 1:
+                    raise HTTPError(GRAPHQL_URL, 500, "Server Error", Message(), io.BytesIO(b"err"))
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(22, "dest", "demo", description=marker),
+                            "rateLimit": {"cost": 1, "remaining": 4999},
+                        }
+                    }
+                )
+            return _StubResponse({})
+
+        _bind_opener(dst_api, dst_open_retry)
+        _bind_opener(
+            src_api,
+            lambda req, timeout=60: _StubResponse(
+                {
+                    "data": {
+                        "r0": _gql_repo_node(11, "alice", "demo"),
+                        "rateLimit": {"cost": 1, "remaining": 4999},
+                    }
+                }
+            ),
+        )
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+            json.dump(config, cfg)
+            cfg.flush()
+            with (
+                patch.object(cli, "SourceAPI", return_value=src_api),
+                patch.object(cli, "API", return_value=dst_api),
+                patch.object(github_api.time, "sleep"),
+                patch("repo_mirror.graphql_api.time.sleep"),
+                patch.object(repository, "mirror_git"),
+                patch.object(repository, "mirror_releases"),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                cli.main(["--config", cfg.name])
+
+        self.assertEqual(dst_attempts, 2)
+        self.assertEqual(api_call_metrics_snapshot()[("github", "destination", "graphql", "POST")], 2)
+        self.assertEqual(api_call_metrics_snapshot()[("github", "source", "graphql", "POST")], 1)
+        self.assertEqual(graphql_points_total(), 2)
+        self.assertIn("graphql=3 graphql_points=2", stderr.getvalue())
+        self.assertIn("request retry 1/3", stderr.getvalue())
+
+        # 2. Refused retry (Retry-After > 60s) is not retried and counted only once.
+        self._clear_cooldowns()
+        reset_api_call_metrics()
+        src_api2 = SourceAPI("synthetic-src")
+        dst_api2 = API("synthetic-dst")
+        src_mock2 = _bind_opener(
+            src_api2,
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("source opener must not be called")),
+        )
+        _bind_opener(
+            dst_api2,
+            lambda req, timeout=60: (_ for _ in ()).throw(
+                HTTPError(GRAPHQL_URL, 429, "Too Many", {"Retry-After": "120"}, io.BytesIO(b"rate"))
+            ),
+        )
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+            json.dump(config, cfg)
+            cfg.flush()
+            with (
+                patch.object(cli, "SourceAPI", return_value=src_api2),
+                patch.object(cli, "API", return_value=dst_api2),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(HTTPError):
+                    cli.main(["--config", cfg.name])
+
+        src_mock2.assert_not_called()
+        self.assertEqual(api_call_metrics_snapshot(), {("github", "destination", "graphql", "POST"): 1})
+        self.assertEqual(graphql_points_total(), 0)
+        self.assertIn("graphql=1 graphql_points=0", format_api_call_summary())
+
+    def test_starter_asset_refused_with_batched_metadata_under_cli_main(self):
+        config = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}
+            ],
+        }
+        marker = source_marker({"type": "github", "base_url": "https://github.com", "owner": "alice"}, "demo")
+        manifest = [["empty", 0, 10, None, None]]
+        digest = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
+        pending_name = "[repo-mirror:pending:v1]" + base64.urlsafe_b64encode(json.dumps([None, digest]).encode()).decode()
+
+        src_api = SourceAPI("synthetic-src")
+        dst_api = API("synthetic-dst")
+        src_rest_repo_gets = []
+        dst_calls = []
+
+        def src_open(req, timeout=60):
+            url = req.full_url
+            if url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(11, "alice", "demo"),
+                            "rateLimit": {"cost": 1, "remaining": 4999},
+                        }
+                    }
+                )
+            if "/repos/alice/demo/releases/latest" in url:
+                raise HTTPError(url, 404, "Not Found", Message(), io.BytesIO(b"{}"))
+            if "/repos/alice/demo/releases/1/assets" in url:
+                return _StubResponse(
+                    []
+                    if "page=2" in url
+                    else [{"id": 10, "name": "empty", "size": 0, "browser_download_url": "https://github.com/alice/demo/releases/download/v1/empty"}]
+                )
+            if "/repos/alice/demo/releases/1" in url:
+                return _StubResponse({"id": 1, "tag_name": "v1"})
+            if "/repos/alice/demo/releases" in url:
+                return _StubResponse([] if "page=2" in url else [{"id": 1, "tag_name": "v1"}])
+            if url.endswith("/repos/alice/demo"):
+                src_rest_repo_gets.append(url)
+            raise AssertionError(f"unexpected source request: {url}")
+
+        def dst_open(req, timeout=60):
+            url = req.full_url
+            method = req.get_method()
+            if url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(22, "dest", "mirror-alice-demo", description=marker),
+                            "rateLimit": {"cost": 1, "remaining": 4999},
+                        }
+                    }
+                )
+            dst_calls.append((method, url))
+            if method == "PUT" and url.endswith("/actions/permissions"):
+                return _StubResponse({})
+            if method == "GET" and "/releases/tags/" in url:
+                return _StubResponse({"id": 2, "name": pending_name})
+            if method == "GET" and "/releases/2/assets" in url:
+                return _StubResponse(
+                    []
+                    if "page=2" in url
+                    else [{"id": 20, "name": "empty", "size": 0, "state": "starter", "url": "https://api.github.com/a"}]
+                )
+            raise AssertionError(f"unexpected destination request: {method} {url}")
+
+        _bind_opener(src_api, src_open)
+        src_api.download = lambda url, out: None
+        _bind_opener(dst_api, dst_open)
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+            json.dump(config, cfg)
+            cfg.flush()
+            with (
+                patch.object(cli, "SourceAPI", return_value=src_api),
+                patch.object(cli, "API", return_value=dst_api),
+                patch.object(repository, "mirror_git"),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
+                    cli.main(["--config", cfg.name])
+
+        self.assertRegex(stderr.getvalue().lower(), "starter.*manual")
+        self.assertEqual(src_rest_repo_gets, [])
+        self.assertFalse(any(m in ("DELETE", "POST", "PATCH") for m, _ in dst_calls))
+        self.assertIn("graphql=2 graphql_points=2", stderr.getvalue())
+
+    def test_failure_journal_written_and_cleared_on_batched_path_under_cli_main(self):
+        config = {
+            "destinations": {"main": {"account_type": "personal"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}
+            ],
+        }
+        marker = source_marker({"type": "github", "base_url": "https://github.com", "owner": "alice"}, "demo")
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "config.json"
+            journal_path = Path(d) / "failures.json"
+            cfg.write_text(json.dumps(config))
+            state = {"fail_upload": True, "release": None, "assets": []}
+
+            def make_src_api(*_a, **_k):
+                api = SourceAPI("synthetic-src")
+
+                def src_open(req, timeout=60):
+                    url = req.full_url
+                    if url == GRAPHQL_URL:
+                        return _StubResponse(
+                            {
+                                "data": {
+                                    "r0": _gql_repo_node(11, "alice", "demo"),
+                                    "rateLimit": {"cost": 1, "remaining": 4999},
+                                }
+                            }
+                        )
+                    if url.endswith("/releases/latest"):
+                        raise HTTPError(url, 404, "Not Found", Message(), io.BytesIO(b"{}"))
+                    if "/releases/1/assets" in url:
+                        return _StubResponse(
+                            []
+                            if "page=2" in url
+                            else [{"id": 10, "name": "file", "size": 3, "browser_download_url": "https://github.com/alice/demo/releases/download/v1/file"}]
+                        )
+                    if "/releases/1" in url:
+                        return _StubResponse({"id": 1, "tag_name": "v1", "name": "one", "body": ""})
+                    if "/releases" in url:
+                        return _StubResponse(
+                            [] if "page=2" in url else [{"id": 1, "tag_name": "v1", "name": "one", "body": ""}]
+                        )
+                    raise AssertionError(f"unexpected source request: {url}")
+
+                _bind_opener(api, src_open)
+                api.download = lambda url, out: out.write(b"abc")
+                return api
+
+            def make_dst_api(*_a, **_k):
+                api = API("synthetic-dst")
+
+                def dst_open(req, timeout=60):
+                    url = req.full_url
+                    method = req.get_method()
+                    if url == GRAPHQL_URL:
+                        return _StubResponse(
+                            {
+                                "data": {
+                                    "r0": _gql_repo_node(22, "dest", "mirror-alice-demo", description=marker),
+                                    "rateLimit": {"cost": 1, "remaining": 4999},
+                                }
+                            }
+                        )
+                    if method == "PUT" and url.endswith("/actions/permissions"):
+                        return _StubResponse({})
+                    if method == "GET" and "/releases/tags/" in url:
+                        if state["release"] is None:
+                            raise HTTPError(url, 404, "Not Found", Message(), io.BytesIO(b"{}"))
+                        return _StubResponse(dict(state["release"]))
+                    if method == "POST" and url.endswith("/releases"):
+                        payload = json.loads(req.data.decode("utf-8"))
+                        state["release"] = dict(payload, id=2, upload_url="https://uploads.github.com/a{?name}")
+                        return _StubResponse(dict(state["release"]))
+                    if method == "GET" and "/releases/2/assets" in url:
+                        return _StubResponse([] if "page=2" in url else list(state["assets"]))
+                    if method == "GET" and "/repos/dest/mirror-alice-demo/releases" in url:
+                        return _StubResponse([])
+                    if method == "POST" and url.startswith("https://uploads.github.com/a"):
+                        if state["fail_upload"]:
+                            raise RuntimeError("secret token must not be persisted")
+                        state["assets"] = [
+                            {"id": 20, "name": "file", "size": 3, "state": "uploaded", "url": "https://api.github.com/file"}
+                        ]
+                        return _StubResponse({"id": 9})
+                    if method == "GET" and url == "https://api.github.com/file":
+                        return _StubResponse(b"abc")
+                    if method == "PATCH" and "/releases/" in url:
+                        payload = json.loads(req.data.decode("utf-8"))
+                        state["release"].update(payload)
+                        return _StubResponse(dict(state["release"]))
+                    raise AssertionError(f"unexpected destination request: {method} {url}")
+
+                _bind_opener(api, dst_open)
+                return api
+
+            # Run 1: Upload fails after GraphQL batches succeed -> failure journal written.
+            with (
+                patch.object(cli, "SourceAPI", side_effect=make_src_api),
+                patch.object(cli, "API", side_effect=[API(), make_dst_api()]),
+                patch("repo_mirror.forgejo_source_adapter.ForgejoSourceAdapter.download", side_effect=lambda _u, out: out.write(b"abc")),
+                patch.object(repository, "mirror_git"),
+                contextlib.redirect_stderr(io.StringIO()) as err1,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
+                    cli.main(["--config", str(cfg), "--failures", str(journal_path)])
+            self.assertTrue(journal_path.exists(), err1.getvalue())
+            text = journal_path.read_text()
+            self.assertNotIn("secret", text)
+            self.assertEqual(len(json.loads(text)["failures"]), 1)
+            self.assertIn("graphql=2 graphql_points=2", err1.getvalue())
+
+            # Run 2: Retry succeeds on batched path -> failure journal cleared.
+            reset_api_call_metrics()
+            state["fail_upload"] = False
+            with (
+                patch.object(cli, "SourceAPI", side_effect=make_src_api),
+                patch.object(cli, "API", side_effect=[API(), make_dst_api()]),
+                patch("repo_mirror.forgejo_source_adapter.ForgejoSourceAdapter.download", side_effect=lambda _u, out: out.write(b"abc")),
+                patch.object(repository, "mirror_git"),
+                contextlib.redirect_stderr(io.StringIO()) as err2,
+            ):
+                cli.main(["--config", str(cfg), "--failures", str(journal_path)])
+            self.assertEqual(json.loads(journal_path.read_text())["failures"], [])
+            self.assertEqual(state["release"]["name"], "one")
+            self.assertIn("graphql=2 graphql_points=2", err2.getvalue())
+
+    def test_initial_destination_pin_mismatch_from_batch_under_cli_main(self):
+        config = {
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [
+                {
+                    "source": {"url": "https://github.com/alice/demo", "id": 11},
+                    "mirrors": {"main": {"name": "demo", "id": 22}},
+                }
+            ],
+        }
+        marker = source_marker({"type": "github", "base_url": "https://github.com", "owner": "alice"}, "demo")
+        src_api = SourceAPI("synthetic-src")
+        dst_api = API("synthetic-dst")
+        src_calls = []
+        dst_calls = []
+
+        def src_open(req, timeout=60):
+            src_calls.append(req.full_url)
+            if req.full_url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(11, "alice", "demo"),
+                            "rateLimit": {"cost": 1, "remaining": 4999},
+                        }
+                    }
+                )
+            raise AssertionError(f"unexpected source REST call: {req.full_url}")
+
+        def dst_open(req, timeout=60):
+            dst_calls.append((req.get_method(), req.full_url))
+            if req.full_url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(888, "dest", "demo", description=marker),
+                            "rateLimit": {"cost": 1, "remaining": 4999},
+                        }
+                    }
+                )
+            raise AssertionError(f"unexpected destination write/REST call: {req.get_method()} {req.full_url}")
+
+        _bind_opener(src_api, src_open)
+        src_api.download = lambda url, out: None
+        _bind_opener(dst_api, dst_open)
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+            json.dump(config, cfg)
+            cfg.flush()
+            with (
+                patch.object(cli, "SourceAPI", return_value=src_api),
+                patch.object(cli, "API", return_value=dst_api),
+                patch.object(repository, "mirror_git") as mock_git,
+                patch.object(repository, "mirror_releases") as mock_releases,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
+                    cli.main(["--config", cfg.name])
+
+        self.assertIn("failed: ValueError", stderr.getvalue())
+        self.assertEqual(src_calls, [GRAPHQL_URL])
+        self.assertEqual(dst_calls, [("POST", GRAPHQL_URL)])
+        mock_git.assert_not_called()
+        mock_releases.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "destination repository id mismatch or missing"):
+            repository.mirror_repository(
+                {
+                    "type": "github",
+                    "base_url": "https://github.com",
+                    "owner": "alice",
+                    "name": "demo",
+                    "mirror": {"source_id": 11, "destination_id": 22},
+                },
+                "demo",
+                "dest",
+                src_api,
+                dst_api,
+                "synthetic-token",
+                existing_repo=_rest_repo_dict(888, "dest", "demo", description=marker),
+                source_repo=_rest_repo_dict(11, "alice", "demo"),
+            )
+
+    def test_malformed_database_id_fails_hard_before_repository_work_under_cli_main(self):
+        config = {
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {"name": "demo"}}}
+            ],
+        }
+        bad_ids = ("missing", None, "R_kgDOAbCdEf", True, False, 0, -1)
+
+        for target in ("destination", "source"):
+            for bad_id in bad_ids:
+                with self.subTest(target=target, bad_id=bad_id):
+                    reset_api_call_metrics()
+                    src_api = SourceAPI("synthetic-src")
+                    dst_api = API("synthetic-dst")
+
+                    def bad_node(owner, name, value=bad_id):
+                        node = _gql_repo_node(123, owner, name)
+                        if value == "missing":
+                            node.pop("databaseId")
+                        else:
+                            node["databaseId"] = value
+                        return node
+
+                    if target == "destination":
+                        _bind_opener(
+                            dst_api,
+                            lambda req, timeout=60: _StubResponse(
+                                {"data": {"r0": bad_node("dest", "demo"), "rateLimit": {"cost": 1, "remaining": 4999}}}
+                            ),
+                        )
+                        _bind_opener(
+                            src_api,
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("source opener must not be called")),
+                        )
+                    else:
+                        _bind_opener(
+                            dst_api,
+                            lambda req, timeout=60: _StubResponse(
+                                {
+                                    "data": {
+                                        "r0": _gql_repo_node(22, "dest", "demo"),
+                                        "rateLimit": {"cost": 1, "remaining": 4999},
+                                    }
+                                }
+                            ),
+                        )
+                        _bind_opener(
+                            src_api,
+                            lambda req, timeout=60: _StubResponse(
+                                {"data": {"r0": bad_node("alice", "demo"), "rateLimit": {"cost": 1, "remaining": 4999}}}
+                            ),
+                        )
+
+                    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+                        json.dump(config, cfg)
+                        cfg.flush()
+                        with (
+                            patch.object(cli, "SourceAPI", return_value=src_api),
+                            patch.object(cli, "API", return_value=dst_api),
+                            patch.object(cli, "mirror_repository") as mock_mirror,
+                            patch.object(repository, "mirror_git") as mock_git,
+                            patch.object(repository, "mirror_releases") as mock_releases,
+                            contextlib.redirect_stderr(io.StringIO()),
+                        ):
+                            with self.assertRaisesRegex(
+                                GraphQLError, "GraphQL repository response missing integer databaseId"
+                            ):
+                                cli.main(["--config", cfg.name])
+                    mock_mirror.assert_not_called()
+                    mock_git.assert_not_called()
+                    mock_releases.assert_not_called()
+
+    def test_auto_discovery_onboarding_through_cli_main_with_graphql_on_and_off(self):
+        class _MemStore:
+            def __init__(self, raw_bytes):
+                self.data = raw_bytes
+                self.sha = "a" * 40
+                self.published = []
+
+            def read(self):
+                return self.data, self.sha
+
+            def publish(self, expected_sha, replacement):
+                self.published.append(replacement)
+                self.data = replacement
+                self.sha = "b" * 40
+
+        for graphql_flag in (True, False):
+            with self.subTest(graphql=graphql_flag):
+                reset_api_call_metrics()
+                doc = {
+                    "graphql": graphql_flag,
+                    "destinations": {"main": {"account_type": "personal"}},
+                    "auto_discoveries": [{"url": "https://github.com/Alice"}],
+                    "repositories": [],
+                }
+                raw = json.dumps(doc).encode("utf-8")
+                store = _MemStore(raw)
+                src_api = SourceAPI("synthetic-src")
+                dst_api = API("synthetic-dst")
+                created_desc = {}
+                gql_calls = []
+                rest_repo_gets = []
+
+                def src_open(req, timeout=60):
+                    url = req.full_url
+                    if url == GRAPHQL_URL:
+                        gql_calls.append("source")
+                        return _StubResponse(
+                            {
+                                "data": {
+                                    "r0": _gql_repo_node(201, "Alice", "alpha"),
+                                    "rateLimit": {"cost": 1, "remaining": 4999},
+                                }
+                            }
+                        )
+                    if url == "https://api.github.com/users/Alice":
+                        return _StubResponse({"id": 101, "login": "Alice", "type": "User"})
+                    if url.startswith("https://api.github.com/users/Alice/repos"):
+                        if "page=2" in url:
+                            return _StubResponse([])
+                        return _StubResponse(
+                            [
+                                {
+                                    "id": 201,
+                                    "name": "alpha",
+                                    "full_name": "Alice/alpha",
+                                    "clone_url": "https://github.com/Alice/alpha.git",
+                                }
+                            ]
+                        )
+                    if url == "https://api.github.com/repos/Alice/alpha":
+                        rest_repo_gets.append(("source", url))
+                        return _StubResponse(_rest_repo_dict(201, "Alice", "alpha"))
+                    raise AssertionError(f"unexpected source request: {url}")
+
+                def dst_open(req, timeout=60):
+                    url = req.full_url
+                    method = req.get_method()
+                    if url == GRAPHQL_URL:
+                        gql_calls.append("destination")
+                        return _StubResponse(
+                            {
+                                "data": {
+                                    "r0": _gql_repo_node(
+                                        5001,
+                                        "dest",
+                                        "mirror-Alice-alpha",
+                                        description=created_desc.get("desc"),
+                                    ),
+                                    "rateLimit": {"cost": 1, "remaining": 4999},
+                                }
+                            }
+                        )
+                    if method == "GET" and url == "https://api.github.com/user":
+                        return _StubResponse({"login": "dest"})
+                    if method == "GET" and url == "https://api.github.com/repos/dest/mirror-Alice-alpha":
+                        if "desc" not in created_desc:
+                            raise HTTPError(url, 404, "Not Found", Message(), io.BytesIO(b"{}"))
+                        rest_repo_gets.append(("destination", url))
+                        return _StubResponse(
+                            _rest_repo_dict(
+                                5001,
+                                "dest",
+                                "mirror-Alice-alpha",
+                                description=created_desc["desc"],
+                                private=created_desc["private"],
+                            )
+                        )
+                    if method == "POST" and url == "https://api.github.com/user/repos":
+                        payload = json.loads(req.data.decode("utf-8"))
+                        created_desc["desc"] = payload["description"]
+                        created_desc["private"] = payload["private"]
+                        return _StubResponse(
+                            _rest_repo_dict(
+                                5001,
+                                "dest",
+                                "mirror-Alice-alpha",
+                                description=payload["description"],
+                                private=payload["private"],
+                            )
+                        )
+                    if method == "PUT" and url == "https://api.github.com/repos/dest/mirror-Alice-alpha/actions/permissions":
+                        return _StubResponse({})
+                    if method == "GET" and url == "https://api.github.com/repos/dest/mirror-Alice-alpha/actions/permissions":
+                        return _StubResponse({"enabled": False})
+                    if method == "PATCH" and url == "https://api.github.com/repos/dest/mirror-Alice-alpha":
+                        return _StubResponse({})
+                    raise AssertionError(f"unexpected destination request: {method} {url}")
+
+                _bind_opener(src_api, src_open)
+                _bind_opener(dst_api, dst_open)
+
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+                    cfg.write(raw.decode("utf-8"))
+                    cfg.flush()
+                    with (
+                        patch.object(cli, "SourceAPI", return_value=src_api),
+                        patch.object(cli, "API", return_value=dst_api),
+                        patch("repo_mirror.github_migration.transaction_from_environment", return_value=None),
+                        patch("repo_mirror.github_migration.store_from_environment", return_value=store),
+                        patch.object(repository, "mirror_git") as mock_git,
+                        patch.object(repository, "mirror_releases") as mock_releases,
+                        contextlib.redirect_stderr(io.StringIO()) as stderr,
+                    ):
+                        cli.main(["--config", cfg.name])
+
+                mock_git.assert_called_once()
+                mock_releases.assert_called_once()
+                self.assertEqual(len(store.published), 1)
+                published_doc = json.loads(store.published[0].decode("utf-8"))
+                self.assertIs(published_doc["graphql"], graphql_flag)
+                if graphql_flag:
+                    self.assertEqual(gql_calls, ["destination", "source"])
+                    self.assertIn("graphql=2 graphql_points=2", stderr.getvalue())
+                else:
+                    self.assertEqual(gql_calls, [])
+                    self.assertIn("graphql=0 graphql_points=0", stderr.getvalue())
+                    self.assertGreater(len(rest_repo_gets), 0)
+
+    def test_default_omitted_graphql_key_uses_graphql(self):
+        config = {
+            "destinations": {"main": {"account_type": "organization"}},
+            "repositories": [
+                {"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {"name": "demo"}}}
+            ],
+        }
+        self.assertNotIn("graphql", config)
+        marker = source_marker({"type": "github", "base_url": "https://github.com", "owner": "alice"}, "demo")
+        src_api = SourceAPI("synthetic-src")
+        dst_api = API("synthetic-dst")
+
+        def src_open(req, timeout=60):
+            if req.full_url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(11, "alice", "demo"),
+                            "rateLimit": {"cost": 1, "remaining": 4999},
+                        }
+                    }
+                )
+            raise AssertionError(f"unexpected source REST call: {req.full_url}")
+
+        def dst_open(req, timeout=60):
+            if req.full_url == GRAPHQL_URL:
+                return _StubResponse(
+                    {
+                        "data": {
+                            "r0": _gql_repo_node(22, "dest", "demo", description=marker),
+                            "rateLimit": {"cost": 1, "remaining": 4999},
+                        }
+                    }
+                )
+            if req.get_method() == "PUT" and req.full_url.endswith("/actions/permissions"):
+                return _StubResponse({})
+            raise AssertionError(f"unexpected destination call: {req.get_method()} {req.full_url}")
+
+        _bind_opener(src_api, src_open)
+        src_api.download = lambda url, out: None
+        _bind_opener(dst_api, dst_open)
+
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cfg:
+            json.dump(config, cfg)
+            cfg.flush()
+            with (
+                patch.object(cli, "SourceAPI", return_value=src_api),
+                patch.object(cli, "API", return_value=dst_api),
+                patch.object(repository, "mirror_git"),
+                patch.object(repository, "mirror_releases"),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                cli.main(["--config", cfg.name])
+
+        metrics = api_call_metrics_snapshot()
+        self.assertEqual(metrics[("github", "destination", "graphql", "POST")], 1)
+        self.assertEqual(metrics[("github", "source", "graphql", "POST")], 1)
+        self.assertEqual(graphql_points_total(), 2)
+        self.assertIn("graphql=2 graphql_points=2", stderr.getvalue())
 
 
 if __name__ == "__main__":
