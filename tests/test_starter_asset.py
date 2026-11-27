@@ -249,6 +249,20 @@ class StarterAssetTests(unittest.TestCase):
         self.assertEqual([a["state"] for a in dst.assets], ["uploaded"])
         self.assertEqual(dst.assets[0]["size"], 5)
 
+    def test_starter_with_declared_size_heals_like_real_github_placeholders(self):
+        # GitHub records the *declared* size on a starter asset, not the bytes
+        # transferred: a real interrupted upload shows size>0 with state="starter"
+        # (observed 44 MB). Such a placeholder must heal, not demand manual cleanup.
+        dst, _ = self._run_v3_starter_case(
+            source_assets=[{"id": 10, "name": "app.bin", "size": 5, "browser_download_url": "https://github.com/app.bin"}],
+            dest_assets=[{"id": 20, "name": "app.bin", "size": 44_955_305, "state": "starter", "url": "https://api.github.com/20"}],
+        )
+        delete_idx = next(i for i, (m, u) in enumerate(dst.calls) if m == "DELETE" and u.endswith("/releases/assets/20"))
+        upload_idx = next(i for i, (m, _) in enumerate(dst.calls) if m == "UPLOAD")
+        self.assertLess(delete_idx, upload_idx)
+        self.assertEqual([a["state"] for a in dst.assets], ["uploaded"])
+        self.assertEqual(dst.assets[0]["size"], 5)
+
     def test_v3_starter_auto_heal_surfaces_reupload_failure(self):
         for use_journal in (False, True):
             expected = "release asset uploads failed" if use_journal else "upload failed"
@@ -269,11 +283,6 @@ class StarterAssetTests(unittest.TestCase):
 
     def test_starter_auto_heal_refuses_non_placeholder_cases(self):
         cases = (
-            (
-                "nonzero_size",
-                [{"id": 10, "name": "app.bin", "size": 5, "browser_download_url": "https://github.com/app.bin"}],
-                [{"id": 20, "name": "app.bin", "size": 10, "state": "starter", "url": "https://api.github.com/20"}],
-            ),
             (
                 "orphaned_name",
                 [{"id": 10, "name": "app.bin", "size": 5, "browser_download_url": "https://github.com/app.bin"}],
