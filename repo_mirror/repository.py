@@ -17,7 +17,7 @@ from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
 from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
-from repo_mirror.github_api import API as GitHubAPI, SourceAPI as GitHubSourceAPI
+from repo_mirror.github_api import _UPLOAD_ATTEMPT_CALLBACK, API as GitHubAPI, SourceAPI as GitHubSourceAPI
 from repo_mirror.github_api import not_found, same_file, transient_transfer_error, transfer_retry_delay
 from repo_mirror.journal import ReleaseRecoveryError, StarterAssetError, compare_reason
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_call, timed_repository
@@ -66,13 +66,38 @@ def draft_identity_signature(secret, source, tag, target, release_id):
     return hmac.new(secret.encode(), b"repo-mirror:draft-identity:v1\0" + payload, hashlib.sha256).hexdigest()
 
 
-def upload_with_reconciliation(dst, upload_url, data, content_type, assets_url, name):
+def upload_with_reconciliation(dst, upload_url, data, content_type, assets_url, name, *, on_attempt=None):
     """Reconcile ambiguous responses before replay; never remove remote assets."""
     position = data.tell()
+    raw_dst = dst._destination if isinstance(dst, _IdentityGuardedDestination) else dst
+    uses_github_api = (
+        isinstance(raw_dst, GitHubAPI)
+        and "upload" not in vars(raw_dst)
+        and type(raw_dst).upload is GitHubAPI.upload
+    )
     for attempt in range(4):
         data.seek(position)
+        notified = False
+
+        def notify_attempt(current_attempt=attempt):
+            nonlocal notified
+            if not notified:
+                notified = True
+                if current_attempt > 0:
+                    print(f"asset upload retry {current_attempt}/3", file=sys.stderr, flush=True)
+                if on_attempt is not None:
+                    on_attempt()
+
         try:
-            dst.upload(upload_url, data, content_type)
+            if uses_github_api:
+                callback_token = _UPLOAD_ATTEMPT_CALLBACK.set(notify_attempt)
+                try:
+                    dst.upload(upload_url, data, content_type)
+                finally:
+                    _UPLOAD_ATTEMPT_CALLBACK.reset(callback_token)
+            else:
+                notify_attempt()
+                dst.upload(upload_url, data, content_type)
             return
         except Exception as exc:
             conflict = isinstance(exc, HTTPError) and exc.code == 422
@@ -96,7 +121,6 @@ def upload_with_reconciliation(dst, upload_url, data, content_type, assets_url, 
                 raise
             if isinstance(exc, HTTPError):
                 exc.close()
-            print(f"asset upload retry {attempt + 1}/3", file=sys.stderr, flush=True)
             time.sleep(delay)
 
 
@@ -1958,15 +1982,22 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                 )
                                 if journal:
                                     journal.set(key, True)
+                                attempt_made = False
+
+                                def note_upload_attempt():
+                                    nonlocal attempt_made
+                                    attempt_made = True
+
                                 try:
-                                    if was_journaled:
-                                        retried += 1
                                     upload_with_reconciliation(
                                         dst, upload_url, data,
                                         asset.get("content_type") or "application/octet-stream",
                                         target + "/releases/" + str(existing["id"]) + "/assets", asset["name"],
+                                        on_attempt=note_upload_attempt,
                                     )
                                 except Exception as exc:
+                                    if was_journaled and attempt_made:
+                                        retried += 1
                                     detail = error_detail(exc)
                                     if (
                                         isinstance(exc, HTTPError)
@@ -1986,6 +2017,8 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                         raise
                                     upload_failures += 1
                                     continue
+                                if was_journaled and attempt_made:
+                                    retried += 1
                                 fresh_hashes[asset["name"]] = calculated.hexdigest()
                                 if changed:
                                     updated += 1

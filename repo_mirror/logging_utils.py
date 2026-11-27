@@ -127,6 +127,7 @@ SAFE_ERROR_MESSAGES = frozenset(
         "API URL must be credential-free HTTPS",
         "refusing to send destination credentials to non-GitHub host",
         "request retries exhausted",
+        "retry wait limit exceeded",
         "already rate limited by the source or destination host; the 60 s wait limit is exhausted",
         "pagination response is not an array",
         "pagination exceeded safety limit",
@@ -337,6 +338,22 @@ def _network_reason(exc):
     return "transport failure"
 
 
+def _http_error_detail(exc):
+    """Build a redacted HTTP status description with optional safe operation and rate-limit suffix."""
+    detail = f"HTTP {exc.code}"
+    operation = _safe_operation(exc)
+    if operation is not None:
+        rate = None
+        if exc.code == 403:
+            try:
+                rate = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
+            except Exception:
+                pass
+        suffix = "; rate limit remaining=0" if type(rate) is str and rate == "0" else ""
+        detail += f" ({operation[0]} {operation[1]} {operation[2]}{suffix})"
+    return detail
+
+
 def error_detail(exc):
     # Never emit arbitrary exception text, URLs, response bodies or class names.
     """Build a short, redacted description of an exception for public logs."""
@@ -370,24 +387,20 @@ def error_detail(exc):
             else:
                 reason = "unclassified Git failure; inspect safely on a trusted system"
         elif isinstance(exc, HTTPError) and type(exc.code) is int and 100 <= exc.code <= 599:
-            reason = f"HTTP {exc.code}"
+            reason = _http_error_detail(exc)
+        elif (
+            isinstance(exc, RuntimeError)
+            and len(exc.args) == 1
+            and type(exc.args[0]) is str
+            and exc.args[0] in SAFE_ERROR_MESSAGES
+        ):
+            reason = exc.args[0]
         else:
             reason = "operation failed; inspect safely on a trusted system"
         return f"git {phase}: {reason}"
     if isinstance(exc, HTTPError):
         if type(exc.code) is int and 100 <= exc.code <= 599:
-            detail = f"HTTP {exc.code}"
-            operation = _safe_operation(exc)
-            if operation is not None:
-                rate = None
-                if exc.code == 403:
-                    try:
-                        rate = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
-                    except Exception:
-                        pass
-                suffix = "; rate limit remaining=0" if type(rate) is str and rate == "0" else ""
-                detail += f" ({operation[0]} {operation[1]} {operation[2]}{suffix})"
-            return detail
+            return _http_error_detail(exc)
         return "HTTPError"
     if isinstance(exc, URLError):
         # Transport failures previously reported only the class name, which made

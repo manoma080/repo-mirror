@@ -1,6 +1,7 @@
 """github_api: see README for an overview."""
 
 import base64
+import contextvars
 import http.client
 import ipaddress
 import io
@@ -26,6 +27,7 @@ from repo_mirror.logging_utils import timed, timed_call
 _cooldown_lock = threading.Lock()
 _cooldowns = {}
 _MAX_RATE_WAIT = 60
+_UPLOAD_ATTEMPT_CALLBACK = contextvars.ContextVar("_UPLOAD_ATTEMPT_CALLBACK", default=None)
 
 _KNOWN_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
 
@@ -458,6 +460,8 @@ class AppTokenProvider:
             # failure can leave an unused token, but never retries other writes.
             for attempt in range(4):
                 _wait_for_cooldown(host, budget)
+                if attempt > 0:
+                    print(f"app authentication retry {attempt}/3", file=sys.stderr, flush=True)
                 limited = False
                 req = Request(
                     GITHUB + path,
@@ -487,7 +491,6 @@ class AppTokenProvider:
                 except URLError, TimeoutError, ConnectionError:
                     if attempt == 3:
                         raise
-                print(f"app authentication retry {attempt + 1}/3", file=sys.stderr, flush=True)
                 if not limited:
                     delay = 2**attempt
                     if delay > budget[0]:
@@ -558,6 +561,12 @@ class API:
                     if upload:
                         setattr(request, "_original_upload", True)
                     _wait_for_cooldown(parsed.hostname, budget)
+                    if attempt > 0:
+                        print(f"request retry {attempt}/3", file=sys.stderr, flush=True)
+                    if upload:
+                        on_upload_attempt = _UPLOAD_ATTEMPT_CALLBACK.get()
+                        if on_upload_attempt is not None:
+                            on_upload_attempt()
                     setattr(request, "_mirror_metrics", (self.role, "API"))
                     setattr(request, "_mirror_metrics_counted", True)
                     record_api_call(parsed.hostname, self.role, "API", method)
@@ -600,7 +609,6 @@ class API:
                     )
                     if method not in ("GET", "PUT", "PATCH", "DELETE") or attempt == 3:
                         raise
-            print(f"request retry {attempt + 1}/3", file=sys.stderr, flush=True)
             if not rate_limited:
                 delay = 2**attempt
                 if delay > budget[0]:
