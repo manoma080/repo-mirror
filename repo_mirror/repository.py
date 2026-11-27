@@ -29,6 +29,7 @@ from repo_mirror.staleness import observe
 # SHA256SUM, SHA256SUMS, SHA256SUM.txt, SHA256SUMS.txt.
 CHECKSUM_FILE_NAME = re.compile(r"SHA256SUMS?(?:\.txt)?", re.I)
 IDENTITY_SENTINEL = "[repo-mirror:draft-identity:v1]"
+_SHA256_DIGEST_RE = re.compile(r"sha256:[0-9a-fA-F]{64}")
 _UNSET = object()
 
 
@@ -66,6 +67,10 @@ class _IdentityGuardedDestination:
 
     def __getattr__(self, name):
         return getattr(self._destination, name)
+
+    @property
+    def supports_digest_skip(self):
+        return _destination_supports_digest_skip(self._destination)
 
     def verify_pins(self):
         """Re-check pins explicitly, e.g. after a read that concludes state."""
@@ -115,6 +120,32 @@ def _concluding_read(dst, read):
         raise
     _verify_transition_pins(dst)
     return result
+
+
+def _authenticated_source_digest(asset):
+    """Return the normalized sha256 digest asserted by the provider API, or None.
+
+    Never reads SHA256SUMS or any user-uploaded checksum file fallback.
+    """
+    if not isinstance(asset, dict):
+        return None
+    digest = asset.get("digest")
+    if isinstance(digest, str) and _SHA256_DIGEST_RE.fullmatch(digest):
+        return digest.lower()
+    return None
+
+
+def _has_trusted_source_digest(src):
+    """Return True only for the concrete authenticated GitHub source adapter."""
+    return type(src) is ForgejoSourceAdapter
+
+
+def _destination_supports_digest_skip(dst):
+    """Return True only when the destination explicitly advertises digest-skip support."""
+    decl = getattr(type(dst), "supports_digest_skip", None)
+    if isinstance(decl, property):
+        return bool(decl.fget(dst))
+    return decl is True
 
 
 def draft_identity_signature(secret, source, tag, target, release_id):
@@ -1883,36 +1914,34 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         key = keys[asset["name"]] if journal else None
                         was_journaled = journal is not None and key in journal.failures
                         previous = by_name.get(asset["name"])
-                        source_hash = asset.get("digest")
-                        if not (
-                            isinstance(source_hash, str)
-                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", source_hash)
-                        ):
+                        auth_source_digest = _authenticated_source_digest(asset)
+                        source_hash = auth_source_digest
+                        if source_hash is None:
                             source_hash = checksums.get(asset["name"])
                         target_hash = previous.get("digest") if previous else None
                         ident = identity(asset) if cache_enabled else None
                         entry = cached.get(asset["name"]) if ident else None
                         # Only the concrete authenticated GitHub adapter may attest
                         # to the digest in the listing; a checksum-file fallback or
-                        # an arbitrary adapter cannot opt into authenticated-source-digest.
-                        trusted_listing = type(src) is ForgejoSourceAdapter
-                        forgejo_destination = isinstance(dst, ForgejoDestinationAdapter)
+                        # an arbitrary adapter cannot opt into digest-skip paths.
+                        trusted_listing = _has_trusted_source_digest(src)
+                        dst_supports_digest_skip = _destination_supports_digest_skip(dst)
                         has_valid_target_hash = (
                             isinstance(target_hash, str)
-                            and bool(re.fullmatch(r"sha256:[0-9a-fA-F]{64}", target_hash))
+                            and bool(_SHA256_DIGEST_RE.fullmatch(target_hash))
                         )
                         if (
-                            not forgejo_destination
+                            trusted_listing
+                            and dst_supports_digest_skip
                             and type(asset.get("size")) is int
                             and asset["size"] >= 0
                             and previous is not None
                             and type(previous.get("size")) is int
                             and previous["size"] >= 0
                             and asset["size"] == previous["size"]
-                            and isinstance(source_hash, str)
+                            and auth_source_digest is not None
                             and has_valid_target_hash
-                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", source_hash)
-                            and source_hash.lower() == target_hash.lower()
+                            and auth_source_digest == target_hash.lower()
                         ):
                             print(
                                 f"asset {asset_index}/{len(ordered_assets)} unchanged (published SHA-256) reason=matching-published-digests",
@@ -1920,15 +1949,13 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                 flush=True,
                             )
                             if ident:
-                                records[asset["name"]] = dict(ident, sha256=source_hash[7:].lower())
+                                records[asset["name"]] = dict(ident, sha256=auth_source_digest[7:])
                             skipped += 1
                             continue
-                        published = asset.get("digest")
                         if (
                             trusted_listing
-                            and (forgejo_destination or not has_valid_target_hash)
-                            and isinstance(published, str)
-                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", published)
+                            and (not dst_supports_digest_skip or not has_valid_target_hash)
+                            and auth_source_digest is not None
                             and type(asset.get("size")) is int and asset["size"] >= 0
                             and previous is not None and previous.get("state") == "uploaded"
                             and type(previous.get("id")) is int and previous["id"] > 0
@@ -1942,7 +1969,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                     actual = hashlib.sha256()
                                     for chunk in iter(lambda: dest_data.read(CHUNK_SIZE), b""):
                                         actual.update(chunk)
-                                    if actual.hexdigest() == published[7:].lower():
+                                    if actual.hexdigest() == auth_source_digest[7:]:
                                         shortcut_hashes[asset["name"]] = (previous["id"], actual.hexdigest())
                                         if ident:
                                             records[asset["name"]] = dict(ident, sha256=actual.hexdigest())
@@ -1993,14 +2020,12 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                 or data.tell() != asset["size"]
                             ):
                                 raise RuntimeError("source asset size mismatch")
-                            if isinstance(source_hash, str) and re.fullmatch(
-                                r"sha256:[0-9a-fA-F]{64}", source_hash
-                            ):
+                            if auth_source_digest is not None:
                                 data.seek(0)
                                 actual_hash = hashlib.sha256()
                                 for chunk in iter(lambda: data.read(CHUNK_SIZE), b""):
                                     actual_hash.update(chunk)
-                                if actual_hash.hexdigest() != source_hash[7:].lower():
+                                if actual_hash.hexdigest() != auth_source_digest[7:]:
                                     raise RuntimeError("source asset digest mismatch")
                             data.seek(0)
                             calculated = hashlib.sha256()

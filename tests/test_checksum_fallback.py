@@ -51,8 +51,10 @@ class ChecksumFallbackTests(unittest.TestCase):
         dst.assets["SHA256SUMS.txt"] = content
         with patch_everywhere("mirror_git"):
             mirror.mirror_repository(SOURCE, "demo", "dest", src, dst, "token")
-        self.assertNotIn("https://github.com/changed", src.downloads)
-        self.assertNotIn("https://api.github.com/assets/changed", dst.downloads)
+        self.assertIn("https://github.com/changed", src.downloads)
+        self.assertIn("https://api.github.com/assets/changed", dst.downloads)
+        self.assertEqual(dst.deleted, [])
+        self.assertEqual(dst.assets["changed"], b"new")
 
     def test_malformed_or_ambiguous_manifest_falls_back_to_bytes(self):
         h = hashlib.sha256(b"new").hexdigest()

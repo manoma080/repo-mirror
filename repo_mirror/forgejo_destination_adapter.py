@@ -14,6 +14,7 @@ from repo_mirror.github_api import _notify_upload_attempt
 class ForgejoDestinationAdapter:
     supports_target_commitish = True
     verify_empty_body_read_only = True
+    supports_digest_skip = False
 
     def validate_release_source(self, release):
         pass
