@@ -468,15 +468,56 @@ class APICallMetricsTests(unittest.TestCase):
 
     def test_loopback_hosts_are_excluded(self):
         counter = APICallCounter()
-        for host in ("127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST", "localhost.", "127.0.1.1"):
-            counter.record(host, "destination", "API", "GET")
+        loopback_inputs = (
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LOCALHOST",
+            "localhost.",
+            "127.0.1.1",
+            "127.0.0.1:3000",
+            "localhost:3000",
+            "[::1]:3000",
+            "LOCALHOST:80",
+            "user@localhost",
+            "user@127.0.0.1",
+            "user:pass@127.0.0.1:3000",
+            "user@[::1]:3000",
+            "http://127.0.0.1:3000/api",
+            "https://localhost/foo",
+            "http://user:pass@127.0.0.1:3000/api/v1",
+            "foo.localhost",
+            "a.b.localhost.",
+            "FOO.LOCALHOST:8080",
+            "::ffff:127.0.0.1",
+            "[::ffff:127.0.0.1]:3000",
+        )
+        for host in loopback_inputs:
+            with self.subTest(loopback=host):
+                self.assertTrue(github_api._is_loopback_host(host))
+                counter.record(host, "destination", "API", "GET")
         self.assertEqual(counter.snapshot(), {})
         self.assertEqual(
             counter.format_summary(),
             "api_calls total=0 github=0 uploads=0 other=0 graphql=0 by_role=none by_operation=none",
         )
-        counter.record("gitlab.example.test", "source", "API", "GET")
-        self.assertEqual(counter.snapshot(), {("other", "source", "API", "GET"): 1})
+
+        external_inputs = (
+            ("api.github.com", "github"),
+            ("github.com", "other"),
+            ("codeload.github.com", "other"),
+            ("objects.githubusercontent.com", "other"),
+            ("gitlab.example.test", "other"),
+            ("notlocalhost", "other"),
+            ("localhost.example.test", "other"),
+        )
+        for host, expected_bucket in external_inputs:
+            with self.subTest(external=host):
+                self.assertFalse(github_api._is_loopback_host(host))
+                c = APICallCounter()
+                c.record(host, "source", "API", "GET")
+                self.assertEqual(c.snapshot(), {(expected_bucket, "source", "API", "GET"): 1})
 
     def test_bounded_key_space_for_many_distinct_hostnames(self):
         counter = APICallCounter()
@@ -696,6 +737,247 @@ class APICallMetricsTests(unittest.TestCase):
             "api_calls total=1 github=1 uploads=0 other=0 graphql=0 "
             "by_role=source:1 by_operation=api_get:1",
         )
+
+    def _mint_provider_and_capture(self, provider, owner):
+        reset_api_call_metrics()
+        install_resp = _StubResponse(json.dumps({"id": 7, "account": {"login": owner}}).encode())
+        token_resp = _StubResponse(
+            json.dumps({"token": "ghs_tok", "expires_at": "2099-01-01T00:00:00Z"}).encode()
+        )
+        fake_opener = MagicMock()
+        fake_opener.open.side_effect = [install_resp, token_resp]
+        with (
+            patch.object(github_api, "build_opener", return_value=fake_opener),
+            patch.object(
+                github_api.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=b"sig"),
+            ),
+        ):
+            self.assertEqual(provider(), "ghs_tok")
+        return api_call_metrics_snapshot(), format_api_call_summary()
+
+    def test_source_call_sites_record_app_token_mint_as_source_role(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+        from repo_mirror import forgejo_migration, forgejo_schedule, forgejo_sync
+
+        # 1. forgejo_sync.main
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            url = "https://github.com/mirror-owner/mirror-demo"
+            config = tmp / "config.json"
+            config.write_text(json.dumps([url]))
+            token_file = tmp / "token"
+            token_file.write_text("local-token")
+            token_file.chmod(0o600)
+            secret = tmp / "secret"
+            secret.write_text("x" * 32)
+            secret.chmod(0o600)
+            key = tmp / "app.pem"
+            key.write_text("fake-key")
+            key.chmod(0o600)
+            journals = tmp / "journals"
+            journals.mkdir(mode=0o700)
+
+            captured = []
+
+            def fake_sync(args, requested, dest, tok, *rest, **kwargs):
+                captured.append(tok)
+                return 0
+
+            with (
+                patch.dict(os.environ, {"MIRROR_APP_OWNER": "src-owner"}, clear=True),
+                patch("repo_mirror.forgejo_sync.LocalForgejoAPI"),
+                patch("repo_mirror.forgejo_sync.destination_locks", return_value=contextlib.nullcontext()),
+                patch("repo_mirror.forgejo_sync.journal_lock", return_value=contextlib.nullcontext(str(journals))),
+                patch("repo_mirror.forgejo_sync._sync_requested", side_effect=fake_sync),
+            ):
+                rc = forgejo_sync.main([
+                    "--config", str(config),
+                    "--source", url,
+                    "--token-file", str(token_file),
+                    "--timestamp-secret-file", str(secret),
+                    "--journal-dir", str(journals),
+                    "--owner", "dest-owner",
+                    "--app-id", "123",
+                    "--private-key-file", str(key),
+                ])
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(captured), 1)
+            self.assertIsInstance(captured[0], AppTokenProvider)
+            self.assertEqual(captured[0].role, "source")
+            snap, summary = self._mint_provider_and_capture(captured[0], "src-owner")
+            self.assertEqual(
+                snap,
+                {
+                    ("github", "source", "API", "GET"): 1,
+                    ("github", "source", "API", "POST"): 1,
+                },
+            )
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=source:2 ", summary)
+
+            # 2. forgejo_schedule._build_auto_discovery_source_client
+            sched_args = SimpleNamespace(app_id="123", private_key_file=str(key), source_app_owner="src-owner")
+            client = forgejo_schedule._build_auto_discovery_source_client(sched_args)(
+                {"type": "github", "base_url": "https://github.com"}
+            )
+            self.assertIsInstance(client.source_token, AppTokenProvider)
+            self.assertEqual(client.source_token.role, "source")
+            snap, summary = self._mint_provider_and_capture(client.source_token, "src-owner")
+            self.assertEqual(
+                snap,
+                {
+                    ("github", "source", "API", "GET"): 1,
+                    ("github", "source", "API", "POST"): 1,
+                },
+            )
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=source:2 ", summary)
+
+            # 3. forgejo_migration.build_migration (forgejo control repo -> source role)
+            mig_args = SimpleNamespace(
+                forgejo_config_repo="dest-owner/control",
+                forgejo_config_id=42,
+                config_repo=None,
+                owner="dest-owner",
+                port=3000,
+                token_file=str(token_file),
+                journal_dir=str(journals),
+                app_id="123",
+                private_key_file=str(key),
+                source_app_owner="src-owner",
+            )
+            with (
+                patch("repo_mirror.forgejo_control_config.ForgejoControlAPI"),
+                patch("repo_mirror.github_api.SourceAPI") as mock_src,
+            ):
+                tx = forgejo_migration.build_migration(mig_args, "s" * 32)
+                self.assertIsNotNone(tx)
+                mock_src.return_value.request.return_value = {"id": 1}
+                tx.source("https://github.com", "alice", "demo")
+                mig_provider = mock_src.call_args.args[0]
+            self.assertIsInstance(mig_provider, AppTokenProvider)
+            self.assertEqual(mig_provider.role, "source")
+            snap, summary = self._mint_provider_and_capture(mig_provider, "src-owner")
+            self.assertEqual(
+                snap,
+                {
+                    ("github", "source", "API", "GET"): 1,
+                    ("github", "source", "API", "POST"): 1,
+                },
+            )
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=source:2 ", summary)
+
+            # 4. forgejo_migration.build_migration (GitHub config_repo -> destination role)
+            gh_mig_args = SimpleNamespace(
+                forgejo_config_repo=None,
+                config_repo="dest-owner/control",
+                owner="dest-owner",
+                port=3000,
+                token_file=str(token_file),
+                journal_dir=str(journals),
+                app_id="123",
+                private_key_file=str(key),
+            )
+            with patch("repo_mirror.forgejo_git.LocalForgejoAPI"):
+                tx_gh = forgejo_migration.build_migration(gh_mig_args, "s" * 32)
+            self.assertIsNotNone(tx_gh)
+            dest_provider = tx_gh.cas.api._token
+            self.assertIsInstance(dest_provider, AppTokenProvider)
+            self.assertEqual(dest_provider.role, "destination")
+            snap, summary = self._mint_provider_and_capture(dest_provider, "dest-owner")
+            self.assertEqual(
+                snap,
+                {
+                    ("github", "destination", "API", "GET"): 1,
+                    ("github", "destination", "API", "POST"): 1,
+                },
+            )
+            self.assertIn("api_calls total=2 github=2 uploads=0 other=0 graphql=0 by_role=destination:2 ", summary)
+
+    def test_gitlab_assets_ftp_download_counts_attempts_in_other(self):
+        class _FakeSock:
+            def __init__(self):
+                self._chunks = [b"ftpdata", b""]
+
+            def settimeout(self, value):
+                pass
+
+            def makefile(self, *args, **kwargs):
+                return None
+
+            def connect(self, address):
+                pass
+
+            def recv(self, size):
+                return self._chunks.pop(0) if self._chunks else b""
+
+            def close(self):
+                pass
+
+        class _FakeFTP:
+            encoding = "utf-8"
+
+            def getresp(self):
+                return "220 ready"
+
+            def login(self):
+                pass
+
+            def voidcmd(self, cmd):
+                pass
+
+            def sendcmd(self, cmd):
+                if cmd == "EPSV":
+                    return "229 Entering Extended Passive Mode (|||40000|)"
+                return "150 opening"
+
+            def voidresp(self):
+                pass
+
+            def close(self):
+                pass
+
+        with (
+            patch.object(
+                gitlab_assets.socket,
+                "getaddrinfo",
+                return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 21))],
+            ),
+            patch.object(gitlab_assets.socket, "socket", side_effect=lambda *a, **k: _FakeSock()),
+            patch.object(gitlab_assets.ftplib, "FTP", _FakeFTP),
+        ):
+            with gitlab_assets.download_asset("ftp://files.example.test/releases/app.tar.gz", max_bytes=1024) as dl:
+                self.assertFalse(dl.oversize)
+                self.assertEqual(dl.file.read(), b"ftpdata")
+
+        self.assertEqual(
+            api_call_metrics_snapshot(),
+            {("other", "source", "asset", "GET"): 1},
+        )
+        summary = format_api_call_summary()
+        self.assertEqual(
+            summary,
+            "api_calls total=1 github=0 uploads=0 other=1 graphql=0 "
+            "by_role=source:1 by_operation=asset_get:1",
+        )
+        self.assertNotIn("files.example.test", summary)
+
+        # Also verify attempt-level counting when FTP fails after _open begins.
+        reset_api_call_metrics()
+        with (
+            patch.object(
+                gitlab_assets.socket,
+                "getaddrinfo",
+                side_effect=socket.gaierror(socket.EAI_AGAIN, "Temporary failure"),
+            ),
+            patch.object(gitlab_assets.time, "sleep"),
+        ):
+            with self.assertRaises(gitlab_assets.AssetError):
+                with gitlab_assets.download_asset("ftp://files.example.test/releases/app.tar.gz", max_bytes=1024):
+                    pass
+        snapshot = api_call_metrics_snapshot()
+        self.assertGreaterEqual(snapshot.get(("other", "source", "asset", "GET"), 0), 1)
 
 
 if __name__ == "__main__":

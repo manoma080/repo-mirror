@@ -83,7 +83,7 @@ class SyncOwnerOptionTests(unittest.TestCase):
                 patch('repo_mirror.forgejo_sync._sync_requested', return_value=0),
             ):
                 self.assertEqual(forgejo_sync.main(args), 0)
-            provider.assert_called_once_with('123', 'fake-key', 'env-owner')
+            provider.assert_called_once_with('123', 'fake-key', 'env-owner', role='source')
 
     def test_flag_wins_over_env_var(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,7 +97,7 @@ class SyncOwnerOptionTests(unittest.TestCase):
                 patch('repo_mirror.forgejo_sync._sync_requested', return_value=0),
             ):
                 self.assertEqual(forgejo_sync.main(args), 0)
-            provider.assert_called_once_with('123', 'fake-key', 'flag-owner')
+            provider.assert_called_once_with('123', 'fake-key', 'flag-owner', role='source')
 
     def test_missing_both_fails_closed_without_defaulting_to_destination_owner(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -263,7 +263,7 @@ class SchedulerIdentityOptionsTests(unittest.TestCase):
                 patch('repo_mirror.github_api.AppTokenProvider') as provider,
             ):
                 forgejo_schedule._build_auto_discovery_source_client(args_env)(rule)
-            provider.assert_called_once_with('123', 'fake-key', 'env-owner')
+            provider.assert_called_once_with('123', 'fake-key', 'env-owner', role='source')
 
             args_flag = SimpleNamespace(app_id='123', private_key_file=str(key), source_app_owner='flag-owner')
             with (
@@ -271,7 +271,7 @@ class SchedulerIdentityOptionsTests(unittest.TestCase):
                 patch('repo_mirror.github_api.AppTokenProvider') as provider,
             ):
                 forgejo_schedule._build_auto_discovery_source_client(args_flag)(rule)
-            provider.assert_called_once_with('123', 'fake-key', 'flag-owner')
+            provider.assert_called_once_with('123', 'fake-key', 'flag-owner', role='source')
 
             with (
                 patch.dict(os.environ, _clean_env(), clear=True),
@@ -307,7 +307,7 @@ class MigrationBuilderOwnerTests(unittest.TestCase):
         ):
             tx = forgejo_migration.build_migration(SimpleNamespace(**base_args), secret)
         self.assertIsNotNone(tx)
-        provider.assert_called_once_with('123', 'fixture-val', 'env-owner', 'personal')
+        provider.assert_called_once_with('123', 'fixture-val', 'env-owner', 'personal', role='source')
 
         with (
             patch.dict(os.environ, _clean_env(MIRROR_APP_OWNER='env-owner'), clear=True),
@@ -315,7 +315,7 @@ class MigrationBuilderOwnerTests(unittest.TestCase):
             patch('repo_mirror.github_api.AppTokenProvider') as provider,
         ):
             forgejo_migration.build_migration(SimpleNamespace(**base_args, source_app_owner='flag-owner'), secret)
-        provider.assert_called_once_with('123', 'fixture-val', 'flag-owner', 'personal')
+        provider.assert_called_once_with('123', 'fixture-val', 'flag-owner', 'personal', role='source')
 
         with (
             patch.dict(os.environ, _clean_env(), clear=True),

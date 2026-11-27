@@ -527,7 +527,7 @@ def main(argv=None):
             if key_id == secret_id:
                 raise ValueError('recovery secret must be separate')
             app_owner = resolve_source_app_owner(args.source_app_owner)
-            token = AppTokenProvider(args.app_id, key, app_owner)
+            token = AppTokenProvider(args.app_id, key, app_owner, role='source')
         elif args.use_github_token and not args.app_id and not args.private_key_file:
             token = os.environ.get('GITHUB_TOKEN')
             if not token or '\n' in token or '\r' in token:

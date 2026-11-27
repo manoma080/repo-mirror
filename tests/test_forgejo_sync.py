@@ -140,7 +140,7 @@ class RunnerTests(unittest.TestCase):
                 result = forgejo_sync.main(['--config', config, '--source', URL, '--token-file', token_file,
                                             '--timestamp-secret-file', secret, '--journal-dir', directory, '--owner', 'local', '--app-id', '123', '--private-key-file', key, '--source-app-owner', 'mirror-owner'])
             self.assertEqual(result, 0)
-            app.assert_called_once_with('123', 'fake-key', 'mirror-owner')
+            app.assert_called_once_with('123', 'fake-key', 'mirror-owner', role='source')
             self.assertIs(refs.call_args.kwargs['source_token'], provider)
             self.assertIs(github.call_args.args[0], provider)
             github.return_value.pages.assert_called_once_with('https://api.github.com/repos/mirror-owner/mirror-fixture-org-d-fixture-repo/releases')

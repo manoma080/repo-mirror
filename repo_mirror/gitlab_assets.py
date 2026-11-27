@@ -113,7 +113,7 @@ def _open(url, timeout, headers=None):
     parts = validate_url(url, allow_query=True)
     host = parts.hostname
     port = {'https': 443, 'http': 80, 'ftp': 21}[parts.scheme]
-    if parts.scheme in ('http', 'https'):
+    if parts.scheme in ('http', 'https', 'ftp'):
         record_api_call(host, "source", "asset", "GET")
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     if not addresses:

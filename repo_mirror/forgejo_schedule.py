@@ -154,7 +154,7 @@ def _build_auto_discovery_source_client(args):
             if args.app_id and args.private_key_file:
                 private_key = read_secure_file(args.private_key_file)[0]
                 app_owner = resolve_source_app_owner(getattr(args, 'source_app_owner', None))
-                token = AppTokenProvider(args.app_id, private_key, app_owner)
+                token = AppTokenProvider(args.app_id, private_key, app_owner, role='source')
             else:
                 token = os.environ.get('GITHUB_TOKEN') or None
                 if token and ('\n' in token or '\r' in token):

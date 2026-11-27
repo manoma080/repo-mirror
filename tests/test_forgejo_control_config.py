@@ -72,7 +72,7 @@ class ForgejoControlConfigTests(unittest.TestCase):
               patch('repo_mirror.github_api.SourceAPI') as source):
             tx = build_migration(args, SECRET)
             assert tx is not None
-            provider.assert_called_once_with('123', 'test-fixture', 'mirror-owner', 'personal')
+            provider.assert_called_once_with('123', 'test-fixture', 'mirror-owner', 'personal', role='source')
             source.return_value.request.return_value = {'id': 1234}
             tx.source('https://github.com', 'newowner', 'repo')
             source.assert_called_once_with(provider.return_value)

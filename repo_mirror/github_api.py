@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlsplit
 from urllib.request import HTTPErrorProcessor, HTTPRedirectHandler, Request, build_opener
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, MAX_ASSET_SIZE, NAME
@@ -31,19 +31,60 @@ _KNOWN_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OP
 
 
 def _is_loopback_host(host):
-    # Do not count loopback traffic (127.0.0.1, ::1, localhost): the local
-    # Forgejo runner is not rate-limited and would pollute the metric.
-    if not isinstance(host, str) or not host:
+    # Deliberately exclude loopback traffic (127.0.0.0/8, ::1, localhost,
+    # *.localhost per RFC 6761) regardless of whether the caller passes a bare
+    # host, host:port, userinfo@host:port, or full URL: the local Forgejo
+    # runner is not rate-limited and would pollute the metric. Pure and cheap
+    # (string/IP parsing only — no DNS or network lookups).
+    if not isinstance(host, str):
         return False
-    candidate = host.strip().lower().rstrip(".")
-    if candidate.startswith("[") and candidate.endswith("]"):
-        candidate = candidate[1:-1]
-    if candidate == "localhost":
+    raw = host.strip()
+    if not raw:
+        return False
+
+    candidate = raw
+    if "://" in raw:
+        try:
+            extracted = urlsplit(raw).hostname
+        except ValueError:
+            return False
+        if not extracted:
+            return False
+        candidate = extracted
+    else:
+        # Handle bare IPv6 literals (e.g. "::1") before authority parsing, since
+        # unbracketed colons are ambiguous with a host:port separator.
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            try:
+                extracted = urlsplit("//" + raw).hostname
+            except ValueError:
+                return False
+            if not extracted:
+                return False
+            candidate = extracted
+        else:
+            return ip.is_loopback or (
+                isinstance(ip, ipaddress.IPv6Address)
+                and ip.ipv4_mapped is not None
+                and ip.ipv4_mapped.is_loopback
+            )
+
+    candidate = candidate.strip().lower().rstrip(".")
+    if not candidate:
+        return False
+    if candidate == "localhost" or candidate.endswith(".localhost"):
         return True
     try:
-        return ipaddress.ip_address(candidate).is_loopback
+        ip = ipaddress.ip_address(candidate)
     except ValueError:
         return False
+    return ip.is_loopback or (
+        isinstance(ip, ipaddress.IPv6Address)
+        and ip.ipv4_mapped is not None
+        and ip.ipv4_mapped.is_loopback
+    )
 
 
 def _host_bucket(host):
