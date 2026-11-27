@@ -1836,12 +1836,15 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                 )
                 starter_assets = [asset for asset in assets if asset.get("state") == "starter"]
                 if starter_assets:
-                    # Auto-heal only provable placeholders: zero-byte ``starter`` assets whose
-                    # name matches a source asset this release is about to re-upload, with a
-                    # usable upload_url, no pending marker, and no name collisions. Such an
-                    # asset is an empty leftover from an interrupted upload, so delete-then-
-                    # upload converges to the same end state as a fresh upload. Anything else
-                    # still refuses and asks for manual reconciliation.
+                    # Auto-heal only provable placeholders: ``starter`` assets whose name
+                    # matches a source asset this release is about to re-upload, with a
+                    # usable upload_url, no pending marker, and no name collisions.
+                    # A ``starter`` asset is an unfinished upload and can never be
+                    # downloaded; its recorded ``size`` is the *declared* size from the
+                    # upload request, not the bytes transferred, so a real one is not
+                    # zero-byte (observed: 44 MB declared, ``state=starter``). Delete-then-
+                    # upload therefore converges to the same end state as a fresh upload.
+                    # Anything else still refuses and asks for manual reconciliation.
                     can_heal_starters = (
                         not pending
                         and len(by_name) == len(assets)
@@ -1852,7 +1855,7 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                             type(starter.get("id")) is int
                             and starter["id"] > 0
                             and type(starter.get("size")) is int
-                            and starter["size"] == 0
+                            and starter["size"] >= 0
                             and isinstance(starter.get("name"), str)
                             and starter["name"] in source_by_name
                             and starter["name"] not in oversized_link_names
