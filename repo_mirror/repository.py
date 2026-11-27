@@ -516,7 +516,16 @@ def mirror_repository(source, name, owner, src, dst, token, account_type="organi
             raise RuntimeError("destination default branch changed; refusing to switch")
         if actual != branch:
             dst.request("PATCH", target, {"default_branch": branch})
-            if dst.request("GET", target).get("default_branch") != branch:
+            # A read immediately after the write can observe the previous default:
+            # GitHub does not guarantee read-after-write here, and a destination is
+            # created and switched within the same run. Re-read a few times before
+            # concluding the change failed, so a brand-new repository does not fail
+            # spuriously. A change that never lands still fails.
+            for attempt in range(5):
+                if dst.request("GET", target).get("default_branch") == branch:
+                    break
+                time.sleep(0.25 * (attempt + 1))
+            else:
                 raise RuntimeError("destination default branch change not verified")
         expected_default = branch
 
