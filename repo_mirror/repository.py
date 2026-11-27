@@ -14,6 +14,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, NAME
+from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
 from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from repo_mirror.gitlab_source_adapter import GitLabSourceAdapter
 from repo_mirror.git_sync import create_archive, mirror_git, set_archive_default
@@ -1056,7 +1057,6 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         raise ValueError("tag verification failed")
                     from repo_mirror import gitlab_assets
                     from repo_mirror.constants import MAX_ASSET_SIZE
-                    from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
 
 
                     links = src.list_release_assets(tag)
@@ -1894,11 +1894,39 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                         entry = cached.get(asset["name"]) if ident else None
                         # Only the concrete authenticated GitHub adapter may attest
                         # to the digest in the listing; a checksum-file fallback or
-                        # an arbitrary adapter cannot opt into this shortcut.
+                        # an arbitrary adapter cannot opt into authenticated-source-digest.
                         trusted_listing = type(src) is ForgejoSourceAdapter
+                        forgejo_destination = isinstance(dst, ForgejoDestinationAdapter)
+                        has_valid_target_hash = (
+                            isinstance(target_hash, str)
+                            and bool(re.fullmatch(r"sha256:[0-9a-fA-F]{64}", target_hash))
+                        )
+                        if (
+                            not forgejo_destination
+                            and type(asset.get("size")) is int
+                            and asset["size"] >= 0
+                            and previous is not None
+                            and type(previous.get("size")) is int
+                            and previous["size"] >= 0
+                            and asset["size"] == previous["size"]
+                            and isinstance(source_hash, str)
+                            and has_valid_target_hash
+                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", source_hash)
+                            and source_hash.lower() == target_hash.lower()
+                        ):
+                            print(
+                                f"asset {asset_index}/{len(ordered_assets)} unchanged (published SHA-256) reason=matching-published-digests",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            if ident:
+                                records[asset["name"]] = dict(ident, sha256=source_hash[7:].lower())
+                            skipped += 1
+                            continue
                         published = asset.get("digest")
                         if (
                             trusted_listing
+                            and (forgejo_destination or not has_valid_target_hash)
                             and isinstance(published, str)
                             and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", published)
                             and type(asset.get("size")) is int and asset["size"] >= 0
@@ -1921,29 +1949,6 @@ def mirror_releases(source, name, owner, src, dst, upstream, target, marker, *, 
                                         print("asset unchanged reason=authenticated-source-digest", file=sys.stderr, flush=True)
                                         skipped += 1
                                         continue
-                        if (
-                            not trusted_listing
-                            and type(asset.get("size")) is int
-                            and asset["size"] >= 0
-                            and previous is not None
-                            and type(previous.get("size")) is int
-                            and previous["size"] >= 0
-                            and asset["size"] == previous["size"]
-                            and isinstance(source_hash, str)
-                            and isinstance(target_hash, str)
-                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", source_hash)
-                            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", target_hash)
-                            and source_hash.lower() == target_hash.lower()
-                        ):
-                            print(
-                                f"asset {asset_index}/{len(ordered_assets)} unchanged (published SHA-256) reason=matching-published-digests",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                            if ident:
-                                records[asset["name"]] = dict(ident, sha256=source_hash[7:].lower())
-                            skipped += 1
-                            continue
                         if (
                             not trusted_listing
                             and isinstance(entry, dict)

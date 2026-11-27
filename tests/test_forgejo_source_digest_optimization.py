@@ -5,9 +5,14 @@ from unittest.mock import patch
 
 import mirror
 from mirror_test_support import patch_everywhere
+from repo_mirror.forgejo_destination_adapter import ForgejoDestinationAdapter
 from repo_mirror.forgejo_source_adapter import ForgejoSourceAdapter
 from test_published_digest import DigestDestination, DigestSource, digest
 from test_reconcile_assets import SOURCE
+
+
+class ForgejoDigestDestination(DigestDestination, ForgejoDestinationAdapter):
+    pass
 
 
 class Listing(DigestSource):
@@ -57,7 +62,7 @@ class ForgejoSourceDigestTests(unittest.TestCase):
         self.assertEqual(self.dst.deleted, [])
 
     def test_tampering_after_initial_hash_is_not_finalized(self):
-        self.dst.metadata = digest(b'new')
+        self.dst = ForgejoDigestDestination(digest(b'new'))
         download = self.dst.download
         def tamper(url, out):
             download(url, out)
@@ -77,8 +82,7 @@ class ForgejoSourceDigestTests(unittest.TestCase):
         self.assertEqual(self.dst.deleted, ['changed'])
 
     def test_matching_destination_metadata_does_not_hide_tampering(self):
-        self.dst.metadata = digest(b'new')
-        self.dst.assets['changed'] = b'old'
+        self.dst = ForgejoDigestDestination(digest(b'new'), b'old')
         with self.assertRaisesRegex(RuntimeError, 'destination asset digest mismatch'):
             self.run_mirror()
         self.assertEqual(self.client.downloads, ['changed'])
