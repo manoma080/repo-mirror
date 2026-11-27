@@ -19,6 +19,7 @@ class GitHubMetadataRedirectPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / 'config.json'
             config.write_text(json.dumps({
+                'graphql': False,
                 'destinations': {'main': {'account_type': 'personal'}},
                 'repositories': [{'source': {'url': 'https://github.com/old/repo'}, 'mirrors': {'main': {}}}],
             }))

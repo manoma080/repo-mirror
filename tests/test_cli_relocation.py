@@ -17,6 +17,7 @@ from repo_mirror.migration_attestation import github_claim, sign
 SOURCE['mirror']['legacy']['signature'] = sign(github_claim(SOURCE, 'repo', 'dest'), 'fixture-signing-secret-0123456789abcdef')
 OLD_MARKER = source_marker({**SOURCE, 'owner': 'old'}, 'old-repo')
 CONFIG = {
+    'graphql': False,
     'destinations': {'main': {'account_type': 'personal'}},
     'repositories': [{
         'source': {'url': 'https://github.com/new/repo', 'id': 1},

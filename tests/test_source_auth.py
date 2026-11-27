@@ -86,6 +86,7 @@ class SourceAuthTests(unittest.TestCase):
 
     def test_main_uses_separate_clients_for_github_and_forgejo(self):
         config_doc = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [
                 {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},

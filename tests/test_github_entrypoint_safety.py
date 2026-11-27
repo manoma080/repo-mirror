@@ -276,6 +276,7 @@ class EntrypointSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config.json'
             path.write_text(json.dumps({
+                'graphql': False,
                 'destinations': {'main': {'account_type': 'personal'}},
                 'repositories': [{'source': {'type': 'gitlab', 'url': 'https://gitlab.com/group/project', 'id': 42},
                                   'mirrors': {'main': {}}}],

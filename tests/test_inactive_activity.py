@@ -154,6 +154,7 @@ class CliInactiveWarningTests(unittest.TestCase):
 
     def run_cli(self, threshold):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": "https://github.com/alice/demo"}, "mirrors": {"main": {}}}],
         }

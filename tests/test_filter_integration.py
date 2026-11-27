@@ -17,6 +17,7 @@ class FilterIntegrationTests(unittest.TestCase):
 
     def test_selected_only(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [
                 {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},

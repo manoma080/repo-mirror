@@ -60,6 +60,7 @@ class FakeOnboardingStore:
 
 def _base_config(auto_discoveries=None, repositories=None):
     cfg = {
+        "graphql": False,
         "destinations": {"main": {"account_type": "personal"}},
         "repositories": list(repositories or []),
     }

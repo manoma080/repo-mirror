@@ -169,6 +169,7 @@ class CliHostLimitsTests(unittest.TestCase):
     def test_same_host_is_capped_while_other_hosts_continue(self):
         config = {
             "host_concurrency_limits": {"github.com": 1, "git.example": 2},
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [
                 {"source": {"url": f"https://github.com/alice/{name}"}, "mirrors": {"main": {}}}

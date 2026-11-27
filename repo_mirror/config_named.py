@@ -2,6 +2,8 @@
 
 import re
 
+GRAPHQL_CONFIG_KEY = 'graphql'
+
 _AUTO_DISCOVERY_KEYS = frozenset(
     {
         'url',
@@ -146,8 +148,10 @@ def normalize_config(config):
     if not isinstance(config, dict):
         raise ValueError("config must be an object")
     reject_legacy_config(config)
-    if set(config) - {CONFIG_KEY, 'auto_discoveries'} != {'destinations', 'repositories'}:
+    if set(config) - {CONFIG_KEY, 'auto_discoveries', GRAPHQL_CONFIG_KEY} != {'destinations', 'repositories'}:
         raise ValueError('invalid named config fields')
+    if GRAPHQL_CONFIG_KEY in config and type(config[GRAPHQL_CONFIG_KEY]) is not bool:
+        raise ValueError('graphql must be a boolean')
     HostLimits.from_config(config.get(CONFIG_KEY), default=1)
     normalized_rules = _normalize_auto_discoveries(config['auto_discoveries']) if 'auto_discoveries' in config else []
     rules_by_url = {r['url']: r for r in normalized_rules}
@@ -257,6 +261,8 @@ def normalize_config(config):
     result = {'account_type': 'personal' if explicit else settings['account_type'], 'repositories': entries}
     if CONFIG_KEY in config:
         result[CONFIG_KEY] = dict(config[CONFIG_KEY])
+    if GRAPHQL_CONFIG_KEY in config:
+        result[GRAPHQL_CONFIG_KEY] = config[GRAPHQL_CONFIG_KEY]
     if explicit:
         result['destination_profile'] = settings.copy()
     if 'auto_discoveries' in config:

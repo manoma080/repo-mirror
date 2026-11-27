@@ -38,7 +38,7 @@ MAX_PAGINATION_PAGES = 10_000
 _RATE_LIMIT_SELECTION = "rateLimit { cost remaining resetAt }"
 
 _REPOSITORY_FIELDS = (
-    "databaseId name nameWithOwner owner { login } url "
+    "databaseId name nameWithOwner description owner { login } url "
     "isPrivate isArchived isEmpty isDisabled "
     "defaultBranchRef { name target { oid } } "
     "pushedAt updatedAt"
@@ -293,6 +293,74 @@ def build_release_assets_query(
     return query, variables
 
 
+def normalize_repository_node(node):
+    """Convert a GraphQL repository node into a REST-shaped metadata dict."""
+    if node is None:
+        return None
+    if not isinstance(node, dict):
+        raise GraphQLError("invalid GraphQL response")
+
+    database_id = node.get("databaseId")
+    if type(database_id) is not int or database_id <= 0:
+        raise GraphQLError("GraphQL repository response missing integer databaseId")
+
+    description = node.get("description")
+    if description is not None and not isinstance(description, str):
+        raise GraphQLError("invalid GraphQL response")
+
+    url = node.get("url")
+    if url is not None and not isinstance(url, str):
+        raise GraphQLError("invalid GraphQL response")
+
+    name = node.get("name")
+    if name is not None and not isinstance(name, str):
+        raise GraphQLError("invalid GraphQL response")
+
+    full_name = node.get("nameWithOwner")
+    if full_name is not None and not isinstance(full_name, str):
+        raise GraphQLError("invalid GraphQL response")
+
+    default_branch_ref = node.get("defaultBranchRef")
+    if default_branch_ref is None:
+        default_branch = None
+    elif isinstance(default_branch_ref, dict):
+        default_branch = default_branch_ref.get("name")
+        if default_branch is not None and not isinstance(default_branch, str):
+            raise GraphQLError("invalid GraphQL response")
+    else:
+        raise GraphQLError("invalid GraphQL response")
+
+    result = {
+        "id": database_id,
+        "name": name,
+        "full_name": full_name,
+        "description": description,
+        "html_url": url,
+        "clone_url": (url.rstrip("/") + ".git") if url else None,
+        "default_branch": default_branch,
+    }
+
+    owner_node = node.get("owner")
+    if isinstance(owner_node, dict) and isinstance(owner_node.get("login"), str):
+        result["owner"] = {"login": owner_node["login"]}
+
+    for gql_key, rest_key in (
+        ("isPrivate", "private"),
+        ("isArchived", "archived"),
+        ("isDisabled", "disabled"),
+    ):
+        val = node.get(gql_key)
+        if type(val) is bool:
+            result[rest_key] = val
+
+    for gql_key, rest_key in (("pushedAt", "pushed_at"), ("updatedAt", "updated_at")):
+        val = node.get(gql_key)
+        if isinstance(val, str):
+            result[rest_key] = val
+
+    return result
+
+
 class GraphQLClient:
     """GitHub GraphQL client sharing REST auth, cooldowns, and API call accounting."""
 
@@ -327,7 +395,7 @@ class GraphQLClient:
             _publish_cooldown_delay(GRAPHQL_HOST, delay if delay is not None else _MAX_RATE_WAIT)
         return rate_limit
 
-    def _execute(self, query, variables=None, *, estimated_nodes=None):
+    def _execute(self, query, variables=None, *, estimated_nodes=None, allowed_not_found_aliases=None):
         """Low-level GraphQL POST transport; every call must pass the point-budget gate."""
         if not isinstance(query, str) or not query.strip():
             raise ValueError("invalid GraphQL query parameters")
@@ -421,8 +489,25 @@ class GraphQLClient:
         if errors is not None:
             if not isinstance(errors, list):
                 raise GraphQLError("invalid GraphQL response")
-            if errors:
-                mapped = _map_graphql_errors(errors)
+            if allowed_not_found_aliases is not None:
+                remaining_errors = [
+                    err
+                    for err in errors
+                    if not (
+                        isinstance(err, dict)
+                        and isinstance(err.get("type"), str)
+                        and err["type"].upper() == "NOT_FOUND"
+                        and isinstance(err.get("path"), list)
+                        and len(err["path"]) == 1
+                        and err["path"][0] in allowed_not_found_aliases
+                        and isinstance(data, dict)
+                        and data.get(err["path"][0]) is None
+                    )
+                ]
+            else:
+                remaining_errors = errors
+            if remaining_errors:
+                mapped = _map_graphql_errors(remaining_errors)
                 if "RATE_LIMITED" in mapped.error_types:
                     delay = _parse_reset_delay(rate_limit.get("resetAt")) if rate_limit else None
                     _publish_cooldown_delay(GRAPHQL_HOST, delay if delay is not None else _MAX_RATE_WAIT)
@@ -432,11 +517,41 @@ class GraphQLClient:
             raise GraphQLError("invalid GraphQL response")
         return data
 
-    def fetch_repositories(self, repos):
+    def fetch_repositories(self, repos, *, allow_not_found=False):
         """Fetch metadata for up to 100 repositories in a single bounded query."""
         query, variables, aliases = build_repositories_query(repos, max_points=self.max_points)
-        data = self._execute(query, variables, estimated_nodes=len(aliases))
+        allowed = frozenset(aliases) if allow_not_found else None
+        data = self._execute(
+            query,
+            variables,
+            estimated_nodes=len(aliases),
+            allowed_not_found_aliases=allowed,
+        )
         return [data.get(alias) for alias in aliases]
+
+    def fetch_repositories_metadata(self, repos, *, allow_not_found=False):
+        """Fetch and normalize repository metadata in batches of up to 100 repositories."""
+        deduped = []
+        seen = set()
+        for owner, name in repos:
+            key = (owner.lower(), name.lower())
+            if key not in seen:
+                seen.add(key)
+                deduped.append((owner, name, key))
+
+        if not deduped:
+            return {}
+
+        results = {}
+        for offset in range(0, len(deduped), MAX_REPOS_PER_QUERY):
+            chunk = deduped[offset : offset + MAX_REPOS_PER_QUERY]
+            nodes = self.fetch_repositories(
+                [(owner, name) for owner, name, _ in chunk],
+                allow_not_found=allow_not_found,
+            )
+            for (_, _, key), node in zip(chunk, nodes):
+                results[key] = normalize_repository_node(node)
+        return results
 
     def fetch_repository(self, owner, name):
         """Fetch metadata for a single repository."""

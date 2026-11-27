@@ -38,7 +38,8 @@ class ConcurrentMirroringTests(unittest.TestCase):
         config.write_text(
             json.dumps(
                 {
-                    "destinations": {"main": {"account_type": "organization"}},
+                    "graphql": False,
+            "destinations": {"main": {"account_type": "organization"}},
                     "repositories": [
                         {"source": {"url": "https://github.com/alice/one"}, "mirrors": {"main": {}}},
                         {"source": {"url": "https://github.com/alice/two"}, "mirrors": {"main": {}}},
@@ -117,7 +118,8 @@ class ConcurrentMirroringTests(unittest.TestCase):
         config.write_text(
             json.dumps(
                 {
-                    "destinations": {"main": {"account_type": "organization"}},
+                    "graphql": False,
+            "destinations": {"main": {"account_type": "organization"}},
                     "repositories": [
                         {"source": {"url": f"https://github.com/alice/repo{i}"}, "mirrors": {"main": {}}}
                         for i in range(10)
@@ -170,6 +172,7 @@ class ConcurrentMirroringTests(unittest.TestCase):
     def test_temporary_log_creation_failure_does_not_stop_remaining_repositories(self):
         config = self.tmp_path / "config.json"
         config.write_text(json.dumps({
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {"source": {"url": f"https://github.com/alice/repo{i}"}, "mirrors": {"main": {}}}
@@ -205,6 +208,7 @@ class ConcurrentMirroringTests(unittest.TestCase):
     def test_log_read_failure_does_not_stop_remaining_repositories(self):
         config = self.tmp_path / "config.json"
         config.write_text(json.dumps({
+            "graphql": False,
             "destinations": {"main": {"account_type": "organization"}},
             "repositories": [
                 {"source": {"url": f"https://github.com/alice/repo{i}"}, "mirrors": {"main": {}}}

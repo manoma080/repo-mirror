@@ -55,6 +55,7 @@ class NamedGitHubConfigTest(unittest.TestCase):
         import tempfile
         from unittest.mock import patch
 
+        self.config['graphql'] = False
         self.config['repositories'].insert(0, {
             'source': {'url': 'https://github.com/Owner/First'},
             'mirrors': {'main': {'name': 'first-copy'}}})
@@ -82,6 +83,7 @@ class NamedGitHubConfigTest(unittest.TestCase):
         from urllib.error import HTTPError
         from email.message import Message
 
+        self.config['graphql'] = False
         self.config['repositories'].insert(0, {
             'source': {'url': 'https://github.com/Owner/First'},
             'mirrors': {'main': {'name': 'first-copy'}}})

@@ -15,7 +15,7 @@ import mirror
 
 class DiagnosticsIntegrationTests(unittest.TestCase):
     def run_main(self, source, destination):
-        config = {"destinations": {"main": {"account_type": "organization"}},
+        config = {"graphql": False, "destinations": {"main": {"account_type": "organization"}},
                   "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}]}
         output = io.StringIO()
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as f:

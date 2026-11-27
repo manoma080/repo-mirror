@@ -36,6 +36,7 @@ REPO_URL = API + '/repos/dest/'
 def config_document(name='mirror-old-owner-repo', source_owner='old-owner',
                     source_name='repo', source_id=1, destination_id=2):
     return {
+        'graphql': False,
         'destinations': {'github-dest': {'account_type': 'personal'}},
         'repositories': [
             {'source': {'url': f'https://github.com/{source_owner}/{source_name}', 'id': source_id},

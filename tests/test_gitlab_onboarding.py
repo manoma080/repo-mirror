@@ -98,6 +98,7 @@ class GitLabOnboardingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'config.json'
             path.write_text(json.dumps({
+                'graphql': False,
                 'destinations': {'d': {'account_type': 'personal'}},
                 'repositories': [{'source': {'type': 'gitlab', 'url': URL}, 'mirrors': {'d': {}}}],
             }))

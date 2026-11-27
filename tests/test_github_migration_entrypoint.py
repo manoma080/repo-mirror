@@ -13,7 +13,7 @@ class GitHubMigrationEntrypointTests(unittest.TestCase):
     def test_batch_reports_relocation_without_publishing_configuration(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config = Path(tmp_dir) / 'config.json'
-            original = {'destinations': {'main': {'account_type': 'personal'}}, 'repositories': [
+            original = {'graphql': False, 'destinations': {'main': {'account_type': 'personal'}}, 'repositories': [
                 {'source': {'url': 'https://github.com/old/repo', 'id': 1},
                  'mirrors': {'main': {'name': 'copy', 'id': 2}}}]}
             config.write_text(json.dumps(original), encoding='utf-8')

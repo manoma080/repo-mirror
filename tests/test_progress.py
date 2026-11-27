@@ -21,6 +21,7 @@ class ProgressTests(unittest.TestCase):
 
     def test_main_reports_counts_and_never_logs_destination(self):
         config = {
+            "graphql": False,
             "destinations": {"main": {"account_type": "personal"}},
             "repositories": [{"source": {"url": f"https://github.com/{SOURCE['owner']}/demo"}, "mirrors": {"main": {}}}],
         }
