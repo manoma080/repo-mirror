@@ -673,7 +673,7 @@ class RetryAccountingTests(unittest.TestCase):
         attempts = [0]
         stderr = io.StringIO()
         with (
-            patch("repo_mirror.repository.time.sleep"),
+            patch("repo_mirror.repository.time.sleep") as mock_sleep,
             redirect_stderr(stderr),
             self.assertRaises(RuntimeError) as caught,
         ):
@@ -694,6 +694,11 @@ class RetryAccountingTests(unittest.TestCase):
         self.assertEqual(raw_mock.upload.call_count, 1)
         self.assertEqual(attempts[0], 1)
         self.assertNotIn("asset upload retry", stderr.getvalue())
+        # Reconciliation and backoff must both run before the refusal, so the
+        # second pin check is the one guarding the retry upload itself.
+        raw_mock.pages.assert_called_once()
+        mock_sleep.assert_called_once()
+        self.assertEqual(check_calls[0], 2)
 
     def test_identity_guarded_mock_destination_attempted_retry_counts_and_logs_once(self):
         direct_429 = _http_error(429, {"Retry-After": "0"}, url="https://uploads.github.com/asset")
