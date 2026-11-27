@@ -452,7 +452,7 @@ class GraphQLMetadataBatchTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
                     cli.main(["--config", cfg.name])
-            self.assertIn("failed: ValueError", stderr.getvalue())
+            self.assertIn("failed: source repository id mismatch", stderr.getvalue())
             mock_git.assert_not_called()
             mock_releases.assert_not_called()
             with self.assertRaisesRegex(ValueError, "source repository id mismatch"):
@@ -520,7 +520,7 @@ class GraphQLMetadataBatchTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
                     cli.main(["--config", cfg.name])
-            self.assertIn("failed: ValueError", stderr.getvalue())
+            self.assertIn("failed: destination repository id mismatch or missing", stderr.getvalue())
             self.assertEqual(len(src_rest_gets), 2)
             self.assertEqual(len(dst_rest_gets), 2)
             mock_git.assert_not_called()
@@ -1400,7 +1400,7 @@ class GraphQLMetadataBatchTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "1 repositories failed"):
                     cli.main(["--config", cfg.name])
 
-        self.assertIn("failed: ValueError", stderr.getvalue())
+        self.assertIn("failed: destination repository id mismatch or missing", stderr.getvalue())
         self.assertEqual(src_calls, [GRAPHQL_URL])
         self.assertEqual(dst_calls, [("POST", GRAPHQL_URL)])
         mock_git.assert_not_called()
