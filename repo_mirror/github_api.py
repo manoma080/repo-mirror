@@ -521,6 +521,121 @@ class AppTokenProvider:
         return result["token"], expiry.timestamp()
 
 
+def _extract_link_header(response):
+    """Extract and combine any HTTP ``Link`` headers from a response object."""
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = get_all("Link")
+        if isinstance(values, (list, tuple)):
+            joined = ", ".join(v for v in values if isinstance(v, str) and v)
+            return joined or None
+        return values if isinstance(values, str) and values else None
+    if isinstance(headers, dict):
+        values = [v for k, v in headers.items() if isinstance(k, str) and k.lower() == "link" and isinstance(v, str) and v]
+        return ", ".join(values) if values else None
+    get = getattr(headers, "get", None)
+    if callable(get):
+        value = get("Link")
+        return value if isinstance(value, str) and value else None
+    return None
+
+
+def _parse_link_header(header_value):
+    """Parse an RFC 8288 ``Link`` header, returning ``(next_url, all_rels)``."""
+    if not isinstance(header_value, str) or not header_value.strip():
+        return None, frozenset()
+    n = len(header_value)
+    i = 0
+    next_url = None
+    all_rels = set()
+
+    def skip_to_next_entry(pos):
+        in_quotes = False
+        while pos < n:
+            ch = header_value[pos]
+            if in_quotes:
+                if ch == "\\" and pos + 1 < n:
+                    pos += 2
+                    continue
+                if ch == '"':
+                    in_quotes = False
+            else:
+                if ch == '"':
+                    in_quotes = True
+                elif ch == ",":
+                    return pos + 1
+            pos += 1
+        return pos
+
+    while i < n:
+        while i < n and (header_value[i].isspace() or header_value[i] == ","):
+            i += 1
+        if i >= n:
+            break
+        if header_value[i] != "<":
+            i = skip_to_next_entry(i)
+            continue
+        gt = header_value.find(">", i + 1)
+        if gt == -1:
+            break
+        target = header_value[i + 1 : gt].strip()
+        i = gt + 1
+        entry_rels = set()
+        while i < n:
+            while i < n and header_value[i].isspace():
+                i += 1
+            if i >= n:
+                break
+            if header_value[i] == ",":
+                i += 1
+                break
+            if header_value[i] != ";":
+                i = skip_to_next_entry(i)
+                break
+            i += 1
+            param_start = i
+            while i < n and header_value[i] not in "=;,":
+                i += 1
+            if i >= n or header_value[i] != "=":
+                continue
+            name = header_value[param_start:i].strip().lower()
+            i += 1
+            while i < n and header_value[i].isspace():
+                i += 1
+            if i < n and header_value[i] == '"':
+                i += 1
+                chars = []
+                while i < n:
+                    ch = header_value[i]
+                    if ch == "\\" and i + 1 < n:
+                        chars.append(header_value[i + 1])
+                        i += 2
+                    elif ch == '"':
+                        i += 1
+                        break
+                    else:
+                        chars.append(ch)
+                        i += 1
+                value = "".join(chars)
+            else:
+                val_start = i
+                while i < n and header_value[i] not in ";,":
+                    i += 1
+                value = header_value[val_start:i].strip()
+            if name == "rel":
+                for token in value.split():
+                    if token:
+                        entry_rels.add(token.lower())
+        if target and entry_rels:
+            all_rels.update(entry_rels)
+            if "next" in entry_rels and next_url is None:
+                next_url = target
+    return next_url, frozenset(all_rels)
+
+
 class API:
     """Small HTTP client for one GitHub or Forgejo API (JSON requests, retries, safe logging)."""
 
@@ -528,6 +643,7 @@ class API:
         self._token = token
         self.role = "destination" if token else "source"
         self.opener = build_opener(SafeRedirect(), UploadErrorProcessor())
+        self._response_state = threading.local()
 
     @property
     def token(self):
@@ -576,6 +692,9 @@ class API:
                     record_api_call(parsed.hostname, self.role, "API", method)
                     with self.opener.open(request, timeout=60) as response:
                         _publish_exhausted_response(parsed.hostname, response)
+                        state = getattr(self, "_response_state", None)
+                        if state is not None:
+                            state.link = _extract_link_header(response)
                         return response.read()
                 except HTTPError as e:
                     setattr(
@@ -648,14 +767,36 @@ class API:
 
     def pages(self, url):
         result = []
+        separator = "&" if "?" in url else "?"
+        next_url = None
+        following_links = False
+        seen_urls = set()
+        state = getattr(self, "_response_state", None)
         for page in range(1, 10001):
-            separator = "&" if "?" in url else "?"
-            items = self.request("GET", f"{url}{separator}per_page=100&limit=100&page={page}")
+            request_url = next_url if next_url is not None else f"{url}{separator}per_page=100&limit=100&page={page}"
+            if request_url in seen_urls:
+                raise RuntimeError("pagination cycle detected")
+            seen_urls.add(request_url)
+            if state is not None:
+                state.link = None
+            items = self.request("GET", request_url)
             if not isinstance(items, list):
                 raise ValueError("pagination response is not an array")
             result.extend(items)
             if not items:
                 return result
+            link_header = getattr(state, "link", None) if state is not None else None
+            next_link, rels = _parse_link_header(link_header)
+            if next_link is not None:
+                resolved = urljoin(request_url, next_link)
+                if https_origin(resolved) != https_origin(url):
+                    raise ValueError("pagination link outside configured origin")
+                next_url = resolved
+                following_links = True
+            else:
+                if following_links or "last" in rels:
+                    return result
+                next_url = None
         raise RuntimeError("pagination exceeded safety limit")
 
     @timed_call(lambda self, url, output: f"network target={self.role} operation=asset method=GET")
