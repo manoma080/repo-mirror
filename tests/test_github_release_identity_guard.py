@@ -615,9 +615,9 @@ class ReleaseIdentityGuardTests(unittest.TestCase):
         self.assertGreater(new_counts['reads'], 0)
         self.assertGreater(new_counts['writes'], 0)
         self.assertEqual(baseline_counts['guard_calls'], baseline_counts['reads'] + baseline_counts['writes'])
-        # Concluding reads on this fixture: one tag lookup per release (2)
-        # and one destination release snapshot (1).
+        # Concluding reads on this fixture: one tag lookup on the first release (1)
+        # and one destination release snapshot (1); the second release reuses the snapshot.
         self.assertEqual(baseline_counts['transition_checks'], 0)
-        self.assertEqual(new_counts['transition_checks'], 3)
+        self.assertEqual(new_counts['transition_checks'], 2)
         self.assertEqual(new_counts['guard_calls'], new_counts['writes'] + new_counts['transition_checks'])
         self.assertLess(new_counts['guard_calls'], baseline_counts['guard_calls'])

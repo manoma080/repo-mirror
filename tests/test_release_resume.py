@@ -156,7 +156,7 @@ class ReleaseTests(unittest.TestCase):
         }
         called = []
 
-        def run(source, name, *args):
+        def run(source, name, *args, **kwargs):
             called.append(name)
             if name == "one":
                 raise RuntimeError("broken")
