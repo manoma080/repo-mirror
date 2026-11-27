@@ -29,7 +29,10 @@ GRAPHQL_HOST = "api.github.com"
 MAX_REPOS_PER_QUERY = 100
 MAX_RELEASES_PER_REPO = 100
 MAX_ASSETS_PER_RELEASE = 100
-DEFAULT_MAX_FANOUT = 20_000
+DEFAULT_ASSETS_PER_RELEASE = 0
+NODES_PER_POINT = 100
+DEFAULT_MAX_POINTS = 20
+HARD_MAX_POINTS = 20
 MAX_PAGINATION_PAGES = 10_000
 
 _RATE_LIMIT_SELECTION = "rateLimit { cost remaining resetAt }"
@@ -123,10 +126,38 @@ def _validate_repos_list(repos):
     return normalized
 
 
-def _validate_fanout(fan_out, max_fanout):
-    cap = _validate_positive_int(max_fanout, minimum=1)
-    if fan_out > cap:
-        raise ValueError("GraphQL query fan-out exceeds configured limit")
+def estimate_query_points(total_nodes):
+    """Estimate GraphQL point cost using GitHub's documented scoring formula.
+
+    We budget against GitHub's documented rule (total requested nodes / 100,
+    minimum 1, rounded up so boundary queries are never underestimated).
+    GitHub's measured connection-call cost is currently cheaper, but the client
+    must survive the documented model rather than bet on the measured one.
+    """
+    nodes = _validate_positive_int(total_nodes, minimum=1)
+    return max(1, (nodes + NODES_PER_POINT - 1) // NODES_PER_POINT)
+
+
+def _clamp_max_points(max_points):
+    cap = _validate_positive_int(max_points, minimum=1)
+    return min(cap, HARD_MAX_POINTS)
+
+
+def _validate_point_budget(total_nodes, max_points):
+    cap = _clamp_max_points(max_points)
+    estimated_points = estimate_query_points(total_nodes)
+    if estimated_points > cap:
+        raise ValueError("GraphQL query estimated point cost exceeds budget")
+    return estimated_points, total_nodes
+
+
+def _is_mutation_query(query):
+    for line in query.splitlines():
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        return stripped.startswith("mutation")
+    return False
 
 
 def _parse_reset_delay(reset_at):
@@ -141,10 +172,10 @@ def _parse_reset_delay(reset_at):
     return dt.timestamp() - time.time()
 
 
-def build_repositories_query(repos, *, max_fanout=DEFAULT_MAX_FANOUT):
+def build_repositories_query(repos, *, max_points=DEFAULT_MAX_POINTS):
     """Build a bounded GraphQL query for up to 100 repositories' metadata."""
     normalized = _validate_repos_list(repos)
-    _validate_fanout(len(normalized), max_fanout)
+    _validate_point_budget(len(normalized), max_points)
 
     var_defs = []
     fields = []
@@ -168,16 +199,16 @@ def build_releases_query(
     repos,
     *,
     releases_first=MAX_RELEASES_PER_REPO,
-    assets_first=MAX_ASSETS_PER_RELEASE,
+    assets_first=DEFAULT_ASSETS_PER_RELEASE,
     cursors=None,
-    max_fanout=DEFAULT_MAX_FANOUT,
+    max_points=DEFAULT_MAX_POINTS,
 ):
     """Build a bounded GraphQL query for repository releases and optional release assets."""
     normalized = _validate_repos_list(repos)
     releases_count = _validate_positive_int(releases_first, minimum=1, maximum=MAX_RELEASES_PER_REPO)
     assets_count = _validate_positive_int(assets_first, minimum=0, maximum=MAX_ASSETS_PER_RELEASE)
-    fan_out = len(normalized) * releases_count * (assets_count if assets_count > 0 else 1)
-    _validate_fanout(fan_out, max_fanout)
+    total_nodes = len(normalized) * (1 + releases_count * (1 + assets_count))
+    _validate_point_budget(total_nodes, max_points)
 
     if cursors is not None:
         if not isinstance(cursors, (list, tuple)) or len(cursors) != len(normalized):
@@ -231,7 +262,7 @@ def build_release_assets_query(
     *,
     assets_first=MAX_ASSETS_PER_RELEASE,
     after=None,
-    max_fanout=DEFAULT_MAX_FANOUT,
+    max_points=DEFAULT_MAX_POINTS,
 ):
     """Build a bounded GraphQL query for one release's assets."""
     owner, name = _validate_repo_ref(owner, name)
@@ -240,7 +271,8 @@ def build_release_assets_query(
     if after is not None and (not isinstance(after, str) or not after):
         raise ValueError("invalid GraphQL pagination cursor")
     assets_count = _validate_positive_int(assets_first, minimum=1, maximum=MAX_ASSETS_PER_RELEASE)
-    _validate_fanout(assets_count, max_fanout)
+    total_nodes = 2 + assets_count
+    _validate_point_budget(total_nodes, max_points)
 
     query = (
         "query($owner: String!, $name: String!, $tagName: String!, $assetsFirst: Int!, $after: String) { "
@@ -264,10 +296,12 @@ def build_release_assets_query(
 class GraphQLClient:
     """GitHub GraphQL client sharing REST auth, cooldowns, and API call accounting."""
 
-    def __init__(self, api, *, max_fanout=DEFAULT_MAX_FANOUT):
+    def __init__(self, api, *, max_points=DEFAULT_MAX_POINTS):
         self._api = api
-        self.max_fanout = _validate_positive_int(max_fanout, minimum=1)
+        self.max_points = _clamp_max_points(max_points)
         self.last_rate_limit = None
+        self.last_estimated_points = None
+        self.last_estimated_nodes = None
 
     def _resolve_token(self, parsed):
         origin = getattr(self._api, "trusted_api_origin", None)
@@ -288,17 +322,22 @@ class GraphQLClient:
         if type(cost) is int and cost >= 0:
             record_graphql_points(cost)
         remaining = rate_limit.get("remaining")
-        if remaining == 0:
+        if type(remaining) is int and remaining == 0:
             delay = _parse_reset_delay(rate_limit.get("resetAt"))
             _publish_cooldown_delay(GRAPHQL_HOST, delay if delay is not None else _MAX_RATE_WAIT)
         return rate_limit
 
-    def execute(self, query, variables=None):
-        """Low-level GraphQL POST escape hatch; prefer bounded fetch_* helpers."""
+    def _execute(self, query, variables=None, *, estimated_nodes=None):
+        """Low-level GraphQL POST transport; every call must pass the point-budget gate."""
         if not isinstance(query, str) or not query.strip():
             raise ValueError("invalid GraphQL query parameters")
         if variables is not None and not isinstance(variables, dict):
             raise ValueError("invalid GraphQL query parameters")
+        if estimated_nodes is None:
+            raise ValueError("GraphQL query point estimate is required")
+        estimated_points, total_nodes = _validate_point_budget(estimated_nodes, self.max_points)
+        self.last_estimated_points = estimated_points
+        self.last_estimated_nodes = total_nodes
 
         parsed = urlparse(GRAPHQL_URL)
         if parsed.scheme != "https" or parsed.username or parsed.password:
@@ -309,7 +348,7 @@ class GraphQLClient:
             payload["variables"] = variables
         body = json.dumps(payload).encode("utf-8")
 
-        is_mutation = query.lstrip().startswith("mutation")
+        is_mutation = _is_mutation_query(query)
         role = getattr(self._api, "role", "source")
         budget = [_MAX_RATE_WAIT]
         raw = None
@@ -395,8 +434,8 @@ class GraphQLClient:
 
     def fetch_repositories(self, repos):
         """Fetch metadata for up to 100 repositories in a single bounded query."""
-        query, variables, aliases = build_repositories_query(repos, max_fanout=self.max_fanout)
-        data = self.execute(query, variables)
+        query, variables, aliases = build_repositories_query(repos, max_points=self.max_points)
+        data = self._execute(query, variables, estimated_nodes=len(aliases))
         return [data.get(alias) for alias in aliases]
 
     def fetch_repository(self, owner, name):
@@ -409,7 +448,7 @@ class GraphQLClient:
         name,
         *,
         releases_per_page=MAX_RELEASES_PER_REPO,
-        assets_per_release=MAX_ASSETS_PER_RELEASE,
+        assets_per_release=DEFAULT_ASSETS_PER_RELEASE,
         max_pages=MAX_PAGINATION_PAGES,
     ):
         """Fetch releases for one repository using cursor-only pagination."""
@@ -424,9 +463,10 @@ class GraphQLClient:
                 releases_first=releases_per_page,
                 assets_first=assets_per_release,
                 cursors=[cursor],
-                max_fanout=self.max_fanout,
+                max_points=self.max_points,
             )
-            data = self.execute(query, variables)
+            estimated_nodes = 1 + releases_per_page * (1 + assets_per_release)
+            data = self._execute(query, variables, estimated_nodes=estimated_nodes)
             repo_node = data.get(aliases[0])
             if repo_node is None:
                 return results
@@ -481,9 +521,9 @@ class GraphQLClient:
                 tag_name,
                 assets_first=assets_per_page,
                 after=cursor,
-                max_fanout=self.max_fanout,
+                max_points=self.max_points,
             )
-            data = self.execute(query, variables)
+            data = self._execute(query, variables, estimated_nodes=2 + assets_per_page)
             repo_node = data.get("repository")
             if repo_node is None:
                 return results

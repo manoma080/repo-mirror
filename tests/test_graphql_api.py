@@ -17,8 +17,10 @@ from repo_mirror.github_api import (
     reset_api_call_metrics,
 )
 from repo_mirror.graphql_api import (
-    DEFAULT_MAX_FANOUT,
+    DEFAULT_ASSETS_PER_RELEASE,
+    DEFAULT_MAX_POINTS,
     GRAPHQL_URL,
+    HARD_MAX_POINTS,
     MAX_ASSETS_PER_RELEASE,
     MAX_RELEASES_PER_REPO,
     MAX_REPOS_PER_QUERY,
@@ -27,6 +29,7 @@ from repo_mirror.graphql_api import (
     build_release_assets_query,
     build_releases_query,
     build_repositories_query,
+    estimate_query_points,
 )
 from repo_mirror.logging_utils import error_detail
 
@@ -134,7 +137,7 @@ class GraphQLClientTests(unittest.TestCase):
                 client = GraphQLClient(api)
                 stderr = io.StringIO()
                 with contextlib.redirect_stderr(stderr), self.assertRaises(GraphQLError) as caught:
-                    client.execute("query { viewer { login } rateLimit { cost remaining } }")
+                    client.fetch_repository("alice", "demo")
 
                 exc = caught.exception
                 self.assertEqual(str(exc), expected_safe)
@@ -178,11 +181,11 @@ class GraphQLClientTests(unittest.TestCase):
                     if status == 403 and not headers:
                         # Headerless secondary 403: attempt 0 sleeps 60s, attempt 1 publishes 120s cooldown and re-raises HTTPError.
                         with self.assertRaises(HTTPError):
-                            client.execute("query { viewer { login } }")
+                            client.fetch_repository("alice", "demo")
                         sleep.assert_called_once_with(60)
                     else:
                         with self.assertRaises(HTTPError) as caught:
-                            client.execute("query { viewer { login } }")
+                            client.fetch_repository("alice", "demo")
                         sleep.assert_not_called()
                         self.assertEqual(
                             error_detail(caught.exception),
@@ -202,7 +205,7 @@ class GraphQLClientTests(unittest.TestCase):
         gql_api = API("synthetic-token")
         gql_api.opener.open = MagicMock(side_effect=AssertionError("GraphQL opener must not be called"))
         with self.assertRaisesRegex(RuntimeError, "already rate limited"):
-            GraphQLClient(gql_api).execute("query { viewer { login } }")
+            GraphQLClient(gql_api).fetch_repository("alice", "demo")
 
     def test_total_invariant_holds_with_rest_and_graphql_mixed(self):
         rest = API("synthetic-token")
@@ -332,25 +335,25 @@ class GraphQLClientTests(unittest.TestCase):
         self.assertEqual(variables["name99"], "repo-99")
         self.assertIn("rateLimit { cost remaining resetAt }", query)
 
-        # 2 repos * 100 releases * 100 assets == 20,000 == DEFAULT_MAX_FANOUT
-        _, _, rel_aliases = build_releases_query(
-            [("alice", "one"), ("alice", "two")],
-            releases_first=MAX_RELEASES_PER_REPO,
-            assets_first=MAX_ASSETS_PER_RELEASE,
-        )
-        self.assertEqual(rel_aliases, ["r0", "r1"])
+        # 2 repos * 100 releases * 100 assets == 20,202 nodes == 203 points > DEFAULT_MAX_POINTS -> refused
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            build_releases_query(
+                [("alice", "one"), ("alice", "two")],
+                releases_first=MAX_RELEASES_PER_REPO,
+                assets_first=MAX_ASSETS_PER_RELEASE,
+            )
 
-        # 3 repos * 100 releases * 100 assets == 30,000 > DEFAULT_MAX_FANOUT -> refused
-        with self.assertRaisesRegex(ValueError, "GraphQL query fan-out exceeds configured limit"):
+        # 3 repos * 100 releases * 100 assets == 30,303 nodes == 304 points > DEFAULT_MAX_POINTS -> refused
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
             build_releases_query(
                 [("alice", "one"), ("alice", "two"), ("alice", "three")],
                 releases_first=MAX_RELEASES_PER_REPO,
                 assets_first=MAX_ASSETS_PER_RELEASE,
             )
 
-        # Custom tighter fan-out cap is enforced on client helpers too
-        client = GraphQLClient(SourceAPI("synthetic-token"), max_fanout=50)
-        with self.assertRaisesRegex(ValueError, "GraphQL query fan-out exceeds configured limit"):
+        # Custom tighter point budget is enforced on client helpers too (111 nodes == 2 points > 1)
+        client = GraphQLClient(SourceAPI("synthetic-token"), max_points=1)
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
             client.fetch_releases("alice", "demo", releases_per_page=10, assets_per_release=10)
 
         # Per-dimension bounds and invalid parameters refused
@@ -367,7 +370,139 @@ class GraphQLClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid GraphQL query parameters"):
             build_releases_query([("alice", "demo")], releases_first=True)
 
-        self.assertEqual(DEFAULT_MAX_FANOUT, 20_000)
+        self.assertEqual(DEFAULT_MAX_POINTS, 20)
+        self.assertEqual(HARD_MAX_POINTS, 20)
+        self.assertEqual(DEFAULT_ASSETS_PER_RELEASE, 0)
+
+    def test_reviewer_a_reproductions_and_override_attempts_fail(self):
+        # Reproduction 1: 2 repos x 100 releases x 100 assets (20,202 nodes -> 203 points)
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            build_releases_query(
+                [("o", "r1"), ("o", "r2")],
+                releases_first=100,
+                assets_first=100,
+            )
+
+        # Reproduction 2: 100 repos x 100 releases x 2 assets (30,100 nodes -> 301 points)
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            build_releases_query(
+                [("o", f"r{i}") for i in range(100)],
+                releases_first=100,
+                assets_first=2,
+            )
+
+        # Reproduction 3: override attempts via max_points=1_000_000 or max_fanout=1_000_000
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            build_releases_query(
+                [("o", f"r{i}") for i in range(100)],
+                releases_first=100,
+                assets_first=100,
+                max_points=1_000_000,
+            )
+        with self.assertRaises(TypeError):
+            build_releases_query([("o", "r1")], max_fanout=1_000_000)
+
+        api = SourceAPI("synthetic-token")
+        api.opener.open = MagicMock(side_effect=AssertionError("opener must not be called"))
+        client = GraphQLClient(api, max_points=1_000_000)
+        self.assertEqual(client.max_points, HARD_MAX_POINTS)
+        client.max_points = 1_000_000
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            client.fetch_releases("alice", "demo", releases_per_page=100, assets_per_release=100)
+        api.opener.open.assert_not_called()
+
+    def test_no_public_execute_bypass_and_private_gate_enforced(self):
+        self.assertFalse(hasattr(GraphQLClient, "execute"))
+        api = SourceAPI("synthetic-token")
+        api.opener.open = MagicMock(side_effect=AssertionError("opener must not be called"))
+        client = GraphQLClient(api)
+
+        with self.assertRaisesRegex(ValueError, "GraphQL query point estimate is required"):
+            client._execute("query { viewer { login } }")
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            client._execute("query { viewer { login } }", estimated_nodes=2001)
+        api.opener.open.assert_not_called()
+        self.assertEqual(api_call_metrics_snapshot(), {})
+
+    def test_default_fetch_releases_fits_inside_budget(self):
+        api = SourceAPI("synthetic-token")
+        captured_bodies = []
+
+        def fake_open(req, timeout=60):
+            captured_bodies.append(json.loads(req.data.decode("utf-8")))
+            return _StubResponse(
+                {
+                    "data": {
+                        "r0": {
+                            "releases": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [{"databaseId": 1, "tagName": "v1"}],
+                            }
+                        },
+                        "rateLimit": {"cost": 1, "remaining": 4999},
+                    }
+                }
+            )
+
+        api.opener.open = MagicMock(side_effect=fake_open)
+        client = GraphQLClient(api)
+        releases = client.fetch_releases("alice", "demo")
+
+        self.assertEqual([r["tagName"] for r in releases], ["v1"])
+        self.assertEqual(len(captured_bodies), 1)
+        self.assertEqual(captured_bodies[0]["variables"]["releasesFirst"], 100)
+        self.assertNotIn("releaseAssets", captured_bodies[0]["query"])
+        self.assertEqual(client.last_estimated_nodes, 101)
+        self.assertEqual(client.last_estimated_points, 2)
+        self.assertEqual(graphql_points_total(), 1)
+
+    def test_over_budget_refuses_before_send_and_boundary_call_succeeds(self):
+        self.assertEqual(estimate_query_points(1), 1)
+        self.assertEqual(estimate_query_points(100), 1)
+        self.assertEqual(estimate_query_points(101), 2)
+        self.assertEqual(estimate_query_points(1901), 20)
+        self.assertEqual(estimate_query_points(2000), 20)
+        self.assertEqual(estimate_query_points(2001), 21)
+
+        # Over-budget query refuses before opener is called
+        blocked_api = SourceAPI("synthetic-token")
+        blocked_api.opener.open = MagicMock(side_effect=AssertionError("opener must not be called"))
+        blocked_client = GraphQLClient(blocked_api)
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            blocked_client.fetch_releases("alice", "demo", releases_per_page=100, assets_per_release=100)
+        blocked_api.opener.open.assert_not_called()
+        self.assertEqual(api_call_metrics_snapshot(), {})
+
+        # 100 releases x 18 assets = 1 + 100 * 19 = 1,901 nodes -> 20 points (at budget) succeeds
+        ok_api = SourceAPI("synthetic-token")
+        ok_api.opener.open = MagicMock(
+            return_value=_StubResponse(
+                {
+                    "data": {
+                        "r0": {
+                            "releases": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [{"databaseId": 1, "tagName": "v1"}],
+                            }
+                        },
+                        "rateLimit": {"cost": 3, "remaining": 4997},
+                    }
+                }
+            )
+        )
+        ok_client = GraphQLClient(ok_api)
+        releases = ok_client.fetch_releases("alice", "demo", releases_per_page=100, assets_per_release=18)
+        self.assertEqual(len(releases), 1)
+        ok_api.opener.open.assert_called_once()
+        self.assertEqual(ok_client.last_estimated_nodes, 1901)
+        self.assertEqual(ok_client.last_estimated_points, 20)
+        self.assertEqual(graphql_points_total(), 3)
+
+        # 100 releases x 19 assets = 1 + 100 * 20 = 2,001 nodes -> 21 points (1 over budget) refuses before send
+        ok_api.opener.open.reset_mock()
+        with self.assertRaisesRegex(ValueError, "GraphQL query estimated point cost exceeds budget"):
+            ok_client.fetch_releases("alice", "demo", releases_per_page=100, assets_per_release=19)
+        ok_api.opener.open.assert_not_called()
 
     def test_no_token_query_text_or_response_body_reaches_log(self):
         token = "ghs_secretGraphQLTokenValue1234567890"
