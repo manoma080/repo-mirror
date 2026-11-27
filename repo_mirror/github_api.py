@@ -27,6 +27,81 @@ _cooldown_lock = threading.Lock()
 _cooldowns = {}
 _MAX_RATE_WAIT = 60
 
+_KNOWN_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
+
+
+class APICallCounter:
+    """Thread-safe counter for outbound HTTP request attempts keyed by (host, role, operation, method)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = {}
+
+    def record(self, host, role, operation, method):
+        normalized_host = host.lower() if isinstance(host, str) and host else "unknown"
+        normalized_role = role if role in ("source", "destination") else "unknown"
+        normalized_operation = operation if operation in ("API", "asset", "asset-hop", "graphql") else "API"
+        upper_method = method.upper() if isinstance(method, str) else ""
+        normalized_method = upper_method if upper_method in _KNOWN_METHODS else "REQUEST"
+        key = (normalized_host, normalized_role, normalized_operation, normalized_method)
+        with self._lock:
+            self._counts[key] = self._counts.get(key, 0) + 1
+
+    def reset(self):
+        with self._lock:
+            self._counts.clear()
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._counts)
+
+    def format_summary(self):
+        counts = self.snapshot()
+        total = sum(counts.values())
+        github = 0
+        uploads = 0
+        other = 0
+        graphql = 0
+        by_role = {}
+        by_operation = {}
+        for (host, role, operation, method), count in counts.items():
+            if host == "api.github.com":
+                github += count
+            elif host == "uploads.github.com":
+                uploads += count
+            else:
+                other += count
+            if operation == "graphql":
+                graphql += count
+            by_role[role] = by_role.get(role, 0) + count
+            op_key = f"{operation.lower().replace('-', '_')}_{method.lower()}"
+            by_operation[op_key] = by_operation.get(op_key, 0) + count
+        role_part = ",".join(f"{k}:{v}" for k, v in sorted(by_role.items())) if by_role else "none"
+        op_part = ",".join(f"{k}:{v}" for k, v in sorted(by_operation.items())) if by_operation else "none"
+        return (
+            f"api_calls total={total} github={github} uploads={uploads} "
+            f"other={other} graphql={graphql} by_role={role_part} by_operation={op_part}"
+        )
+
+
+_api_call_counter = APICallCounter()
+
+
+def record_api_call(host, role, operation, method):
+    _api_call_counter.record(host, role, operation, method)
+
+
+def reset_api_call_metrics():
+    _api_call_counter.reset()
+
+
+def api_call_metrics_snapshot():
+    return _api_call_counter.snapshot()
+
+
+def format_api_call_summary():
+    return _api_call_counter.format_summary()
+
 
 def _wait_for_cooldown(host, budget=None):
     if budget is None:
@@ -147,13 +222,27 @@ class UploadErrorProcessor(HTTPErrorProcessor):
 class SafeRedirect(HTTPRedirectHandler):
     """HTTP redirect handler that re-checks each redirect target before following it."""
 
+    def https_request(self, request):
+        if not getattr(request, "_mirror_metrics_counted", False):
+            role, operation = getattr(request, "_mirror_metrics", ("source", "asset"))
+            setattr(request, "_mirror_metrics", (role, operation))
+            setattr(request, "_mirror_metrics_counted", True)
+            record_api_call(urlparse(request.full_url).hostname, role, operation, request.get_method())
+        return request
+
+    http_request = https_request
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urlparse(newurl)
         if target.scheme != "https" or target.username or target.password:
             raise ValueError("unsafe redirect")
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected and urlparse(req.full_url).netloc.lower() != target.netloc.lower():
-            redirected.remove_header("Authorization")
+        if redirected is not None:
+            role, operation = getattr(req, "_mirror_metrics", ("source", "asset"))
+            next_operation = "asset-hop" if operation == "asset" else operation
+            setattr(redirected, "_mirror_metrics", (role, next_operation))
+            if urlparse(req.full_url).netloc.lower() != target.netloc.lower():
+                redirected.remove_header("Authorization")
         return redirected
 
 
@@ -283,6 +372,9 @@ class AppTokenProvider:
                     },
                 )
                 try:
+                    setattr(req, "_mirror_metrics", ("destination", "API"))
+                    setattr(req, "_mirror_metrics_counted", True)
+                    record_api_call(host, "destination", "API", method)
                     with opener.open(req, timeout=60) as response:
                         _publish_exhausted_response(host, response)
                         return json.load(response)
@@ -367,6 +459,9 @@ class API:
                     if upload:
                         setattr(request, "_original_upload", True)
                     _wait_for_cooldown(parsed.hostname, budget)
+                    setattr(request, "_mirror_metrics", (self.role, "API"))
+                    setattr(request, "_mirror_metrics_counted", True)
+                    record_api_call(parsed.hostname, self.role, "API", method)
                     with self.opener.open(request, timeout=60) as response:
                         _publish_exhausted_response(parsed.hostname, response)
                         return response.read()
@@ -493,6 +588,9 @@ class API:
                 },
             )
             try:
+                setattr(request, "_mirror_metrics", (self.role, "asset"))
+                setattr(request, "_mirror_metrics_counted", True)
+                record_api_call(parsed.hostname, self.role, "asset", "GET")
                 with self.opener.open(request, timeout=60) as response:
                     copy_asset(response, output)
             except HTTPError as exc:
@@ -523,6 +621,7 @@ class API:
                 raw = socket.socket(family, socktype, proto)
                 raw.settimeout(60)
                 try:
+                    record_api_call(parsed.hostname, self.role, "asset-hop", "GET")
                     raw.connect(address)
                     tls = ssl.create_default_context().wrap_socket(raw, server_hostname=parsed.hostname)
                     conn = http.client.HTTPSConnection(parsed.hostname, port, timeout=60)
