@@ -460,8 +460,6 @@ class AppTokenProvider:
             # failure can leave an unused token, but never retries other writes.
             for attempt in range(4):
                 _wait_for_cooldown(host, budget)
-                if attempt > 0:
-                    print(f"app authentication retry {attempt}/3", file=sys.stderr, flush=True)
                 limited = False
                 req = Request(
                     GITHUB + path,
@@ -475,6 +473,8 @@ class AppTokenProvider:
                     },
                 )
                 try:
+                    if attempt > 0:
+                        print(f"app authentication retry {attempt}/3", file=sys.stderr, flush=True)
                     setattr(req, "_mirror_metrics", (self.role, "API"))
                     setattr(req, "_mirror_metrics_counted", True)
                     record_api_call(host, self.role, "API", method)
@@ -522,6 +522,15 @@ class API:
         self._token = token
         self.role = "destination" if token else "source"
         self.opener = build_opener(SafeRedirect(), UploadErrorProcessor())
+
+    @property
+    def emits_attempt_callback(self):
+        return (
+            "upload" not in vars(self)
+            and "_request" not in vars(self)
+            and type(self).upload is API.upload
+            and type(self)._request is API._request
+        )
 
     @property
     def token(self):
@@ -660,8 +669,17 @@ class API:
         for attempt in range(4):
             output.seek(position)
             output.truncate()
+            notified = False
+
+            def notify_attempt(current_attempt=attempt):
+                nonlocal notified
+                if not notified:
+                    notified = True
+                    if current_attempt > 0:
+                        print(f"asset download retry {current_attempt}/3 target={self.role}", file=sys.stderr, flush=True)
+
             try:
-                return _asset_download_once(self, url, output)
+                return _asset_download_once(self, url, output, on_attempt=notify_attempt)
             except Exception as exc:
                 output.seek(position)
                 output.truncate()
@@ -672,10 +690,9 @@ class API:
                     raise
                 if isinstance(exc, HTTPError):
                     exc.close()
-                print(f"asset download retry {attempt + 1}/3 target={self.role}", file=sys.stderr, flush=True)
                 time.sleep(delay)
 
-    def _download_once(self, url, output):
+    def _download_once(self, url, output, *, on_attempt=None):
         if self.token:
             parsed = urlparse(url)
             if (
@@ -694,6 +711,8 @@ class API:
                     "Authorization": "Bearer " + self.token,
                 },
             )
+            if on_attempt is not None:
+                on_attempt()
             try:
                 setattr(request, "_mirror_metrics", (self.role, "asset"))
                 setattr(request, "_mirror_metrics_counted", True)
@@ -726,6 +745,8 @@ class API:
                 if not ips or (trusted_origin is None and any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in ips)):
                     raise ValueError("asset address is not public")
                 family, socktype, proto, _, address = addresses[0]
+                if on_attempt is not None:
+                    on_attempt()
                 raw = socket.socket(family, socktype, proto)
                 raw.settimeout(60)
                 try:

@@ -8,11 +8,16 @@ from urllib.parse import parse_qs, urlsplit
 
 from repo_mirror.forgejo_local import source_identity
 from repo_mirror.forgejo_releases import ForgejoReleases, SyncConflict, _id
+from repo_mirror.github_api import _UPLOAD_ATTEMPT_CALLBACK
 
 
 class ForgejoDestinationAdapter:
     supports_target_commitish = True
     verify_empty_body_read_only = True
+
+    @property
+    def emits_attempt_callback(self):
+        return "upload" not in vars(self) and type(self).upload is ForgejoDestinationAdapter.upload
 
     def validate_release_source(self, release):
         pass
@@ -193,6 +198,9 @@ class ForgejoDestinationAdapter:
         size = data.tell() - start
         data.seek(start)
         self.guard()
+        on_upload_attempt = _UPLOAD_ATTEMPT_CALLBACK.get()
+        if on_upload_attempt is not None:
+            on_upload_attempt()
         result = self.client.upload({'id': int(match.group(1))}, query['name'][0], data, size,
                                     content_type or 'application/octet-stream')
         self.guard()

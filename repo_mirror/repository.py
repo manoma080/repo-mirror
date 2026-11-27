@@ -37,6 +37,10 @@ class _IdentityGuardedDestination:
         self._destination = destination
         self._check = check
 
+    @property
+    def emits_attempt_callback(self):
+        return getattr(self._destination, "emits_attempt_callback", False) is True
+
     def __getattr__(self, name):
         return getattr(self._destination, name)
 
@@ -69,12 +73,7 @@ def draft_identity_signature(secret, source, tag, target, release_id):
 def upload_with_reconciliation(dst, upload_url, data, content_type, assets_url, name, *, on_attempt=None):
     """Reconcile ambiguous responses before replay; never remove remote assets."""
     position = data.tell()
-    raw_dst = dst._destination if isinstance(dst, _IdentityGuardedDestination) else dst
-    uses_github_api = (
-        isinstance(raw_dst, GitHubAPI)
-        and "upload" not in vars(raw_dst)
-        and type(raw_dst).upload is GitHubAPI.upload
-    )
+    emits_callback = getattr(dst, "emits_attempt_callback", False) is True
     for attempt in range(4):
         data.seek(position)
         notified = False
@@ -89,15 +88,19 @@ def upload_with_reconciliation(dst, upload_url, data, content_type, assets_url, 
                     on_attempt()
 
         try:
-            if uses_github_api:
+            if emits_callback:
                 callback_token = _UPLOAD_ATTEMPT_CALLBACK.set(notify_attempt)
                 try:
                     dst.upload(upload_url, data, content_type)
                 finally:
                     _UPLOAD_ATTEMPT_CALLBACK.reset(callback_token)
             else:
+                target = dst
+                while isinstance(target, _IdentityGuardedDestination):
+                    target._check()
+                    target = target._destination
                 notify_attempt()
-                dst.upload(upload_url, data, content_type)
+                target.upload(upload_url, data, content_type)
             return
         except Exception as exc:
             conflict = isinstance(exc, HTTPError) and exc.code == 422
