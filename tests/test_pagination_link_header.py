@@ -102,25 +102,27 @@ class LinkHeaderPaginationTests(unittest.TestCase):
                 self.assertEqual(len(recorded), 1)
 
     def test_uses_rel_next_url_verbatim(self):
-        cursor_url = f"{self.BASE_URL}?after=opaque_cursor_99&per_page=100&custom=1"
+        base_url = f"{self.BASE_URL}?type=all"
+        next_url = f"{self.BASE_URL}?page=2&per_page=100&type=all"
         recorded = []
         api = API()
         fixture = [
-            ([{"id": 1}], {"Link": f'<{cursor_url}>; rel="next"'}),
-            ([{"id": 2}], {"Link": f'<{self.BASE_URL}?page=1>; rel="prev"'}),
+            ([{"id": 1}], {"Link": f'<{next_url}>; rel="next"'}),
+            ([{"id": 2}], {"Link": f'<{base_url}&page=1>; rel="prev"'}),
         ]
         with patch.object(api.opener, "open", side_effect=_make_opener(fixture, recorded)):
-            items = api.pages(self.BASE_URL)
+            items = api.pages(base_url)
         self.assertEqual(items, [{"id": 1}, {"id": 2}])
-        self.assertEqual(recorded, [f"{self.BASE_URL}?per_page=100&limit=100&page=1", cursor_url])
+        self.assertEqual(recorded, [f"{base_url}&per_page=100&limit=100&page=1", next_url])
 
     def test_parses_commas_in_urls_quoted_params_and_multiple_link_headers(self):
-        url_with_comma = f"{self.BASE_URL}?filter=a,b&cursor=xyz"
+        base_url = f"{self.BASE_URL}?filter=a,b"
+        url_with_comma = f"{self.BASE_URL}?filter=a,b&page=2"
         msg1 = http.client.HTTPMessage()
         msg1.add_header("Link", f'<{self.BASE_URL}?a=1>; title="first, item; x"; rel="prev"')
         msg1.add_header("Link", f'<{url_with_comma}>; title="next, page; y"; rel="next"')
         msg2 = http.client.HTTPMessage()
-        msg2.add_header("Link", f'<{self.BASE_URL}?page=1>; rel="prev"')
+        msg2.add_header("Link", f'<{base_url}&page=1>; rel="prev"')
 
         recorded = []
         api = API()
@@ -129,9 +131,9 @@ class LinkHeaderPaginationTests(unittest.TestCase):
             ([{"id": 2}], msg2),
         ]
         with patch.object(api.opener, "open", side_effect=_make_opener(fixture, recorded)):
-            items = api.pages(self.BASE_URL)
+            items = api.pages(base_url)
         self.assertEqual(items, [{"id": 1}, {"id": 2}])
-        self.assertEqual(recorded, [f"{self.BASE_URL}?per_page=100&limit=100&page=1", url_with_comma])
+        self.assertEqual(recorded, [f"{base_url}&per_page=100&limit=100&page=1", url_with_comma])
 
     def test_malformed_or_unrelated_link_headers_do_not_loop_or_truncate(self):
         cases = [
@@ -219,6 +221,84 @@ class LinkHeaderPaginationTests(unittest.TestCase):
                     items = api.pages(base_url)
                 self.assertEqual(items, [{"id": 1}, {"id": 2}])
                 self.assertEqual(len(recorded), expected_requests)
+
+    def test_rejects_unsafe_or_off_path_next_links(self):
+        vectors = (
+            ("relative_dotdot_user_repos", "../../../../user/repos", lambda: API("secret-dest-tok")),
+            ("relative_dotdot_user_emails", "../../../../user/emails", lambda: SourceAPI("secret-src-tok")),
+            ("root_relative_other_repo", "/repos/victim/private-repo/releases", lambda: API("secret-dest-tok")),
+            ("same_origin_other_endpoint", "https://api.github.com/user/installations", lambda: API("secret-dest-tok")),
+            ("path_params_smuggling", "/repos/octocat/demo/releases;x=1?page=2", lambda: API("secret-dest-tok")),
+            ("trailing_slash_drift", f"{self.BASE_URL}/?page=2", lambda: API("secret-dest-tok")),
+            ("cross_origin", "https://evil.example/repos/octocat/demo/releases?page=2", lambda: API("secret-dest-tok")),
+            ("protocol_relative", "//evil.example/repos/octocat/demo/releases?page=2", lambda: API("secret-dest-tok")),
+            ("file_scheme", "file:///etc/passwd", lambda: API("secret-dest-tok")),
+            ("http_scheme", "http://api.github.com/repos/octocat/demo/releases?page=2", lambda: API("secret-dest-tok")),
+            ("userinfo", "https://user:pass@api.github.com/repos/octocat/demo/releases?page=2", lambda: API("secret-dest-tok")),
+            ("port_change", "https://api.github.com:8443/repos/octocat/demo/releases?page=2", lambda: API("secret-dest-tok")),
+            ("fragment", f"{self.BASE_URL}?page=2#frag", lambda: API("secret-dest-tok")),
+        )
+        for label, next_link, api_factory in vectors:
+            with self.subTest(label=label):
+                recorded = []
+                api = api_factory()
+                fixture = [
+                    ([{"id": 1}], {"Link": f'<{next_link}>; rel="next"'}),
+                    ([{"id": 99}], {}),
+                ]
+                with (
+                    patch.object(api.opener, "open", side_effect=_make_opener(fixture, recorded)),
+                    self.assertRaises(ValueError),
+                ):
+                    api.pages(self.BASE_URL)
+                self.assertEqual(len(recorded), 1)
+
+    def test_rejects_query_parameter_drift_in_next_links(self):
+        cases = (
+            ("per_page_drift", self.BASE_URL, f"{self.BASE_URL}?page=2&per_page=500"),
+            ("limit_drift", self.BASE_URL, f"{self.BASE_URL}?page=2&limit=500"),
+            ("added_sort_param", self.BASE_URL, f"{self.BASE_URL}?page=2&sort=updated"),
+            ("added_cursor_param", self.BASE_URL, f"{self.BASE_URL}?page=2&after=opaque"),
+            ("dropped_caller_param", f"{self.BASE_URL}?type=all", f"{self.BASE_URL}?page=2"),
+            ("mutated_caller_param", f"{self.BASE_URL}?type=all", f"{self.BASE_URL}?type=private&page=2"),
+            ("missing_page_param", self.BASE_URL, f"{self.BASE_URL}?per_page=100"),
+            ("page_zero", self.BASE_URL, f"{self.BASE_URL}?page=0"),
+            ("page_non_integer", self.BASE_URL, f"{self.BASE_URL}?page=abc"),
+        )
+        for label, base_url, next_link in cases:
+            with self.subTest(label=label):
+                recorded = []
+                api = API("secret-dest-tok")
+                fixture = [
+                    ([{"id": 1}], {"Link": f'<{next_link}>; rel="next"'}),
+                    ([{"id": 99}], {}),
+                ]
+                with (
+                    patch.object(api.opener, "open", side_effect=_make_opener(fixture, recorded)),
+                    self.assertRaises(ValueError),
+                ):
+                    api.pages(base_url)
+                self.assertEqual(len(recorded), 1)
+
+    def test_allows_same_path_with_valid_pagination_and_caller_params(self):
+        cases = (
+            ("page_only", self.BASE_URL, f"{self.BASE_URL}?page=2"),
+            ("page_and_per_page", self.BASE_URL, f"{self.BASE_URL}?per_page=100&page=2"),
+            ("page_and_limit", self.BASE_URL, f"{self.BASE_URL}?limit=100&page=2"),
+            ("reordered_caller_param", f"{self.BASE_URL}?type=all", f"{self.BASE_URL}?page=2&per_page=100&type=all"),
+        )
+        for label, base_url, next_link in cases:
+            with self.subTest(label=label):
+                recorded = []
+                api = API("secret-dest-tok")
+                fixture = [
+                    ([{"id": 1}], {"Link": f'<{next_link}>; rel="next"'}),
+                    ([{"id": 2}], {"Link": f'<{base_url}>; rel="prev"'}),
+                ]
+                with patch.object(api.opener, "open", side_effect=_make_opener(fixture, recorded)):
+                    items = api.pages(base_url)
+                self.assertEqual(items, [{"id": 1}, {"id": 2}])
+                self.assertEqual(len(recorded), 2)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urljoin, urlparse, urlsplit
+from urllib.parse import parse_qsl, quote, urljoin, urlparse, urlsplit
 from urllib.request import HTTPErrorProcessor, HTTPRedirectHandler, Request, build_opener
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, MAX_ASSET_SIZE, NAME
@@ -636,6 +636,51 @@ def _parse_link_header(header_value):
     return next_url, frozenset(all_rels)
 
 
+_PAGINATION_COMPAT_PARAMS = frozenset(("per_page", "limit"))
+_PAGINATION_PARAMS = frozenset(("page", "per_page", "limit"))
+
+
+def _query_param_map(query):
+    grouped = {}
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        grouped.setdefault(key, []).append(value)
+    return {key: sorted(values) for key, values in grouped.items()}
+
+
+def _validate_pagination_link(base_url, resolved_url):
+    """Ensure a resolved rel="next" URL stays on the same origin, exact path, and query scope."""
+    if https_origin(resolved_url) != https_origin(base_url):
+        raise ValueError("pagination link outside configured origin")
+    base_parts = urlsplit(base_url)
+    resolved_parts = urlsplit(resolved_url)
+    if resolved_parts.path != base_parts.path:
+        raise ValueError("pagination link outside configured origin")
+
+    base_params = _query_param_map(base_parts.query)
+    resolved_params = _query_param_map(resolved_parts.query)
+
+    base_non_pagination = {k: v for k, v in base_params.items() if k not in _PAGINATION_PARAMS}
+    resolved_non_pagination = {k: v for k, v in resolved_params.items() if k not in _PAGINATION_PARAMS}
+    if resolved_non_pagination != base_non_pagination:
+        raise ValueError("pagination link outside configured origin")
+
+    for param in _PAGINATION_COMPAT_PARAMS:
+        if param in resolved_params:
+            expected = base_params.get(param, ["100"])
+            if resolved_params[param] != expected:
+                raise ValueError("pagination link outside configured origin")
+
+    page_values = resolved_params.get("page")
+    if (
+        not page_values
+        or len(page_values) != 1
+        or not page_values[0].isascii()
+        or not page_values[0].isdigit()
+        or int(page_values[0]) < 1
+    ):
+        raise ValueError("pagination link outside configured origin")
+
+
 class API:
     """Small HTTP client for one GitHub or Forgejo API (JSON requests, retries, safe logging)."""
 
@@ -789,8 +834,7 @@ class API:
             next_link, rels = _parse_link_header(link_header)
             if next_link is not None:
                 resolved = urljoin(request_url, next_link)
-                if https_origin(resolved) != https_origin(url):
-                    raise ValueError("pagination link outside configured origin")
+                _validate_pagination_link(url, resolved)
                 next_url = resolved
                 following_links = True
             else:
