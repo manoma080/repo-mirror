@@ -131,6 +131,8 @@ SAFE_ERROR_MESSAGES = frozenset(
         "already rate limited by the source or destination host; the 60 s wait limit is exhausted",
         "pagination response is not an array",
         "pagination exceeded safety limit",
+        "pagination link outside configured origin",
+        "pagination cycle detected",
         "refusing unsafe destination asset URL",
         "unsafe asset URL",
         "asset address is not public",
