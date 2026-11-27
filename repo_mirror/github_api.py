@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlsplit
 from urllib.request import HTTPErrorProcessor, HTTPRedirectHandler, Request, build_opener
 
 from repo_mirror.constants import CHUNK_SIZE, GITHUB, MAX_ASSET_SIZE, NAME
@@ -26,6 +26,179 @@ from repo_mirror.logging_utils import timed, timed_call
 _cooldown_lock = threading.Lock()
 _cooldowns = {}
 _MAX_RATE_WAIT = 60
+
+_KNOWN_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
+
+
+def _is_loopback_host(host):
+    # Deliberately exclude loopback traffic (127.0.0.0/8, ::1, localhost,
+    # *.localhost per RFC 6761) regardless of whether the caller passes a bare
+    # host, host:port, userinfo@host:port, or full URL: the local Forgejo
+    # runner is not rate-limited and would pollute the metric. Pure and cheap
+    # (string/IP parsing only — no DNS or network lookups).
+    if not isinstance(host, str):
+        return False
+    raw = host.strip()
+    if not raw:
+        return False
+
+    candidate = raw
+    if "://" in raw:
+        try:
+            extracted = urlsplit(raw).hostname
+        except ValueError:
+            return False
+        if not extracted:
+            return False
+        candidate = extracted
+    else:
+        # Handle bare IPv6 literals (e.g. "::1") before authority parsing, since
+        # unbracketed colons are ambiguous with a host:port separator.
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            try:
+                extracted = urlsplit("//" + raw).hostname
+            except ValueError:
+                return False
+            if not extracted:
+                return False
+            candidate = extracted
+        else:
+            return ip.is_loopback or (
+                isinstance(ip, ipaddress.IPv6Address)
+                and ip.ipv4_mapped is not None
+                and ip.ipv4_mapped.is_loopback
+            )
+
+    candidate = candidate.strip().lower().rstrip(".")
+    if not candidate:
+        return False
+    if candidate == "localhost" or candidate.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    return ip.is_loopback or (
+        isinstance(ip, ipaddress.IPv6Address)
+        and ip.ipv4_mapped is not None
+        and ip.ipv4_mapped.is_loopback
+    )
+
+
+def _host_bucket(host):
+    if isinstance(host, str):
+        lowered = host.strip().lower()
+        if lowered == "api.github.com":
+            return "github"
+        if lowered == "uploads.github.com":
+            return "uploads"
+    return "other"
+
+
+class APICallCounter:
+    """Thread-safe counter for outbound HTTP request attempts.
+
+    Counts are keyed by ``(bucket, role, operation, method)`` where ``bucket``
+    is one of ``{"github", "uploads", "other"}`` (computed at record time so
+    the key space is bounded by a small constant regardless of distinct
+    hostnames). Loopback hosts (``127.0.0.1``, ``::1``, ``localhost``) are
+    excluded because the local Forgejo runner is not rate-limited.
+
+    In ``format_summary()``, ``total == github + uploads + other``. The
+    ``graphql`` field is an overlapping subset counting calls whose operation
+    is ``"graphql"`` (currently no callers; reserved for future GraphQL
+    queries), so callers must not sum ``github + uploads + other + graphql``.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = {}
+        self._emitted = False
+
+    def record(self, host, role, operation, method):
+        if _is_loopback_host(host):
+            return
+        bucket = _host_bucket(host)
+        normalized_role = role if role in ("source", "destination") else "unknown"
+        normalized_operation = operation if operation in ("API", "asset", "asset-hop", "graphql") else "API"
+        upper_method = method.upper() if isinstance(method, str) else ""
+        normalized_method = upper_method if upper_method in _KNOWN_METHODS else "REQUEST"
+        key = (bucket, normalized_role, normalized_operation, normalized_method)
+        with self._lock:
+            self._counts[key] = self._counts.get(key, 0) + 1
+
+    def reset(self):
+        with self._lock:
+            self._counts.clear()
+            self._emitted = False
+
+    def mark_emitted(self):
+        with self._lock:
+            if self._emitted:
+                return False
+            self._emitted = True
+            return True
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._counts)
+
+    def format_summary(self):
+        counts = self.snapshot()
+        total = sum(counts.values())
+        github = 0
+        uploads = 0
+        other = 0
+        graphql = 0
+        by_role = {}
+        by_operation = {}
+        for (bucket, role, operation, method), count in counts.items():
+            if bucket == "github":
+                github += count
+            elif bucket == "uploads":
+                uploads += count
+            else:
+                other += count
+            if operation == "graphql":
+                graphql += count
+            by_role[role] = by_role.get(role, 0) + count
+            op_key = f"{operation.lower().replace('-', '_')}_{method.lower()}"
+            by_operation[op_key] = by_operation.get(op_key, 0) + count
+        role_part = ",".join(f"{k}:{v}" for k, v in sorted(by_role.items())) if by_role else "none"
+        op_part = ",".join(f"{k}:{v}" for k, v in sorted(by_operation.items())) if by_operation else "none"
+        return (
+            f"api_calls total={total} github={github} uploads={uploads} "
+            f"other={other} graphql={graphql} by_role={role_part} by_operation={op_part}"
+        )
+
+
+_api_call_counter = APICallCounter()
+
+
+def record_api_call(host, role, operation, method):
+    _api_call_counter.record(host, role, operation, method)
+
+
+def reset_api_call_metrics():
+    _api_call_counter.reset()
+
+
+def api_call_metrics_snapshot():
+    return _api_call_counter.snapshot()
+
+
+def format_api_call_summary():
+    return _api_call_counter.format_summary()
+
+
+def emit_api_call_summary(stream=None):
+    """Print the api_calls summary line at most once since the last reset."""
+    if not _api_call_counter.mark_emitted():
+        return False
+    print(format_api_call_summary(), file=sys.stderr if stream is None else stream, flush=True)
+    return True
 
 
 def _wait_for_cooldown(host, budget=None):
@@ -147,13 +320,27 @@ class UploadErrorProcessor(HTTPErrorProcessor):
 class SafeRedirect(HTTPRedirectHandler):
     """HTTP redirect handler that re-checks each redirect target before following it."""
 
+    def https_request(self, request):
+        if not getattr(request, "_mirror_metrics_counted", False):
+            role, operation = getattr(request, "_mirror_metrics", ("source", "asset"))
+            setattr(request, "_mirror_metrics", (role, operation))
+            setattr(request, "_mirror_metrics_counted", True)
+            record_api_call(urlparse(request.full_url).hostname, role, operation, request.get_method())
+        return request
+
+    http_request = https_request
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urlparse(newurl)
         if target.scheme != "https" or target.username or target.password:
             raise ValueError("unsafe redirect")
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected and urlparse(req.full_url).netloc.lower() != target.netloc.lower():
-            redirected.remove_header("Authorization")
+        if redirected is not None:
+            role, operation = getattr(req, "_mirror_metrics", ("source", "asset"))
+            next_operation = "asset-hop" if operation == "asset" else operation
+            setattr(redirected, "_mirror_metrics", (role, next_operation))
+            if urlparse(req.full_url).netloc.lower() != target.netloc.lower():
+                redirected.remove_header("Authorization")
         return redirected
 
 
@@ -182,7 +369,7 @@ class OriginRedirect(SafeRedirect):
 class AppTokenProvider:
     """Creates and caches short-lived GitHub App installation tokens."""
 
-    def __init__(self, app_id, private_key, owner, account_type="personal"):
+    def __init__(self, app_id, private_key, owner, account_type="personal", role="destination"):
         if (
             not app_id.isdigit()
             or not private_key
@@ -197,6 +384,7 @@ class AppTokenProvider:
             owner,
             account_type,
         )
+        self.role = role if role in ("source", "destination") else "destination"
         self.token, self.expires = None, 0
         self._lock = threading.RLock()
         self._verified = None
@@ -283,6 +471,9 @@ class AppTokenProvider:
                     },
                 )
                 try:
+                    setattr(req, "_mirror_metrics", (self.role, "API"))
+                    setattr(req, "_mirror_metrics_counted", True)
+                    record_api_call(host, self.role, "API", method)
                     with opener.open(req, timeout=60) as response:
                         _publish_exhausted_response(host, response)
                         return json.load(response)
@@ -367,6 +558,9 @@ class API:
                     if upload:
                         setattr(request, "_original_upload", True)
                     _wait_for_cooldown(parsed.hostname, budget)
+                    setattr(request, "_mirror_metrics", (self.role, "API"))
+                    setattr(request, "_mirror_metrics_counted", True)
+                    record_api_call(parsed.hostname, self.role, "API", method)
                     with self.opener.open(request, timeout=60) as response:
                         _publish_exhausted_response(parsed.hostname, response)
                         return response.read()
@@ -493,6 +687,9 @@ class API:
                 },
             )
             try:
+                setattr(request, "_mirror_metrics", (self.role, "asset"))
+                setattr(request, "_mirror_metrics_counted", True)
+                record_api_call(parsed.hostname, self.role, "asset", "GET")
                 with self.opener.open(request, timeout=60) as response:
                     copy_asset(response, output)
             except HTTPError as exc:
@@ -515,6 +712,7 @@ class API:
                 trusted_origin = getattr(self, 'trusted_asset_origin', None)
                 if trusted_origin is not None and (parsed.hostname, port) != trusted_origin:
                     raise ValueError("asset redirect outside configured origin")
+                record_api_call(parsed.hostname, self.role, "asset-hop", "GET")
                 addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
                 ips = [ipaddress.ip_address(a[4][0]) for a in addresses]
                 if not ips or (trusted_origin is None and any(not ip.is_global or ip.is_multicast or ip.is_reserved for ip in ips)):

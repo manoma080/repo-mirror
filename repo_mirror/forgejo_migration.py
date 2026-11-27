@@ -467,7 +467,13 @@ def build_migration(args, secret):
             if forgejo_repo
             else owner
         )
-        token = AppTokenProvider(args.app_id, key, app_owner, getattr(args, 'config_account_type', 'personal'))
+        token = AppTokenProvider(
+            args.app_id,
+            key,
+            app_owner,
+            getattr(args, 'config_account_type', 'personal'),
+            role='source' if forgejo_repo else 'destination',
+        )
     else:
         token = os.environ.get('GITHUB_TOKEN')
         if (token and ('\n' in token or '\r' in token)) or (not token and not forgejo_repo):

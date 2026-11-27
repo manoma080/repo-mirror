@@ -11,6 +11,8 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urljoin, urlsplit, parse_qs
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from repo_mirror.github_api import record_api_call
+
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -49,6 +51,7 @@ def fetch_group_projects(origin, group_path, token=None, *, handlers=()):
     for _ in range(10001):
         if _origin(url) != expected:
             raise ValueError('cross-origin API request')
+        record_api_call(expected[1], "source", "API", "GET")
         with opener.open(Request(url, headers=_api_headers(token)), timeout=30) as response:
             if _origin(response.geturl()) != expected:
                 raise ValueError('cross-origin API response')
@@ -106,6 +109,7 @@ class GitLabSourceAdapter:
             if _origin(url) != self.origin:
                 raise ValueError('cross-origin API request')
             try:
+                record_api_call(self.origin[1], "source", "API", "GET")
                 with self.opener.open(Request(url, headers=headers), timeout=30) as response:
                     if _origin(response.geturl()) != self.origin:
                         raise ValueError('cross-origin API response')

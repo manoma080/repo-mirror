@@ -14,7 +14,12 @@ from urllib.parse import quote
 from repo_mirror.adhoc import classify_source_url, one_time_sources, _matches_owner
 from repo_mirror.config_named import normalize_config
 from repo_mirror.constants import GITHUB, NAME, REPOSITORY_TIME
-from repo_mirror.github_api import API, AppTokenProvider, SourceAPI
+from repo_mirror.github_api import (
+    API,
+    AppTokenProvider,
+    SourceAPI,
+    emit_api_call_summary,
+)
 from repo_mirror.host_limits import CONFIG_KEY, HostAdmission, HostLimits, source_host, take_admissible
 from repo_mirror.journal import FailureJournal, ReleaseRecoveryError
 from repo_mirror.logging_utils import error_detail, safe_label, timed, timed_main
@@ -462,6 +467,7 @@ def main(argv=None):
         file=sys.stderr,
         flush=True,
     )
+    emit_api_call_summary()
     if inactive:
         inactive.sort()
         print(

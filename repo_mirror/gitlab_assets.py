@@ -87,6 +87,8 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urljoin
 
+from repo_mirror.github_api import record_api_call
+
 
 class AssetError(Exception):
     """Download failed; messages deliberately contain no remote URL."""
@@ -111,6 +113,8 @@ def _open(url, timeout, headers=None):
     parts = validate_url(url, allow_query=True)
     host = parts.hostname
     port = {'https': 443, 'http': 80, 'ftp': 21}[parts.scheme]
+    if parts.scheme in ('http', 'https', 'ftp'):
+        record_api_call(host, "source", "asset", "GET")
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     if not addresses:
         raise AssetError("DNS returned no addresses")
